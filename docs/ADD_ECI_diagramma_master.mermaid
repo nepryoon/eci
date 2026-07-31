@@ -1,0 +1,92 @@
+flowchart TB
+  %% ============================================================
+  %% ADD Enterprise Code Intelligence - Vista d'insieme (Moduli 1-4)
+  %% Sintesi: architettura end-to-end con decisioni vincolanti
+  %% ============================================================
+
+  CLIENT([Client: Web UI / IDE plugin / CI])
+
+  subgraph EDGE["Edge - sicurezza perimetrale (Modulo 3)"]
+    IDP["IdP OIDC/OAuth2<br/>JWT + SecurityContext<br/>tenant_id, allowed_repos, acl_groups, trace_id"]
+    PDP["PDP: OPA / SpiceDB<br/>ABAC / ReBAC"]
+    GW["API Gateway Envoy<br/>REST+SSE -> gRPC transcoding"]
+  end
+
+  subgraph QP["Piano di query - gRPC sincrono, mTLS STRICT, deadline budget ~30 s (Moduli 2-3)"]
+    ORCH["Query Orchestrator + Intent Classifier<br/>Python - LangGraph + PydanticAI<br/>ReAct / plan-then-react, budget 15-30 passi"]
+    CACHE["Semantic Cache (Go)<br/>chiave: ast_hash + logic_fingerprint + acl_scope<br/>~40% short-circuit"]
+    RETR["Retrieval & Reasoning Engine (Go)<br/>seed Qdrant -> ancoraggio Neo4j -><br/>reverse reachability tipizzata bounded -> RRF k=60"]
+    RERANK["Reranker bge-reranker-v2-m3 via TEI<br/>L40S MIG - final_score = rerank + beta*proximity"]
+    EMB["Embedding jina-code-embeddings-1.5b<br/>1536-dim - L40S MIG"]
+    LLMGW["LLM Gateway (Go)<br/>routing multi-modello"]
+    VLLM["vLLM - Qwen3-Coder-30B-A3B FP8<br/>H100 80GB x4-10<br/>KEDA: num_requests_waiting"]
+    SUMM["Summarization RAPTOR (Python)<br/>method->class->module->repo"]
+    VER["Deterministic Verification (Python)<br/>claim/symbol/relation/citation check + re-parse Tree-sitter<br/>esiti: approvata / corretta / rigenerata"]
+  end
+
+  subgraph IP["Piano di ingestion - event-driven asincrono (Modulo 1)"]
+    ING["Ingestion & AST Parsing (Rust) - HPA CPU<br/>Tree-sitter + stack-graphs/SCIP<br/>CPG statement-level - chunking cAST - Merkle SHA-256"]
+    DBZ["Debezium / Kafka Connect<br/>CDC dal WAL + EventRouter SMT"]
+    KAFKA[("Kafka KRaft via Strimzi<br/>partition by aggregate_id - DLQ<br/>at-least-once")]
+    GS["graph-sink (Go)<br/>MERGE idempotente - KEDA lag"]
+    VS["vector-sink (Go)<br/>upsert idempotente - KEDA lag"]
+    SS["search-sink (Go)<br/>index per doc-id - KEDA lag"]
+    GDS["GDS batch (read replica dedicata)<br/>PPR seedato + betweenness + Louvain/Leiden<br/>-> impact_score (proiezioni per-ACL)"]
+  end
+
+  subgraph DP["Piano dati - source of truth + viste materializzate ricostruibili (Modulo 1)"]
+    PG[("PostgreSQL 17 - SOURCE OF TRUTH<br/>CodeNode/CodeRelation + outbox + processed_events")]
+    NEO[("Neo4j 5.x Enterprise<br/>CPG + GDS - RBAC nativo smaller graph")]
+    QDR[("Qdrant >=1.11<br/>payload multitenancy is_tenant<br/>scalar quantization")]
+    OS[("OpenSearch / Zoekt<br/>DLS / FLS")]
+    OBJ[("Object storage S3/MinIO<br/>sorgenti + summary + artifact")]
+  end
+
+  subgraph OBS["Observability & valutazione continua (Modulo 4)"]
+    OTEL["OTel Collector<br/>W3C trace context + span links Kafka + gen_ai.*"]
+    STACK["Tempo - Prometheus/Mimir - Loki - Grafana"]
+    LLMOBS["Arize Phoenix (eval offline)<br/>Langfuse self-hosted (live)"]
+    RAGAS["Ragas su campione 5-10%<br/>+ tassi deterministici: symbol-hallucination,<br/>relation-nonexistent, stale-citation"]
+  end
+
+  %% ---------- Flusso di query ----------
+  CLIENT -->|"login"| IDP
+  CLIENT -->|"REST + SSE (JWT)"| GW
+  GW -->|"gRPC + SecurityContext"| ORCH
+  ORCH <-->|"authz check"| PDP
+  ORCH --> CACHE
+  ORCH --> RETR
+  RETR --> QDR
+  RETR --> NEO
+  RETR --> OS
+  RETR --> RERANK
+  ORCH --> EMB
+  ORCH --> LLMGW
+  LLMGW --> VLLM
+  ORCH --> SUMM
+  SUMM --> LLMGW
+  ORCH --> VER
+  VER --> NEO
+  VER -->|"rigenerazione bounded 2-3"| ORCH
+
+  %% ---------- Flusso di ingestion ----------
+  CLIENT -.->|"push commit / webhook CI"| ING
+  ING -->|"tx ACID: entita' + outbox"| PG
+  ING --> OBJ
+  ING --> EMB
+  PG -->|"WAL"| DBZ
+  DBZ --> KAFKA
+  KAFKA --> GS
+  KAFKA --> VS
+  KAFKA --> SS
+  GS --> NEO
+  VS --> QDR
+  SS --> OS
+  GDS --> NEO
+
+  %% ---------- Observability trasversale ----------
+  QP -.->|"OTLP"| OTEL
+  IP -.->|"OTLP + span links"| OTEL
+  OTEL --> STACK
+  OTEL --> LLMOBS
+  RAGAS -.-> STACK
