@@ -20,16 +20,18 @@ tasks:
     desc: go vet / cargo clippy / ruff check su ogni modulo popolato in services/
     cmds:
       - bash scripts/task-lint.sh
+      - cd tools/migrate-neo4j && go vet ./...
 
   test:
     desc: go test / cargo test / pytest su ogni modulo, più i test di scripts/guard.sh
     cmds:
       - bash scripts/task-test.sh
+      - cd tools/migrate-neo4j && go test ./...
 
   test:integration:
     desc: Test di integrazione con testcontainers (richiede docker)
     cmds:
-      - echo "not implemented yet — see T0.7"
+      - cd tools/migrate-neo4j && go test -tags=integration ./...
 
   proto:gen:
     desc: Codegen Go (buf generate) + Python (grpc_tools.protoc) da retrieval.proto
@@ -66,7 +68,7 @@ tasks:
   db:neo4j:migrate:
     desc: Applica le migration Cypher su Neo4j
     cmds:
-      - echo "not implemented yet — see T0.4"
+      - cd tools/migrate-neo4j && go run . ../../contracts/cypher/schema.cypher
 
   guard:
     desc: Fallisce se contracts/ o docs/add/ sono toccati senza un ADR nello stesso commit

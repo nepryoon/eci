@@ -1,5 +1,5 @@
 # SPEC-004 — Migration Neo4j idempotente da D3
-Stato: draft
+Stato: implemented
 Task-tree: T0.4 · Servizio: contracts/cypher + tools/migrate-neo4j · ADD: Modulo 1 — Deliverable D3
 Contratti: contracts/cypher/schema.cypher (già committato, Step 2 — NON modificarlo in questo task)
 
@@ -52,8 +52,73 @@ Il DDL deve restare fedele 1:1 a D3. Nota pratica di ambiente (da annotare nel R
 Il runner stampa un riepilogo finale: N statement eseguiti, M già esistenti, 0 errori (o l'elenco degli errori). Non serve integrazione OTel in questo task (è un comando one-shot, non un servizio long-running).
 
 ## 9. Criteri di accettazione
-- [ ] `schema.cypher` contiene solo DDL; `examples.cypher` contiene i MERGE spostati verbatim con l'intestazione di reference.
-- [ ] `task db:neo4j:migrate` verde su Neo4j Community vuoto (scenario 1, 3, 4).
-- [ ] Riesecuzione idempotente verificata (scenario 2).
-- [ ] Test che conferma zero nodi applicativi post-migrazione (scenario 5).
-- [ ] README `deploy/compose` annota la nota Community/Enterprise di §6.
+- [x] `schema.cypher` contiene solo DDL; `examples.cypher` contiene i MERGE spostati verbatim con l'intestazione di reference.
+- [ ] `task db:neo4j:migrate` verde su Neo4j Community vuoto (scenario 1, 3, 4) — **non verificato in questa sessione**, nessun daemon Docker disponibile nella sandbox (vedi §10.3). Runner e integration test sono scritti e compilano (`go build`/`go vet -tags=integration`); vanno eseguiti contro un Neo4j reale prima del merge.
+- [ ] Riesecuzione idempotente verificata (scenario 2) — coperta da `TestRunAllCountsCreatedAndAlreadyExists`/`TestMigrationAgainstRealNeo4j` a livello di logica (`runAll`, classificazione `Counters()`), ma non end-to-end contro un DB reale (stesso motivo di cui sopra).
+- [ ] Test che conferma zero nodi applicativi post-migrazione (scenario 5) — `assertNodeCountZero` scritto in `runner_integration_test.go`, non eseguito (nessun Docker).
+- [ ] README `deploy/compose` annota la nota Community/Enterprise di §6 — **non fatto**, `deploy/` è fuori dal perimetro di file assegnato per questa sessione (solo `contracts/cypher`, `tools/migrate-neo4j`, `Taskfile.yml`, `tests/`).
+
+## 10. Deviazioni rispetto alla SPEC
+
+1. **Header del contratto vs §2**: l'intestazione del file SPEC dice
+   "`contracts/cypher/schema.cypher` (già committato ... NON modificarlo in
+   questo task)", ma il §2 istruisce esplicitamente a splittare quel file
+   (fisicamente, non nel contenuto). Ho seguito §2, più specifico, e trattato
+   l'intestazione come boilerplate generico ripreso dal template SPEC.
+
+2. **`task guard` fallisce sullo split di `schema.cypher`**: verificato
+   creando un commit locale temporaneo (poi disfatto con `reset --soft`, mai
+   pushato) — `scripts/guard.sh` vede `contracts/cypher/schema.cypher` come
+   `M` e richiede un ADR in `docs/decisions/` nello stesso commit,
+   indipendentemente dal fatto che il contenuto sia solo redistribuito (non
+   alterato). La SPEC afferma che questo split "non richiede ADR" per la
+   natura puramente strutturale della modifica, ma il guard meccanico non fa
+   questa distinzione. `docs/decisions/` non è tra i path assegnati per
+   questa sessione (`contracts/cypher`, `tools/migrate-neo4j`, `Taskfile.yml`,
+   `tests/`), quindi non ho aggiunto un ADR di mia iniziativa: **prima del
+   commit definitivo serve un ADR breve** (stesso schema di ADR-0001/0002) o
+   un adeguamento di `guard.sh`, a discrezione di chi revisiona.
+
+3. **Nessun Docker disponibile in questa sandbox**: `docker info` risponde ma
+   `docker ps` fallisce (`dial unix /var/run/docker.sock: no such file or
+   directory` — nessun daemon in esecuzione). Di conseguenza:
+   - Il test di integrazione (`runner_integration_test.go`, testcontainers +
+     `neo4j:5-community`) è scritto secondo il test plan §7 (scenari 1-5) ma
+     **non è mai stato eseguito**; è isolato dietro `//go:build integration`
+     così che non impatti `task test` di default. Compila correttamente sia
+     senza tag (`go vet ./...`) sia con `-tags=integration`.
+   - `task db:neo4j:migrate` è stato validato solo contro un endpoint
+     irraggiungibile (`bolt://localhost:19999`), per verificare l'edge case
+     "connessione rifiutata" (§4) — produce un errore esplicito con
+     host/porta/causa, non un timeout silenzioso. Non è stato possibile
+     verificare una migrazione reale (scenari 1-5) né la creazione effettiva
+     di constraint/indici.
+   - `task test:integration` è stato collegato a
+     `go test -tags=integration ./...` in `tools/migrate-neo4j` (era un
+     placeholder `echo "not implemented yet — see T0.7"`): l'ho sostituito
+     solo per la parte che ho effettivamente implementato, senza introdurre
+     script fuori da `Taskfile.yml`.
+
+4. **`ParseExt`-equivalente per il vector index / classificazione errori**:
+   `classifyStatementError` distingue l'errore di creazione del vector index
+   solo euristicamente (statement contiene la stringa `"VECTOR INDEX"`), non
+   tramite il codice di errore Neo4j specifico — la versione minima citata
+   nel messaggio (`>= 5.13`) è una stima ragionevole (introduzione del native
+   vector index in Neo4j 5.x) ma non verificata contro un'istanza reale di
+   quella versione.
+
+5. **Struttura del runner**: la logica di controllo del loop (`runAll`:
+   stop-on-first-error, conteggi Created/AlreadyExists) è isolata dal driver
+   Neo4j dietro un `stepFunc`, per essere unit-testabile senza Docker. `Run()`
+   (la funzione pubblica che apre davvero le sessioni Bolt) resta comunque
+   sottile e coperta solo dal test di integrazione non eseguibile qui — non
+   è una scelta della SPEC, ma necessaria per poter scrivere *qualcosa* di
+   verificabile in questa sandbox oltre al parser.
+
+6. **`tools/migrate-neo4j` è un modulo Go indipendente** (proprio `go.mod`,
+   non dentro `libs/go`), per non dover toccare `libs/go/go.mod`/`go.sum`
+   (fuori dal perimetro assegnato) e per aggiungere `neo4j-go-driver` /
+   `testcontainers-go` solo dove servono. "Riusando `libs/go`" (§2) è stato
+   interpretato come "stesso linguaggio/convenzioni Go del resto del repo",
+   non come dipendenza di import diretta — il runner non ha bisogno di
+   nessun tipo definito in `libs/go/eci/models`.
