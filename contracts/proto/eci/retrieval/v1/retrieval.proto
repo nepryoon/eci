@@ -1,0 +1,253 @@
+// eci/retrieval/v1/retrieval.proto
+// Contratto gRPC tra Query Orchestrator (client) e Retrieval & Reasoning
+// Engine (server). Piano di query sincrono; mTLS STRICT via service mesh;
+// SecurityContext propagato anche nei metadata gRPC dagli interceptor.
+// Versionamento: package versionato (v1); campi additivi only; nessun
+// riuso di tag; campi deprecati marcati reserved.
+
+syntax = "proto3";
+
+package eci.retrieval.v1;
+
+option java_multiple_files = true;
+option java_package = "com.eci.retrieval.v1";
+option go_package = "eci/retrieval/v1;retrievalv1";
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+// Dominio dell'entita' (estensibilita' multi-dominio del Modulo 1).
+enum Domain {
+  DOMAIN_UNSPECIFIED = 0;
+  DOMAIN_CODE = 1;
+  DOMAIN_DOC = 2;
+  DOMAIN_LEGAL = 3;
+  DOMAIN_COMPLIANCE = 4;
+  DOMAIN_CONTRACT = 5;
+}
+
+// Intento della query (dal classificatore di intento).
+enum QueryIntent {
+  QUERY_INTENT_UNSPECIFIED = 0;
+  QUERY_INTENT_STRUCTURAL = 1;   // impact, chiamanti, dipendenze: grafo prevale
+  QUERY_INTENT_CONCEPTUAL = 2;   // ricerca semantica: vettoriale prevale
+  QUERY_INTENT_HYBRID = 3;
+}
+
+// Tipi di arco del CPG (CodeRelation.rel_type).
+enum EdgeType {
+  EDGE_TYPE_UNSPECIFIED = 0;
+  EDGE_TYPE_CALLS = 1;
+  EDGE_TYPE_IMPORTS = 2;
+  EDGE_TYPE_EXTENDS = 3;
+  EDGE_TYPE_IMPLEMENTS = 4;
+  EDGE_TYPE_CONTAINS = 5;
+  EDGE_TYPE_DEPENDS_ON = 6;
+  EDGE_TYPE_REFERENCES = 7;
+  EDGE_TYPE_OVERRIDES = 8;
+  EDGE_TYPE_DERIVED_FROM = 9;
+  EDGE_TYPE_GOVERNED_BY = 10;
+  EDGE_TYPE_CITES = 11;
+}
+
+// Classificazione dell'impatto (Modulo 2, §1.5).
+enum ImpactKind {
+  IMPACT_KIND_UNSPECIFIED = 0;
+  IMPACT_KIND_SYNTACTIC = 1;
+  IMPACT_KIND_BEHAVIORAL = 2;
+  IMPACT_KIND_MODULE_BOUNDARY = 3;
+}
+
+// Direzione di traversata.
+enum TraversalDirection {
+  TRAVERSAL_DIRECTION_UNSPECIFIED = 0;
+  TRAVERSAL_DIRECTION_FORWARD = 1;   // dipendenze in uscita
+  TRAVERSAL_DIRECTION_REVERSE = 2;   // reverse reachability (impact)
+}
+
+// ============================================================
+// MESSAGGI COMUNI
+// ============================================================
+
+// Contesto di sicurezza autenticato (mai costruito dall'LLM).
+// Ridondato nel body oltre che nei metadata per auditability del contratto.
+message SecurityContext {
+  string tenant_id = 1;
+  string user_id = 2;
+  repeated string allowed_repos = 3;
+  repeated string acl_groups = 4;
+  string trace_id = 5;
+}
+
+// Provenance canonica (Modulo 1): repo/path:righe@commit.
+message Provenance {
+  string repo = 1;
+  string path = 2;
+  uint32 start_line = 3;
+  uint32 end_line = 4;
+  string commit_sha = 5;
+}
+
+// Punteggi di ranking di un nodo.
+message NodeScores {
+  double vector_score = 1;      // similarita' Qdrant (se presente)
+  double rerank_score = 2;      // cross-encoder (se applicato)
+  double impact_score = 3;      // GDS: w_ppr*ppr + w_prox*(1/hop) + w_bc*bc
+  double rrf_score = 4;         // fusione RRF k=60
+  double final_score = 5;       // rerank + beta*proximity_boost
+  uint32 hop_distance = 6;
+}
+
+// Nodo recuperato (proiezione di CodeNode).
+message RetrievedNode {
+  string node_id = 1;
+  Domain domain = 2;
+  string node_type = 3;         // Method, Class, Interface, File, ...
+  string name = 4;
+  string signature = 5;
+  string summary = 6;           // summary gerarchico (RAPTOR) se richiesto
+  string source_text = 7;       // sorgente integrale solo per top-k
+  Provenance provenance = 8;
+  NodeScores scores = 9;
+  string ast_hash = 10;
+}
+
+// ============================================================
+// HYBRID SEARCH (unary)
+// ============================================================
+
+message HybridSearchRequest {
+  SecurityContext security_context = 1;
+  string query_text = 2;
+  QueryIntent intent = 3;
+  Domain domain = 4;
+  // Filtri espliciti (sottoinsieme di allowed_repos; il server ricalcola
+  // comunque l'intersezione con il SecurityContext).
+  repeated string repos = 5;
+  uint32 vector_limit = 6;        // default server: 50
+  uint32 graph_limit = 7;         // default server: 200
+  uint32 top_k = 8;               // default server: 25
+  bool include_source_text = 9;   // sorgente integrale per i top-k
+  bool include_summaries = 10;
+}
+
+message HybridSearchResponse {
+  repeated RetrievedNode nodes = 1;
+  // Diagnostica di fusione: quante gambe hanno contribuito.
+  uint32 graph_candidates = 2;
+  uint32 vector_candidates = 3;
+  bool vector_leg_degraded = 4;   // gamba vettoriale fallita/degradata
+}
+
+// ============================================================
+// IMPACT ANALYSIS (server-side streaming)
+// ============================================================
+
+message ImpactAnalysisRequest {
+  SecurityContext security_context = 1;
+  string entry_node_id = 2;       // nodo target (interfaccia X)
+  uint32 max_depth = 3;           // bound K; default server: 4
+  repeated EdgeType edge_types = 4;   // default: CALLS,IMPLEMENTS,EXTENDS,OVERRIDES,DEPENDS_ON,IMPORTS
+  TraversalDirection direction = 5;   // default: REVERSE
+  uint32 fanout_cap_per_hop = 6;      // cap super-nodi; 0 = default server
+  double min_impact_score = 7;        // soglia di pruning
+  bool include_source_text = 8;
+}
+
+// Nodo impattato emesso in streaming man mano che la traversata procede.
+message ImpactedNode {
+  RetrievedNode node = 1;
+  ImpactKind impact_kind = 2;
+  // Catena di archi dal target al nodo (per spiegabilita').
+  repeated EdgeType path_edge_types = 3;
+  uint32 depth = 4;
+}
+
+// Messaggio di avanzamento/completamento dello stream.
+message ImpactProgress {
+  uint32 nodes_emitted = 1;
+  uint32 frontier_size = 2;
+  uint32 current_depth = 3;
+  bool truncated_by_fanout_cap = 4;
+  bool truncated_by_depth = 5;
+}
+
+message ImpactAnalysisEvent {
+  oneof event {
+    ImpactedNode node = 1;
+    ImpactProgress progress = 2;
+  }
+}
+
+// ============================================================
+// LOOKUP / EXPANSION (tool tipizzati dell'agente)
+// ============================================================
+
+message GetNodeRequest {
+  SecurityContext security_context = 1;
+  string node_id = 2;
+  bool include_source_text = 3;
+  bool include_summary = 4;
+}
+
+message GetNodeResponse {
+  RetrievedNode node = 1;
+}
+
+message ExpandNeighborsRequest {
+  SecurityContext security_context = 1;
+  string node_id = 2;
+  repeated EdgeType edge_types = 3;
+  TraversalDirection direction = 4;
+  uint32 depth = 5;               // default server: 1
+  uint32 limit = 6;
+}
+
+message ExpandNeighborsResponse {
+  repeated RetrievedNode neighbors = 1;
+  repeated EdgeType traversed_edge_types = 2;
+}
+
+// ============================================================
+// HEALTH
+// ============================================================
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  enum ServingStatus {
+    SERVING_STATUS_UNSPECIFIED = 0;
+    SERVING_STATUS_SERVING = 1;
+    SERVING_STATUS_NOT_SERVING = 2;
+    SERVING_STATUS_DEGRADED = 3;  // una gamba di retrieval non disponibile
+  }
+  ServingStatus status = 1;
+  bool graph_leg_healthy = 2;
+  bool vector_leg_healthy = 3;
+  bool fulltext_leg_healthy = 4;
+}
+
+// ============================================================
+// SERVICE
+// ============================================================
+
+service RetrievalEngine {
+  // Ricerca ibrida grafo+vettoriale con fusione RRF (k=60). Idempotente:
+  // eleggibile a retry/hedging secondo la policy del canale.
+  rpc HybridSearch(HybridSearchRequest) returns (HybridSearchResponse);
+
+  // Impact analysis con streaming server-side dei nodi impattati.
+  // Idempotente (sola lettura); la deadline propagata copre l'intero stream.
+  rpc ImpactAnalysis(ImpactAnalysisRequest) returns (stream ImpactAnalysisEvent);
+
+  // Lookup puntuale di un CodeNode (tool get_node).
+  rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
+
+  // Espansione tipizzata dei vicini (tool get_callers/get_callees/
+  // expand_dependencies, parametrizzati da edge_types + direction).
+  rpc ExpandNeighbors(ExpandNeighborsRequest) returns (ExpandNeighborsResponse);
+
+  // Liveness/readiness con dettaglio delle gambe di retrieval.
+  rpc Health(HealthCheckRequest) returns (HealthCheckResponse);
+}
