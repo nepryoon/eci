@@ -1,0 +1,145 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eci.enterprise.local/schemas/hybrid-graph.json",
+  "title": "Enterprise Code Intelligence - Agnostic Graph Entities",
+  "type": "object",
+  "definitions": {
+    "domainEnum": {
+      "type": "string",
+      "enum": ["code", "doc", "legal", "compliance", "contract"]
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["repo", "commit_sha", "path", "ingested_at"],
+      "properties": {
+        "repo": { "type": "string" },
+        "commit_sha": { "type": "string", "pattern": "^[a-f0-9]{7,40}$" },
+        "path": { "type": "string" },
+        "start_line": { "type": "integer", "minimum": 0 },
+        "end_line": { "type": "integer", "minimum": 0 },
+        "ingested_at": { "type": "string", "format": "date-time" },
+        "source_system": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "versioning": {
+      "type": "object",
+      "required": ["version", "is_current"],
+      "properties": {
+        "version": { "type": "integer", "minimum": 1 },
+        "is_current": { "type": "boolean" },
+        "valid_from": { "type": "string", "format": "date-time" },
+        "valid_to": { "type": ["string", "null"], "format": "date-time" },
+        "supersedes": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "embeddingRef": {
+      "type": "object",
+      "required": ["vector_id", "model_id", "dim"],
+      "properties": {
+        "vector_id": { "type": "string" },
+        "model_id": { "type": "string" },
+        "dim": { "type": "integer", "minimum": 1 },
+        "logic_fingerprint": { "$ref": "#/definitions/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "codeExtension": {
+      "type": "object",
+      "required": ["node_type"],
+      "properties": {
+        "node_type": {
+          "type": "string",
+          "enum": ["File", "Module", "Package", "Class", "Interface",
+                   "Method", "Function", "Parameter", "Field", "CallSite"]
+        },
+        "language": { "type": "string" },
+        "signature": { "type": "string" },
+        "visibility": { "type": "string", "enum": ["public", "private", "protected", "internal"] },
+        "symbol_id": { "type": "string", "description": "SCIP / stack-graphs symbol id" },
+        "doc_hash": { "$ref": "#/definitions/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "docExtension": {
+      "type": "object",
+      "required": ["node_type"],
+      "properties": {
+        "node_type": { "type": "string", "enum": ["Document", "Section", "Paragraph"] },
+        "title": { "type": "string" },
+        "mime_type": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "legalExtension": {
+      "type": "object",
+      "required": ["node_type"],
+      "properties": {
+        "node_type": { "type": "string", "enum": ["Contract", "Clause", "Policy", "Regulation"] },
+        "jurisdiction": { "type": "string" },
+        "effective_date": { "type": "string", "format": "date" },
+        "obligation_level": { "type": "string", "enum": ["mandatory", "recommended", "prohibited"] }
+      },
+      "additionalProperties": false
+    },
+    "CodeNode": {
+      "type": "object",
+      "required": ["id", "domain", "name", "ast_hash", "provenance", "versioning"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9_.:/#-]+$" },
+        "domain": { "$ref": "#/definitions/domainEnum" },
+        "name": { "type": "string" },
+        "ast_hash": { "$ref": "#/definitions/sha256" },
+        "content_hash": { "$ref": "#/definitions/sha256" },
+        "embedding": { "$ref": "#/definitions/embeddingRef" },
+        "provenance": { "$ref": "#/definitions/provenance" },
+        "versioning": { "$ref": "#/definitions/versioning" },
+        "ext": { "type": "object" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "domain": { "const": "code" } } },
+          "then": { "properties": { "ext": { "$ref": "#/definitions/codeExtension" } } }
+        },
+        {
+          "if": { "properties": { "domain": { "const": "doc" } } },
+          "then": { "properties": { "ext": { "$ref": "#/definitions/docExtension" } } }
+        },
+        {
+          "if": { "properties": { "domain": { "const": "legal" } } },
+          "then": { "properties": { "ext": { "$ref": "#/definitions/legalExtension" } } }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "CodeRelation": {
+      "type": "object",
+      "required": ["id", "rel_type", "from_id", "to_id", "domain"],
+      "properties": {
+        "id": { "type": "string" },
+        "domain": { "$ref": "#/definitions/domainEnum" },
+        "rel_type": {
+          "type": "string",
+          "enum": ["CALLS", "IMPORTS", "EXTENDS", "IMPLEMENTS", "CONTAINS",
+                   "DEPENDS_ON", "REFERENCES", "OVERRIDES",
+                   "DERIVED_FROM", "GOVERNED_BY", "CITES"]
+        },
+        "from_id": { "type": "string" },
+        "to_id": { "type": "string" },
+        "weight": { "type": "number" },
+        "provenance": { "$ref": "#/definitions/provenance" },
+        "versioning": { "$ref": "#/definitions/versioning" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/definitions/CodeNode" },
+    { "$ref": "#/definitions/CodeRelation" }
+  ]
+}
