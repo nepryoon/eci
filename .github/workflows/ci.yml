@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build-lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: rustup component add clippy
+        run: rustup component add clippy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Install go-task
+        run: curl -sL https://taskfile.dev/install.sh | sh -s -- -d -b /usr/local/bin
+
+      - name: task build
+        run: task build
+
+      - name: task lint
+        run: task lint
+
+      - name: task test
+        run: task test
+
+  guard:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install go-task
+        run: curl -sL https://taskfile.dev/install.sh | sh -s -- -d -b /usr/local/bin
+
+      - name: task guard
+        env:
+          BASE_REF: origin/${{ github.event.pull_request.base.ref }}
+        run: task guard

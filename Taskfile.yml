@@ -1,0 +1,67 @@
+version: '3'
+
+tasks:
+  up:
+    desc: Avvia lo stack di sviluppo locale (docker compose)
+    cmds:
+      - echo "not implemented yet — see T0.6"
+
+  down:
+    desc: Ferma lo stack di sviluppo locale (docker compose)
+    cmds:
+      - echo "not implemented yet — see T0.6"
+
+  build:
+    desc: Compila ogni modulo Go/Rust/Python popolato in services/
+    cmds:
+      - bash scripts/task-build.sh
+
+  lint:
+    desc: go vet / cargo clippy / ruff check su ogni modulo popolato in services/
+    cmds:
+      - bash scripts/task-lint.sh
+
+  test:
+    desc: go test / cargo test / pytest su ogni modulo, più i test di scripts/guard.sh
+    cmds:
+      - bash scripts/task-test.sh
+
+  test:integration:
+    desc: Test di integrazione con testcontainers (richiede docker)
+    cmds:
+      - echo "not implemented yet — see T0.7"
+
+  proto:gen:
+    desc: Codegen Go/Python dai contratti proto via buf
+    cmds:
+      - echo "not implemented yet — see T0.2"
+
+  proto:breaking:
+    desc: Buf breaking-change check sui contratti proto
+    cmds:
+      - echo "not implemented yet — see T0.2"
+
+  schema:gen:
+    desc: Codegen Pydantic/Go dai JSON Schema via datamodel-code-generator
+    cmds:
+      - echo "not implemented yet — see T0.3"
+
+  db:migrate:
+    desc: Applica le migration Postgres
+    cmds:
+      - echo "not implemented yet — see T0.5"
+
+  db:migrate:down:
+    desc: Rollback delle migration Postgres
+    cmds:
+      - echo "not implemented yet — see T0.5"
+
+  db:neo4j:migrate:
+    desc: Applica le migration Cypher su Neo4j
+    cmds:
+      - echo "not implemented yet — see T0.4"
+
+  guard:
+    desc: Fallisce se contracts/ o docs/add/ sono toccati senza un ADR nello stesso commit
+    cmds:
+      - bash scripts/guard.sh

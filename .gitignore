@@ -1,2 +1,20 @@
 .env
 .DS_Store
+
+# Go build output (binario compilato con lo stesso nome della sua directory)
+services/*/sink-graph
+services/*/sink-vector
+services/*/sink-search
+services/*/retrieval-engine
+services/*/llm-gateway
+services/*/semantic-cache
+
+# Rust
+**/target/
+
+# Python
+**/__pycache__/
+**/*.egg-info/
+**/.pytest_cache/
+**/*.pyc
+**/.venv/
