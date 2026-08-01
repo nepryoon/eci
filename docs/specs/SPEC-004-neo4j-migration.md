@@ -1,5 +1,5 @@
 # SPEC-004 — Migration Neo4j idempotente da D3
-Stato: implemented
+Stato: verified
 Task-tree: T0.4 · Servizio: contracts/cypher + tools/migrate-neo4j · ADD: Modulo 1 — Deliverable D3
 Contratti: contracts/cypher/schema.cypher (già committato, Step 2 — NON modificarlo in questo task)
 
@@ -25,7 +25,7 @@ Target Taskfile: `task db:neo4j:migrate` (sostituisce il placeholder di SPEC-001
 
 1. **Dato** un'istanza Neo4j vuota, **quando** eseguo `task db:neo4j:migrate`, **allora** tutti i constraint e gli indici elencati in D3 vengono creati (verifica via `SHOW CONSTRAINTS` e `SHOW INDEXES`).
 2. **Dato** lo stesso DB già migrato, **quando** rieseguo `task db:neo4j:migrate`, **allora** il comando termina con successo senza errori (idempotenza garantita da `IF NOT EXISTS` nel DDL).
-3. **Dato** il DB migrato, **quando** interrogo `SHOW CONSTRAINTS`, **allora** trovo esattamente: `code_node_id`, `code_node_id_exists`, `code_node_domain_exists`, `file_path_unique`, `method_symbol_unique`, `emb_vector_type`.
+3. **Dato** il DB migrato, **quando** interrogo `SHOW CONSTRAINTS`, **allora** trovo esattamente: `code_node_id`, `file_path_unique`, `method_symbol_unique` (i property existence constraint `code_node_id_exists`/`code_node_domain_exists` sono stati rimossi, vedi [ADR-0004](../decisions/ADR-0004-rimuovi-existence-constraint-neo4j.md) e §10.7; il property type constraint `emb_vector_type` è stato rimosso a sua volta, vedi [ADR-0005](../decisions/ADR-0005-rimuovi-emb-vector-type-constraint.md) e §10.8).
 4. **Dato** il DB migrato, **quando** interrogo `SHOW INDEXES`, **allora** trovo gli indici range (`code_node_ast_hash`, `code_node_domain`, `method_name`, `rel_commit`), full-text (`code_fulltext`, `doc_fulltext`) e l'indice vettoriale nativo (`code_embeddings`, 1536 dimensioni, cosine).
 5. **Dato** `examples.cypher`, **quando** eseguo `task db:neo4j:migrate`, **allora** NESSUno dei blocchi MERGE al suo interno viene eseguito (verifica: il DB post-migrazione ha zero nodi `Method`/`Class`/ecc., solo lo schema).
 
@@ -122,3 +122,42 @@ Il runner stampa un riepilogo finale: N statement eseguiti, M già esistenti, 0 
    interpretato come "stesso linguaggio/convenzioni Go del resto del repo",
    non come dipendenza di import diretta — il runner non ha bisogno di
    nessun tipo definito in `libs/go/eci/models`.
+
+7. **Deviazione da D3: rimossi `code_node_id_exists` e
+   `code_node_domain_exists`**. `TestMigrationAgainstRealNeo4j`, eseguito per
+   la prima volta contro `neo4j:5-community` (§5, questa sessione), ha
+   dimostrato che i property existence constraint richiedono Neo4j
+   Enterprise Edition (errore Neo4j: "Property existence constraint requires
+   Neo4j Enterprise Edition") — non disponibili in Community. I due
+   constraint sono stati rimossi da `contracts/cypher/schema.cypher`;
+   l'enforcement di `id`/`domain` non-null resta garantito a monte da
+   PostgreSQL e dalla validazione Pydantic/Go di SPEC-003. Dettagli e
+   motivazione completa in
+   [ADR-0004](../decisions/ADR-0004-rimuovi-existence-constraint-neo4j.md).
+   Lo scenario 3 (§3) e i test di integrazione sono stati aggiornati di
+   conseguenza. Nessun impatto sulla nota Community/Enterprise di §6, che
+   anzi risulta rinforzata: Community basta ora anche per questi due
+   constraint, non solo per RBAC/multi-database.
+
+8. **Deviazione da D3: rimosso `emb_vector_type`**. Proseguendo l'esecuzione
+   di `TestMigrationAgainstRealNeo4j` oltre il punto raggiunto dalla
+   deviazione #7, lo statement `CREATE CONSTRAINT emb_vector_type ...
+   REQUIRE n.embedding IS :: VECTOR<FLOAT32>(1536)` fallisce con un errore
+   di sintassi (`Invalid input 'VECTOR': expected 'ARRAY', 'LIST', ...`) su
+   `neo4j:5-community` (Neo4j 5.26.28): `VECTOR<TYPE>(DIMENSION)` come tipo
+   di proprietà è sintassi Cypher 25-only, introdotta in Neo4j 2025.10, non
+   disponibile sulla linea 5.x usata nei test (`CYPHER 25` non è un valore
+   di versione valido su quella build). Inoltre, per documentazione
+   ufficiale Neo4j, memorizzare valori come tipo `VECTOR` nativo è
+   supportato solo in Enterprise Edition o su Aura, mai in Community,
+   indipendentemente dalla versione — il problema non si risolverebbe con
+   una semplice immagine più recente restando su Community. Il constraint è
+   stato rimosso da `contracts/cypher/schema.cypher`; `CREATE VECTOR INDEX
+   code_embeddings` resta invariato e verificato funzionante su Community
+   (indice vettoriale nativo, 1536 dimensioni, cosine) — la ricerca per
+   similarità non è impattata, si perde solo l'enforcement schema-level del
+   tipo esatto della proprietà `embedding`, responsabilità che ricade
+   sull'applicazione (sink writer), coerente con la deviazione #7. Dettagli
+   in [ADR-0005](../decisions/ADR-0005-rimuovi-emb-vector-type-constraint.md).
+   Lo scenario 3 (§3) e i test di integrazione sono stati aggiornati di
+   conseguenza (3 constraint attesi, 10 statement totali).
