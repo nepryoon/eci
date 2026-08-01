@@ -1,5 +1,5 @@
 # SPEC-005 — DDL PostgreSQL: code_node, code_relation, outbox, processed_events
-Stato: draft
+Stato: verified
 Task-tree: T0.5 · Servizio: contracts/sql + migration runner (golang-migrate) · ADD: Modulo 1 — §2.2.1 (outbox pattern), §2.2.4 (processed_events), D2 (entità)
 Contratti: contracts/jsonschema/hybrid-graph.json, contracts/jsonschema/outbox-event.json (letti come riferimento, non modificati)
 
@@ -102,7 +102,59 @@ Campi e vincoli derivano da D2 (entità `CodeNode`/`CodeRelation`) e dal pattern
 N/A per lo schema puro. Riservare per una fase successiva (T3.3) una vista `outbox_unprocessed_count` per il lag monitoring — non crearla qui (scope creep rispetto a questo task).
 
 ## 9. Criteri di accettazione
-- [ ] `task db:migrate` crea le 4 tabelle con i vincoli esatti di §2.
-- [ ] `task db:migrate:down` rimuove tutto senza errori.
-- [ ] Scenari 3, 4, 5, 6 (constraint, atomicità, FK, dedup PK) verdi in test di integrazione.
-- [ ] Nessun campo di D2 "common" privo di colonna corrispondente in `code_node`.
+- [x] `task db:migrate` crea le 4 tabelle con i vincoli esatti di §2 — verificato in `TestPostgresDDLMigration` contro `postgres:17` reale (testcontainers), invocando il vero CLI `migrate` (stesso comando di `task db:migrate`).
+- [x] `task db:migrate:down` rimuove tutto senza errori — scenario 2, verificato nello stesso test (`assertTablesAbsent` dopo `migrate ... down 1`).
+- [x] Scenari 3, 4, 5, 6 (constraint, atomicità, FK, dedup PK) verdi in test di integrazione — tutti passano come subtest di `TestPostgresDDLMigration` (`tests/integration/postgres_ddl/migration_test.go`).
+- [x] Nessun campo di D2 "common" privo di colonna corrispondente in `code_node`/`code_relation` — `TestSQLColumnsCoverJSONSchemaFields` (`tests/integration/postgres_ddl/parity_test.go`), verde. Vedi §10.2 per come "campi comuni" è stato interpretato per `code_relation`.
+
+## 10. Deviazioni rispetto alla SPEC
+
+1. **`POSTGRES_URL` non specificato dalla SPEC**: §2 non definisce come il
+   Taskfile debba ricevere la connection string. Ho introdotto la variabile
+   d'ambiente/Task `POSTGRES_URL`, default
+   `postgres://eci:eci@localhost:5432/eci?sslmode=disable`, sullo stesso
+   pattern di `NEO4J_URI` in `tools/migrate-neo4j` (SPEC-004). Usata da
+   `db:migrate` e `db:migrate:down`.
+
+2. **Interpretazione di "campi comuni" per il test di parità (§7)**:
+   `hybrid-graph.json` include `versioning` come proprietà opzionale (non
+   `required`) anche su `CodeRelation`, ma il DDL letterale di §2 non ha
+   colonne di versioning su `code_relation` (solo `created_at`) — le
+   relazioni non sono versionate in D2, solo i nodi lo sono. Il test di
+   parità (`parity_test.go`) tratta questo come un'esclusione esplicita e
+   documentata (`codeRelationSkippedFields["versioning"] = true`), non come
+   un'omissione silenziosa: se in futuro `hybrid-graph.json` aggiunge un
+   nuovo campo a `CodeNode`/`CodeRelation`, il test fallisce finché la
+   mappa campo→colonna non viene aggiornata esplicitamente. Per tutti gli
+   altri campi (inclusi quelli opzionali come `content_hash`, `weight`), la
+   copertura è verificata 1:1, con `versioning` flattato in
+   `version/is_current/valid_from/valid_to/supersedes` per `code_node` ed
+   `embedding` mappato a `embedding_ref`.
+
+3. **Test di integrazione invoca il CLI `migrate` reale via `exec.Command`**,
+   non la libreria `golang-migrate` in-process: stessa scelta già fatta per
+   coerenza con `task db:migrate`/`task db:migrate:down`, che sono wrapper
+   diretti del CLI — il test verifica quindi esattamente il comando che un
+   operatore eseguirebbe, non un path alternativo. Richiede il binario
+   `migrate` sul PATH (verificato a inizio sessione, vedi richiesta
+   dell'utente).
+
+4. **Modulo Go indipendente in `tests/integration/postgres_ddl`** (proprio
+   `go.mod`), non dentro `tools/` — il perimetro file assegnato per questa
+   sessione è `contracts/sql`, `Taskfile.yml`, `scripts/`, `tests/`, quindi
+   il codice di test vive sotto `tests/integration/` seguendo lo stesso
+   pattern di modulo autonomo di `tools/migrate-neo4j` (SPEC-004), wired a
+   mano in `Taskfile.yml` (`lint`, `test`, `test:integration`) sullo stesso
+   modello già in uso per `tools/migrate-neo4j`.
+
+5. **`0001_init.down.sql`**: la SPEC ne descrive il contenuto in prosa (§2,
+   ultima riga) ma non lo dà come blocco SQL letterale come per `up.sql`.
+   Scritto come descritto: `DROP TABLE` in ordine inverso
+   (`processed_events, outbox, code_relation, code_node`), poi
+   `DROP EXTENSION IF EXISTS pgcrypto`.
+
+6. **`task db:migrate:new`**: implementato (`migrate create -ext sql -dir
+   contracts/sql/migrations -seq {{.NAME}}`) anche se non compare
+   esplicitamente nei criteri di accettazione §9 — è nell'interfaccia §2 e
+   non richiede stato/scenari da testare (comando di scaffolding, non
+   comportamento del DDL).
