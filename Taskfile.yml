@@ -32,14 +32,21 @@ tasks:
       - echo "not implemented yet — see T0.7"
 
   proto:gen:
-    desc: Codegen Go/Python dai contratti proto via buf
+    desc: Codegen Go (buf generate) + Python (grpc_tools.protoc) da retrieval.proto
     cmds:
-      - echo "not implemented yet — see T0.2"
+      - bash scripts/task-proto-gen.sh
+
+  proto:lint:
+    desc: buf lint sui contratti proto (retrieval.proto)
+    dir: contracts
+    cmds:
+      - buf lint
 
   proto:breaking:
-    desc: Buf breaking-change check sui contratti proto
+    desc: Buf breaking-change check sui contratti proto contro origin/main
+    dir: contracts
     cmds:
-      - echo "not implemented yet — see T0.2"
+      - buf breaking --against '../.git#branch=main,subdir=contracts'
 
   schema:gen:
     desc: Codegen Pydantic/Go dai JSON Schema via datamodel-code-generator

@@ -72,4 +72,24 @@ for svc in "${PY_SERVICES[@]}"; do
   "${venv}/bin/python" -m pip install -q -e "${dir}" || status=1
 done
 
+# libs/go, libs/py — generati da SPEC-002 (contratto proto D7).
+if [ -f "libs/go/go.mod" ]; then
+  echo "== build (go) libs/go =="
+  (cd libs/go && go build ./...) || status=1
+else
+  echo "skip: libs/go non ancora popolato (nessun go.mod)"
+fi
+
+if [ -f "libs/py/pyproject.toml" ]; then
+  venv="libs/py/.venv"
+  echo "== build (venv + pip install -e .) libs/py =="
+  if ! ensure_venv "${venv}"; then
+    status=1
+  else
+    "${venv}/bin/python" -m pip install -q -e "libs/py" || status=1
+  fi
+else
+  echo "skip: libs/py non ancora popolato (nessun pyproject.toml)"
+fi
+
 exit "${status}"

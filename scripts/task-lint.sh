@@ -72,4 +72,29 @@ for svc in "${PY_SERVICES[@]}"; do
   "${venv}/bin/ruff" check "${dir}" || status=1
 done
 
+# libs/go, libs/py — generati da SPEC-002 (contratto proto D7).
+if [ -f "libs/go/go.mod" ]; then
+  echo "== lint (go vet) libs/go =="
+  (cd libs/go && go vet ./...) || status=1
+else
+  echo "skip: libs/go non ancora popolato (nessun go.mod)"
+fi
+
+if [ -f "libs/py/pyproject.toml" ]; then
+  venv="libs/py/.venv"
+  if ! ensure_venv "${venv}"; then
+    status=1
+  else
+    if [ ! -x "${venv}/bin/ruff" ]; then
+      "${venv}/bin/python" -m pip install -q ruff || status=1
+    fi
+    if [ -x "${venv}/bin/ruff" ]; then
+      echo "== lint (venv ruff check) libs/py =="
+      "${venv}/bin/ruff" check "libs/py" || status=1
+    fi
+  fi
+else
+  echo "skip: libs/py non ancora popolato (nessun pyproject.toml)"
+fi
+
 exit "${status}"

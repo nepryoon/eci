@@ -37,6 +37,9 @@ jobs:
       - name: task test
         run: task test
 
+  # guard + i controlli sui contratti proto (SPEC-002) condividono lo stesso
+  # checkout con fetch-depth:0 richiesto da entrambi (BASE_REF/buf breaking
+  # devono poter risolvere origin/main): un solo job, non duplicato.
   guard:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -45,6 +48,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Install go-task
         run: curl -sL https://taskfile.dev/install.sh | sh -s -- -d -b /usr/local/bin
 
@@ -52,3 +63,25 @@ jobs:
         env:
           BASE_REF: origin/${{ github.event.pull_request.base.ref }}
         run: task guard
+
+      - name: Install buf + protoc-gen-go + protoc-gen-go-grpc
+        run: |
+          go install github.com/bufbuild/buf/cmd/buf@latest
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+      - name: task proto:lint
+        run: task proto:lint
+
+      - name: task proto:breaking
+        run: task proto:breaking
+
+      - name: Set up .venv-tools (grpc_tools)
+        run: |
+          python3 -m venv .venv-tools
+          .venv-tools/bin/pip install grpcio-tools
+
+      - name: task proto:gen (verifica determinismo)
+        run: |
+          task proto:gen
+          git diff --exit-code -- libs/go libs/py

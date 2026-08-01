@@ -1,0 +1,16 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - DEFAULT
+  # retrieval.proto (D7) è congelato 1:1 sull'ADD (SPEC-002 §6, non modificabile
+  # in questo task): escluse le 3 regole di naming convention che il contratto
+  # già esistente non rispetta (nessun impatto su correttezza/breaking-change).
+  except:
+    - SERVICE_SUFFIX
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+breaking:
+  use:
+    - WIRE_JSON

@@ -1,0 +1,20 @@
+[project]
+name = "eci-core"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "grpcio>=1.60",
+    "protobuf>=5",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["eci_core*"]
+
+[tool.ruff]
+# File generati (SPEC-002 §2, header "DO NOT EDIT"): esclusi dal lint, non
+# vanno corretti a mano — si rigenerano con `task proto:gen`.
+extend-exclude = ["*_pb2.py", "*_pb2_grpc.py"]

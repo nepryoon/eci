@@ -18,3 +18,4 @@ services/*/semantic-cache
 **/.pytest_cache/
 **/*.pyc
 **/.venv/
+/.venv-tools/

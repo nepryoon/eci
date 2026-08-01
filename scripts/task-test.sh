@@ -80,6 +80,37 @@ for svc in "${PY_SERVICES[@]}"; do
   fi
 done
 
+# libs/go, libs/py — generati da SPEC-002 (contratto proto D7).
+if [ -f "libs/go/go.mod" ]; then
+  echo "== test (go) libs/go =="
+  (cd libs/go && go test ./...) || status=1
+else
+  echo "skip: libs/go non ancora popolato (nessun go.mod)"
+fi
+
+if [ -f "libs/py/pyproject.toml" ]; then
+  venv="libs/py/.venv"
+  if ! ensure_venv "${venv}"; then
+    status=1
+  else
+    if [ ! -x "${venv}/bin/pytest" ]; then
+      "${venv}/bin/python" -m pip install -q pytest || status=1
+    fi
+    if [ -x "${venv}/bin/pytest" ]; then
+      echo "== test (venv pytest) libs/py =="
+      "${venv}/bin/python" -m pytest "libs/py"
+      rc=$?
+      if [ "${rc}" -eq 5 ]; then
+        echo "  skip: nessun test raccolto in libs/py (pytest exit 5)"
+      elif [ "${rc}" -ne 0 ]; then
+        status=1
+      fi
+    fi
+  fi
+else
+  echo "skip: libs/py non ancora popolato (nessun pyproject.toml)"
+fi
+
 echo "== test (unit: scripts/guard.sh) =="
 python3 tests/unit/guard/test_guard.py || status=1
 
