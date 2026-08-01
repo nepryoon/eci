@@ -121,3 +121,4 @@ MERGE (curr)-[:DERIVED_FROM]->(prev);
 //   VECTOR INDEX code_embeddings FOR $queryVector LIMIT 20
 // ) SCORE score
 // RETURN n.id, n.name, score ORDER BY score DESC;
+// modifica di prova per testare guard in CI
