@@ -51,6 +51,16 @@ tasks:
     desc: Buf breaking-change check sui contratti proto contro origin/main
     dir: contracts
     cmds:
+      # In CI su evento pull_request, actions/checkout non crea un branch
+      # locale 'main' (solo origin/main come remote-tracking ref); buf
+      # breaking --against '.git#branch=main' richiede un branch locale
+      # risolvibile con quel nome esatto e fallisce con "fatal: couldn't
+      # find remote ref main" (bug noto di buf, bufbuild/buf#376). Crea il
+      # branch locale solo se manca — no-op in locale, dove main esiste già.
+      - |
+        if ! git show-ref --verify --quiet refs/heads/main; then
+          git fetch origin main:main
+        fi
       - buf breaking --against '../.git#branch=main,subdir=contracts'
 
   schema:gen:
