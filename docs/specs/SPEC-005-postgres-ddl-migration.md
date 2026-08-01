@@ -1,5 +1,5 @@
 # SPEC-005 — DDL PostgreSQL: code_node, code_relation, outbox, processed_events
-Stato: implemented
+Stato: verified
 Task-tree: T0.5 · Servizio: contracts/sql + migration runner (golang-migrate) · ADD: Modulo 1 — §2.2.1 (outbox pattern), §2.2.4 (processed_events), D2 (entità)
 Contratti: contracts/jsonschema/hybrid-graph.json, contracts/jsonschema/outbox-event.json (letti come riferimento, non modificati)
 
