@@ -21,17 +21,20 @@ tasks:
     cmds:
       - bash scripts/task-lint.sh
       - cd tools/migrate-neo4j && go vet ./...
+      - cd tests/integration/postgres_ddl && go vet ./... && go vet -tags=integration ./...
 
   test:
     desc: go test / cargo test / pytest su ogni modulo, più i test di scripts/guard.sh
     cmds:
       - bash scripts/task-test.sh
       - cd tools/migrate-neo4j && go test ./...
+      - cd tests/integration/postgres_ddl && go test ./...
 
   test:integration:
     desc: Test di integrazione con testcontainers (richiede docker)
     cmds:
       - cd tools/migrate-neo4j && go test -tags=integration ./...
+      - cd tests/integration/postgres_ddl && go test -tags=integration ./...
 
   proto:gen:
     desc: Codegen Go (buf generate) + Python (grpc_tools.protoc) da retrieval.proto
@@ -57,13 +60,22 @@ tasks:
 
   db:migrate:
     desc: Applica le migration Postgres
+    vars:
+      POSTGRES_URL: '{{.POSTGRES_URL | default "postgres://eci:eci@localhost:5432/eci?sslmode=disable"}}'
     cmds:
-      - echo "not implemented yet — see T0.5"
+      - migrate -source file://contracts/sql/migrations -database "{{.POSTGRES_URL}}" up
 
   db:migrate:down:
-    desc: Rollback delle migration Postgres
+    desc: Rollback dell'ultima migration Postgres
+    vars:
+      POSTGRES_URL: '{{.POSTGRES_URL | default "postgres://eci:eci@localhost:5432/eci?sslmode=disable"}}'
     cmds:
-      - echo "not implemented yet — see T0.5"
+      - migrate -source file://contracts/sql/migrations -database "{{.POSTGRES_URL}}" down 1
+
+  db:migrate:new:
+    desc: 'Crea una nuova coppia di file di migration vuota (uso: task db:migrate:new NAME=slug)'
+    cmds:
+      - migrate create -ext sql -dir contracts/sql/migrations -seq {{.NAME}}
 
   db:neo4j:migrate:
     desc: Applica le migration Cypher su Neo4j
