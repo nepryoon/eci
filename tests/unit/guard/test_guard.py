@@ -3,7 +3,9 @@
 Builds throwaway git repos under a temp dir and exercises guard.sh against
 synthetic commits: no protected touch, protected touch without ADR, protected
 touch with ADR, plus the edge cases from SPEC-001 §4 (unresolved BASE_REF,
-renamed file under contracts/).
+renamed file under contracts/). The ADR requirement only applies to modified
+(M) or deleted (D) files under contracts/ or docs/add/ — adding a brand new
+file (A) there does not require an ADR.
 """
 
 import os
@@ -48,6 +50,9 @@ class GuardTestRepo:
     def rename(self, src, dst):
         run(["git", "mv", src, dst], cwd=self.dir)
 
+    def delete(self, relpath):
+        (Path(self.dir) / relpath).unlink()
+
     def commit_all(self, message):
         run(["git", "add", "-A"], cwd=self.dir)
         run(["git", "commit", "-q", "-m", message], cwd=self.dir)
@@ -79,27 +84,56 @@ class TestGuard(unittest.TestCase):
         result = self.repo.run_guard()
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    # Scenario 3: tocco a contracts/ senza ADR -> fallisce con elenco file protetti.
-    def test_protected_touch_without_adr_fails(self):
+    # Nuovo: aggiunta di un file NUOVO (status A) sotto contracts/ senza ADR
+    # -> passa. L'obbligo di ADR scatta solo su M/D, non su A.
+    def test_protected_add_new_file_without_adr_passes(self):
+        self.repo.write("contracts/new-file.md", "docs\n")
+        self.repo.commit_all("add new contracts file without ADR")
+        result = self.repo.run_guard()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    # Scenario 3: modifica (status M) di un file già tracciato sotto
+    # contracts/ senza ADR -> fallisce con elenco file protetti.
+    def test_protected_modify_without_adr_fails(self):
         self.repo.write("contracts/README.md", "docs\n")
-        self.repo.commit_all("touch contracts without ADR")
+        self.repo.commit_all("add contracts file (baseline)")
+        self.repo.move_base_to_head()
+        self.repo.write("contracts/README.md", "docs modificati\n")
+        self.repo.commit_all("modify contracts without ADR")
         result = self.repo.run_guard()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("docs/decisions/", result.stderr)
         self.assertIn("contracts/README.md", result.stderr)
 
-    def test_docs_add_touch_without_adr_fails(self):
+    def test_protected_delete_without_adr_fails(self):
+        self.repo.write("contracts/README.md", "docs\n")
+        self.repo.commit_all("add contracts file (baseline)")
+        self.repo.move_base_to_head()
+        self.repo.delete("contracts/README.md")
+        self.repo.commit_all("delete contracts file without ADR")
+        result = self.repo.run_guard()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("contracts/README.md", result.stderr)
+
+    def test_docs_add_modify_without_adr_fails(self):
         self.repo.write("docs/add/notes.md", "notes\n")
-        self.repo.commit_all("touch docs/add without ADR")
+        self.repo.commit_all("add docs/add file (baseline)")
+        self.repo.move_base_to_head()
+        self.repo.write("docs/add/notes.md", "notes modificate\n")
+        self.repo.commit_all("modify docs/add without ADR")
         result = self.repo.run_guard()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("docs/add/notes.md", result.stderr)
 
-    # Scenario 4: stessa PR ma con ADR aggiunto nello stesso diff -> passa.
-    def test_protected_touch_with_adr_passes(self):
+    # Scenario 4: modifica di un file protetto + ADR aggiunto nello stesso
+    # diff -> passa.
+    def test_protected_modify_with_adr_passes(self):
         self.repo.write("contracts/README.md", "docs\n")
+        self.repo.commit_all("add contracts file (baseline)")
+        self.repo.move_base_to_head()
+        self.repo.write("contracts/README.md", "docs modificati\n")
         self.repo.write("docs/decisions/ADR-0001-test.md", "# ADR\n")
-        self.repo.commit_all("touch contracts with ADR")
+        self.repo.commit_all("modify contracts with ADR")
         result = self.repo.run_guard()
         self.assertEqual(result.returncode, 0, result.stderr)
 

@@ -50,7 +50,7 @@ Ogni cartella in `services/` contiene per ora solo un file minimo che rende il l
 `scripts/guard.sh` — logica esatta:
 1. Determina il branch base: variabile d'ambiente `BASE_REF`, default `origin/main`.
 2. `CHANGED=$(git diff --name-status "$BASE_REF"...HEAD)`.
-3. Se nessuna riga di `CHANGED` ha path che inizia per `contracts/` o `docs/add/` → exit 0.
+3. Se nessuna riga di `CHANGED` ha status `M` (modificato) o `D` (cancellato) con path che inizia per `contracts/` o `docs/add/` → exit 0. Un file *nuovo* (status `A`) sotto `contracts/`/`docs/add/` non fa scattare l'obbligo di ADR (è un'aggiunta, non una modifica di un contratto esistente). Un rename (`R`/`C`) conta come tocco se il path sorgente o destinazione è protetto (vedi §4).
 4. Altrimenti, verifica che almeno una riga di `CHANGED` abbia status `A` (added) e path che inizia per `docs/decisions/` → se sì, exit 0; se no, exit 1 stampando l'elenco dei file protetti toccati e il messaggio: `"Modifiche a contracts/ o docs/add/ richiedono un ADR in docs/decisions/ nello stesso commit."`.
 
 ## 3. Comportamento (scenari)
@@ -61,6 +61,7 @@ Ogni cartella in `services/` contiene per ora solo un file minimo che rende il l
 4. **Dato** la stessa PR ma con l'aggiunta di `docs/decisions/ADR-0001-qualcosa.md` nello stesso diff, **quando** eseguo `task guard`, **allora** passa.
 5. **Dato** una PR che NON tocca `contracts/` né `docs/add/`, **quando** eseguo `task guard`, **allora** passa sempre, indipendentemente da `docs/decisions/`.
 6. **Dato** il repo, **quando** eseguo un target placeholder (es. `task up`), **allora** l'output contiene esplicitamente la stringa `"not implemented yet"` e il riferimento al task che lo completerà, con exit code 0 (non deve far fallire la CI).
+7. **Dato** una PR che aggiunge un file *nuovo* (status `A`, mai tracciato prima) sotto `contracts/` o `docs/add/` senza alcun ADR, **quando** eseguo `task guard`, **allora** passa (l'obbligo di ADR riguarda solo modifiche `M` o cancellazioni `D` di file protetti già esistenti, non le aggiunte).
 
 ## 4. Errori & edge case
 
@@ -87,7 +88,7 @@ N/A (infrastruttura di build, non runtime).
 ## 9. Criteri di accettazione
 - [x] `task --list` mostra tutti i target della tabella.
 - [x] `task build && task lint && task test` verdi su repo pulito.
-- [x] `scripts/guard.sh` supera i 3 casi di test descritti in §7 (implementati come 7 casi, vedi deviazioni).
+- [x] `scripts/guard.sh` supera i 3 casi di test descritti in §7 (implementati come 9 casi, incluso scenario 7 su status `A` vs `M`/`D` — vedi deviazioni).
 - [ ] CI GitHub Actions verde su un PR "vuota" (nessun tocco a file protetti). — non verificabile da questa sessione (nessun push/PR eseguito), vedi deviazioni.
 - [ ] CI GitHub Actions rossa su una PR di prova che tocca `contracts/` senza ADR, verde se si aggiunge l'ADR. — idem.
 - [x] Nessun target placeholder fa fallire la CI (tutti exit 0 con messaggio esplicito).
@@ -143,5 +144,15 @@ N/A (infrastruttura di build, non runtime).
 8. **Verifica CI reale non eseguita**: non è stato aperto alcun push/PR da
    questa sessione, quindi gli ultimi due criteri di accettazione (verde su PR
    vuota, rosso→verde su tocco `contracts/` con/senza ADR) sono verificati solo
-   per costruzione (stessa logica di `scripts/guard.sh` già coperta da 7 test
+   per costruzione (stessa logica di `scripts/guard.sh` già coperta da 9 test
    unitari) e non tramite un'esecuzione reale di GitHub Actions.
+
+9. **ADR richiesto solo su M/D, non su A**: la lettura iniziale di §2 punto 3
+   ("nessuna riga ha path che inizia per `contracts/`/`docs/add/`") non
+   distingueva lo status della riga di `git diff --name-status`, quindi
+   qualunque aggiunta di file *nuovo* sotto quei path faceva scattare
+   l'obbligo di ADR quanto una modifica. Corretto: l'aggiunta (`A`) di un file
+   mai tracciato prima non richiede ADR — solo modifiche (`M`) o cancellazioni
+   (`D`) di contenuto contrattuale già esistente lo richiedono. I rename
+   (`R`/`C`) restano equiparati a un tocco protetto (invariato). Vedi §2 punto 3
+   e §3 scenario 7.

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Fallisce se contracts/ o docs/add/ sono toccati senza un ADR aggiunto in
-# docs/decisions/ nello stesso diff. Vedi SPEC-001 §2.
+# Fallisce se contracts/ o docs/add/ sono modificati (M), cancellati (D) o
+# rinominati/copiati (R/C, in entrata o in uscita), senza un ADR aggiunto in
+# docs/decisions/ nello stesso diff. L'aggiunta di file nuovi (A) non
+# richiede ADR. Vedi SPEC-001 §2.
 set -euo pipefail
 
 BASE_REF="${BASE_REF:-origin/main}"
@@ -33,7 +35,11 @@ while IFS=$'\t' read -r status path1 path2; do
       ;;
     *)
       if is_protected "${path1}"; then
-        protected_touched+=("${status}"$'\t'"${path1}")
+        case "${status}" in
+          M|D)
+            protected_touched+=("${status}"$'\t'"${path1}")
+            ;;
+        esac
       fi
       if [[ "${status}" == "A" ]] && [[ "${path1}" == docs/decisions/* ]]; then
         has_adr_added=true
