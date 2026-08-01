@@ -1,5 +1,5 @@
 # SPEC-003 — JSON Schema (D2): codegen Pydantic/Go + schema evento outbox
-Stato: implemented
+Stato: verified
 Task-tree: T0.3 · Servizio: contracts/jsonschema (genera in libs/py, libs/go) · ADD: Modulo 1 — Deliverable D2, §2.2.2 (outbox)
 Contratti: contracts/jsonschema/hybrid-graph.json (già committato, Step 2 — NON modificarlo in questo task)
 
