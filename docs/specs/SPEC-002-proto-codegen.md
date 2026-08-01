@@ -1,5 +1,5 @@
 # SPEC-002 — Contratto Protobuf (D7): codegen Go/Python + breaking-change check
-Stato: implemented
+Stato: verified
 Task-tree: T0.2 · Servizio: contracts/proto (genera in libs/go, libs/py) · ADD: Modulo 3 — Deliverable D7
 Contratti: contracts/proto/eci/retrieval/v1/retrieval.proto (già committato, Step 2 — NON modificarlo in questo task)
 
