@@ -1,5 +1,5 @@
 # SPEC-001 — Scaffold monorepo, Taskfile, CI baseline
-Stato: implemented
+Stato: verified
 Task-tree: T0.1 · Servizio: root (nessun service applicativo) · ADD: struttura repo (Playbook §1)
 Contratti: nessuno
 
