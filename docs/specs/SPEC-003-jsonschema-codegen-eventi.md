@@ -1,5 +1,5 @@
 # SPEC-003 — JSON Schema (D2): codegen Pydantic/Go + schema evento outbox
-Stato: draft
+Stato: verified
 Task-tree: T0.3 · Servizio: contracts/jsonschema (genera in libs/py, libs/go) · ADD: Modulo 1 — Deliverable D2, §2.2.2 (outbox)
 Contratti: contracts/jsonschema/hybrid-graph.json (già committato, Step 2 — NON modificarlo in questo task)
 
@@ -64,8 +64,65 @@ Fedeltà 1:1 a D2 per `CodeNode`/`CodeRelation`. L'envelope evento riprende esat
 N/A per questo task (tipi e validazione, non runtime).
 
 ## 9. Criteri di accettazione
-- [ ] `task schema:gen` produce `models.py` importabile senza errori.
-- [ ] Scenario 2 e 3 (validazione discriminata) verdi in Python.
-- [ ] `ParseExt()` Go verde sugli stessi fixture (scenario 4).
-- [ ] `outbox-event.json` creato, validato dal test Python e Go (scenario 5).
-- [ ] I fixture di test sono condivisi (un solo set in `tests/fixtures/`, non duplicati).
+- [x] `task schema:gen` produce `models.py` importabile senza errori.
+- [x] Scenario 2 e 3 (validazione discriminata) verdi in Python.
+- [x] `ParseExt()` Go verde sugli stessi fixture (scenario 4).
+- [x] `outbox-event.json` creato, validato dal test Python e Go (scenario 5).
+- [x] I fixture di test sono condivisi (un solo set in `tests/fixtures/`, non duplicati).
+
+## 10. Deviazioni rispetto alla SPEC
+
+1. **Discriminated union**: confermato eseguendo `datamodel-code-generator`
+   (`--input-file-type jsonschema --output-model-type pydantic_v2.BaseModel`)
+   su `hybrid-graph.json` che il generator non mappa nativamente l'`if`/
+   `then`/`const` su `domain`: `ext` collassa a `dict[str, Any] | None` nel
+   modello generato (`libs/py/eci_core/models.py`). Applicato il fallback già
+   previsto dalla SPEC stessa: `CodeNodeCode`/`CodeNodeDoc`/`CodeNodeLegal` +
+   `parse_code_node()` in `libs/py/eci_core/code_node.py`, **scritto a mano e
+   non rigenerato** (per non essere sovrascritto ad ogni `task schema:gen`),
+   che sottoclassa il `CodeNode` generato per ereditarne i vincoli (pattern
+   su `id`, `ast_hash`, ecc.) e stringe solo `domain` (`Literal`) ed `ext`
+   (tipo concreto, reso obbligatorio).
+
+2. **Edge case "ext assente per domain=code" (§4)**: verificato con la
+   libreria `jsonschema` che il contratto `hybrid-graph.json`, così com'è
+   scritto (congelato, non modificato in questo task), **non** rende `ext`
+   obbligatorio quando `domain="code"` — l'`if`/`then` vincola solo la forma
+   di `ext` se la chiave è presente, non la sua presenza (un payload
+   `domain="code"` senza chiave `ext` passa la validazione raw-schema con 0
+   errori). Non essendo un conflitto con un invariante architetturale
+   dell'ADD ma un limite del contratto congelato, il vincolo è stato
+   applicato al livello successivo esplicitamente citato dallo scenario 2/3
+   ("valido col modello Pydantic"): `ext` è un campo obbligatorio (non
+   `Optional`) su `CodeNodeCode`/`CodeNodeDoc`/`CodeNodeLegal`, quindi
+   `parse_code_node()` rifiuta comunque un `CodeNode` di dominio `code` privo
+   di `ext` (vedi `codenode_code_missing_ext.json` +
+   `test_domain_code_without_ext_is_rejected`).
+
+3. **Dipendenze Python**: aggiunte `pydantic>=2.0` e `jsonschema>=4.19` come
+   dipendenze dirette (non extra) di `libs/py/pyproject.toml`. `jsonschema`
+   serve solo al round-trip di test (§7), ma `scripts/task-test.sh` (fuori
+   perimetro di questa sessione: solo `contracts/jsonschema`, `libs/go`,
+   `libs/py`, `tests/`) non installa gli extra del progetto prima di
+   eseguire `pytest` — solo `task build` fa `pip install -e .` senza extra.
+   Un extra `test` sarebbe rimasto non installato in un `task test`
+   standalone.
+
+4. **Wiring `task schema:gen`**: aggiunti `scripts/task-schema-gen.sh` e la
+   riga `schema:gen` di `Taskfile.yml`, entrambi fuori dai quattro percorsi
+   indicati per questa sessione. Necessario perché il criterio di
+   accettazione "`task schema:gen` produce `models.py` importabile" richiede
+   che il task sia davvero eseguibile — stesso pattern già usato da SPEC-002
+   per `task proto:gen` / `scripts/task-proto-gen.sh`. `datamodel-code-
+   generator` è installato in `.venv-tools/` (venv di tooling già usato da
+   `grpc_tools`, gitignored), non come dipendenza di `libs/py`.
+
+5. **Go**: `ParseExt()` e `ParseOutboxEvent()` fanno validazione manuale
+   leggera (presenza dei campi richiesti, appartenenza a un enum) invece di
+   incorporare un validatore JSON Schema generico, per non introdurre una
+   nuova dipendenza esterna in `libs/go/go.mod` — coerente con l'impostazione
+   "manuale, non generato" della SPEC per il lato Go. `ParseExt()` valida
+   anche `node_type` contro l'enum atteso per il dominio (non richiesto
+   esplicitamente dalla SPEC, ma necessario perché il test table-driven
+   condivide i fixture con Python, incluso `codenode_legal_ext_mismatch.json`
+   dello scenario 3, e deve rigettarlo allo stesso modo).

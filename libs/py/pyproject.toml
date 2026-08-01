@@ -5,6 +5,11 @@ requires-python = ">=3.11"
 dependencies = [
     "grpcio>=1.60",
     "protobuf>=5",
+    "pydantic>=2.0",
+    # Usato solo dai test di round-trip (SPEC-003 §7), non da eci_core a
+    # runtime — dipendenza diretta e non "extra" perché task-test.sh non
+    # installa gli extra del progetto prima di eseguire pytest.
+    "jsonschema>=4.19",
 ]
 
 [build-system]

@@ -51,7 +51,7 @@ tasks:
   schema:gen:
     desc: Codegen Pydantic/Go dai JSON Schema via datamodel-code-generator
     cmds:
-      - echo "not implemented yet — see T0.3"
+      - bash scripts/task-schema-gen.sh
 
   db:migrate:
     desc: Applica le migration Postgres
