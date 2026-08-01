@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Outbox Event Envelope",
+  "type": "object",
+  "required": ["id", "aggregate_type", "aggregate_id", "event_type", "payload", "created_at"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "aggregate_type": { "type": "string", "enum": ["CodeNode", "CodeRelation"] },
+    "aggregate_id": { "type": "string" },
+    "event_type": { "type": "string", "enum": ["UPSERT", "DELETE"] },
+    "payload": { "type": "object" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "trace_id": { "type": ["string", "null"] }
+  },
+  "additionalProperties": false
+}

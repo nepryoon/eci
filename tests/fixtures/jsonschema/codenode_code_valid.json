@@ -1,0 +1,22 @@
+{
+  "id": "svc.orders.OrderService#charge",
+  "domain": "code",
+  "name": "charge",
+  "ast_hash": "111111111111111111111111111111111111111111111111111111111111111a",
+  "provenance": {
+    "repo": "github.com/acme/orders",
+    "commit_sha": "a1b2c3d",
+    "path": "src/OrderService.java",
+    "ingested_at": "2026-01-15T09:00:00Z"
+  },
+  "versioning": {
+    "version": 1,
+    "is_current": true
+  },
+  "ext": {
+    "node_type": "Method",
+    "language": "java",
+    "visibility": "public",
+    "symbol_id": "scip-java maven acme orders 1.0 OrderService#charge()."
+  }
+}

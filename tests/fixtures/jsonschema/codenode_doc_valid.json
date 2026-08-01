@@ -1,0 +1,21 @@
+{
+  "id": "doc.handbook.section3",
+  "domain": "doc",
+  "name": "Section 3 \u2014 Onboarding",
+  "ast_hash": "222222222222222222222222222222222222222222222222222222222222222b",
+  "provenance": {
+    "repo": "github.com/acme/handbook",
+    "commit_sha": "b2c3d4e",
+    "path": "handbook/section3.md",
+    "ingested_at": "2026-01-15T09:00:00Z"
+  },
+  "versioning": {
+    "version": 1,
+    "is_current": true
+  },
+  "ext": {
+    "node_type": "Section",
+    "title": "Onboarding",
+    "mime_type": "text/markdown"
+  }
+}

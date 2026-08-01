@@ -1,0 +1,16 @@
+{
+  "id": "fin.ledger.entry42",
+  "domain": "finance",
+  "name": "entry42",
+  "ast_hash": "444444444444444444444444444444444444444444444444444444444444444d",
+  "provenance": {
+    "repo": "github.com/acme/ledger",
+    "commit_sha": "d4e5f6a",
+    "path": "ledger/entry42.dat",
+    "ingested_at": "2026-01-15T09:00:00Z"
+  },
+  "versioning": {
+    "version": 1,
+    "is_current": true
+  }
+}

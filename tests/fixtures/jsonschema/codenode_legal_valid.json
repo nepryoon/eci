@@ -1,0 +1,22 @@
+{
+  "id": "legal.gdpr.art5",
+  "domain": "legal",
+  "name": "GDPR Article 5",
+  "ast_hash": "333333333333333333333333333333333333333333333333333333333333333c",
+  "provenance": {
+    "repo": "github.com/acme/legal-corpus",
+    "commit_sha": "c3d4e5f",
+    "path": "gdpr/article-5.txt",
+    "ingested_at": "2026-01-15T09:00:00Z"
+  },
+  "versioning": {
+    "version": 1,
+    "is_current": true
+  },
+  "ext": {
+    "node_type": "Regulation",
+    "jurisdiction": "EU",
+    "effective_date": "2018-05-25",
+    "obligation_level": "mandatory"
+  }
+}
