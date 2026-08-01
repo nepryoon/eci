@@ -4,21 +4,11 @@
 CREATE CONSTRAINT code_node_id IF NOT EXISTS
 FOR (n:CodeNode) REQUIRE n.id IS UNIQUE;
 
-CREATE CONSTRAINT code_node_id_exists IF NOT EXISTS
-FOR (n:CodeNode) REQUIRE n.id IS NOT NULL;
-
-CREATE CONSTRAINT code_node_domain_exists IF NOT EXISTS
-FOR (n:CodeNode) REQUIRE n.domain IS NOT NULL;
-
 CREATE CONSTRAINT file_path_unique IF NOT EXISTS
 FOR (f:File) REQUIRE (f.repo, f.path) IS UNIQUE;
 
 CREATE CONSTRAINT method_symbol_unique IF NOT EXISTS
 FOR (m:Method) REQUIRE m.symbol_id IS UNIQUE;
-
-// Native Vector type + dimension constraint (Cypher 25 / Neo4j 5.x)
-CREATE CONSTRAINT emb_vector_type IF NOT EXISTS
-FOR (n:CodeNode) REQUIRE n.embedding IS :: VECTOR<FLOAT32>(1536);
 
 // ============================================================
 // RANGE INDEXES
