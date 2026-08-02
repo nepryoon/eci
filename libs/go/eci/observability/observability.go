@@ -12,6 +12,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/propagation"
 	semconv "go.opentelemetry.io/otel/semconv/v1.33.0"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -57,6 +58,19 @@ func InitTracing(serviceName string) (func(context.Context) error, error) {
 	if !alreadyInit {
 		initDone = true
 		otel.SetTracerProvider(tp)
+		// go.opentelemetry.io/otel non imposta un TextMapPropagator globale
+		// di default (resta no-op finché non chiamato esplicitamente, a
+		// differenza dell'SDK Python che lo fa automaticamente) — senza
+		// questa riga otelgrpc.NewServerHandler()/NewClientHandler() non
+		// estrae/inietta mai un header traceparent W3C, anche se l'altro
+		// lato lo invia correttamente. Bug latente scoperto durante la
+		// verifica di interoperabilità cross-linguaggio di SPEC-012 (il
+		// test di coesistenza di SPEC-011 §3 verificava solo che
+		// l'interceptor SecurityContext e otelgrpc non confliggessero, non
+		// l'estrazione reale di un trace context in ingresso).
+		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+			propagation.TraceContext{}, propagation.Baggage{},
+		))
 	}
 	initMu.Unlock()
 
