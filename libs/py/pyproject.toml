@@ -10,6 +10,11 @@ dependencies = [
     # runtime — dipendenza diretta e non "extra" perché task-test.sh non
     # installa gli extra del progetto prima di eseguire pytest.
     "jsonschema>=4.19",
+    # SPEC-012: bootstrap OTel (observability.py) + propagazione trace
+    # context via gRPC (grpc_client.py), stessa filosofia di SPEC-010/011.
+    "opentelemetry-api>=1.44.0",
+    "opentelemetry-sdk>=1.44.0",
+    "opentelemetry-instrumentation-grpc>=0.65b0",
 ]
 
 [build-system]
