@@ -1,5 +1,5 @@
 # SPEC-008 — Smoke test end-to-end: INSERT outbox → evento sul topic Kafka
-Stato: implemented
+Stato: verified
 Task-tree: T0.7 (ultimo tassello di Fase 0) · Servizio: tests/integration/outbox_cdc · ADD: Modulo 1 §2.2 (CDC & Eventual Consistency, verifica end-to-end)
 Contratti: contracts/jsonschema/outbox-event.json (letto come riferimento), contracts/sql/migrations (applicate nel test — NON modificate)
 
