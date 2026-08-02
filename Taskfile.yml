@@ -2,14 +2,19 @@ version: '3'
 
 tasks:
   up:
-    desc: Avvia lo stack di sviluppo locale (docker compose)
+    desc: Avvia lo stack di sviluppo locale (docker compose) e attende che tutti i servizi siano healthy
     cmds:
-      - echo "not implemented yet — see T0.6"
+      - bash deploy/compose/up.sh
 
   down:
-    desc: Ferma lo stack di sviluppo locale (docker compose)
+    desc: Ferma lo stack di sviluppo locale (docker compose); i volumi nominati non vengono rimossi
     cmds:
-      - echo "not implemented yet — see T0.6"
+      - docker compose -f deploy/compose/docker-compose.yml down
+
+  up:verify:
+    desc: Verifica connettività reale ai 5 datastore dello stack già in esecuzione
+    cmds:
+      - bash deploy/compose/verify.sh
 
   build:
     desc: Compila ogni modulo Go/Rust/Python popolato in services/

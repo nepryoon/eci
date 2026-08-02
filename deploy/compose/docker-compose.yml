@@ -1,0 +1,140 @@
+# SPEC-006 — stack di sviluppo locale: i cinque datastore (Postgres, Neo4j,
+# Qdrant, OpenSearch, MinIO). Kafka/Debezium sono fuori scope (T0.6b, vedi
+# SPEC-006 §5) e vengono aggiunti come nuovi servizi in QUESTO stesso file,
+# non in un compose separato.
+#
+# Credenziali: tutte quelle qui sotto (POSTGRES_PASSWORD, NEO4J_AUTH,
+# MINIO_ROOT_PASSWORD) sono valori di sviluppo locale, mai da riusare in
+# nessun altro ambiente.
+#
+# OpenSearch qui gira con DISABLE_SECURITY_PLUGIN=true: semplificazione da
+# dev per ridurre l'attrito locale. Il Modulo 3 dell'ADD richiede il
+# Security plugin attivo in produzione (Document-Level Security) — questa
+# disattivazione non va riprodotta in nessun ambiente non-dev.
+
+name: eci-dev
+
+networks:
+  eci-dev:
+    name: eci-dev
+
+volumes:
+  # name: esplicito per ognuno — senza, Compose prefissa i volumi col nome
+  # del progetto (di default il nome della directory), diverso dai nomi
+  # letterali di SPEC-006 §2.
+  eci_postgres_data:
+    name: eci_postgres_data
+  eci_neo4j_data:
+    name: eci_neo4j_data
+  eci_neo4j_logs:
+    name: eci_neo4j_logs
+  eci_qdrant_data:
+    name: eci_qdrant_data
+  eci_opensearch_data:
+    name: eci_opensearch_data
+  eci_minio_data:
+    name: eci_minio_data
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: eci
+      POSTGRES_PASSWORD: eci-dev-only
+      POSTGRES_DB: eci
+    ports:
+      - "5432:5432"
+    volumes:
+      - eci_postgres_data:/var/lib/postgresql/data
+    networks:
+      - eci-dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eci"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  neo4j:
+    image: neo4j:5-community
+    environment:
+      # Neo4j Community Edition: vincolante per ADR-0004/ADR-0005
+      # (SPEC-004) — mai Enterprise in questo stack.
+      NEO4J_AUTH: neo4j/eci-dev-only
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - eci_neo4j_data:/data
+      - eci_neo4j_logs:/logs
+    networks:
+      - eci-dev
+    healthcheck:
+      test: ["CMD-SHELL", "wget -O /dev/null -q http://localhost:7474 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  qdrant:
+    # :latest verificato al momento dell'implementazione: risolve a v1.18.3,
+    # >= 1.11 richiesto dall'ADD per is_tenant — nessun pin esplicito
+    # necessario (vedi deviazione in SPEC-006 §10).
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - eci_qdrant_data:/qdrant/storage
+    networks:
+      - eci-dev
+    healthcheck:
+      # L'immagine qdrant/qdrant non include curl né wget (solo bash/sh):
+      # niente controllo HTTP nativo disponibile qui. Fallback su un
+      # controllo TCP via /dev/tcp di bash sulla porta REST — il vero
+      # controllo HTTP su /collections è in `task up:verify` (scenario 2),
+      # che gira dall'host con curl. Deviazione annotata in SPEC-006 §10.
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  opensearch:
+    image: opensearchproject/opensearch:latest
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+    ports:
+      - "9200:9200"
+    volumes:
+      - eci_opensearch_data:/usr/share/opensearch/data
+    networks:
+      - eci-dev
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -Eq '\"status\":\"(green|yellow)\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: eci
+      # >= 8 caratteri richiesti da MinIO: "eci-dev-only-minio" ne ha 19.
+      MINIO_ROOT_PASSWORD: eci-dev-only-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - eci_minio_data:/data
+    networks:
+      - eci-dev
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
