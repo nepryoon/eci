@@ -11,20 +11,25 @@ import (
 )
 
 // Config — SPEC-004 §2 punto 1: NEO4J_URI (default bolt://localhost:7687),
-// NEO4J_USER, NEO4J_PASSWORD da env.
+// NEO4J_USER, NEO4J_PASSWORD da env. I default di user/password (SPEC-006)
+// sono allineati alle credenziali dev di deploy/compose/docker-compose.yml
+// (NEO4J_AUTH=neo4j/eci-dev-only), non a un default "sicuro" — sono
+// comunque credenziali di sviluppo locale pubbliche in questo repo.
 type Config struct {
 	URI      string
 	Username string
 	Password string
 }
 
-// ConfigFromEnv legge la configurazione di connessione da env, con il
-// default esplicito per NEO4J_URI previsto dalla SPEC.
+// ConfigFromEnv legge la configurazione di connessione da env, con i
+// default espliciti previsti dalla SPEC (allineati allo stack compose di
+// SPEC-006 in modo che i target Taskfile funzionino senza variabili
+// d'ambiente impostate a mano contro lo stack di sviluppo).
 func ConfigFromEnv() Config {
 	return Config{
 		URI:      envOrDefault("NEO4J_URI", "bolt://localhost:7687"),
-		Username: os.Getenv("NEO4J_USER"),
-		Password: os.Getenv("NEO4J_PASSWORD"),
+		Username: envOrDefault("NEO4J_USER", "neo4j"),
+		Password: envOrDefault("NEO4J_PASSWORD", "eci-dev-only"),
 	}
 }
 

@@ -106,12 +106,25 @@ Non applicabile in questa SPEC (lo stack di observability vero è Fase 7 / Modul
    `scripts/task-*.sh` nel resto del repo, qui dentro `deploy/compose/`
    per restare nel perimetro.
 
-6. **Credenziali usate nelle verifiche di `task db:migrate`/`task
-   db:neo4j:migrate` contro questo stack (scenario 5)**: i default
-   hardcoded nel Taskfile (`POSTGRES_URL` di SPEC-005) non coincidono con
-   le credenziali dev di questo compose (`eci-dev-only` vs `eci`) — testato
-   passando esplicitamente `POSTGRES_URL=postgres://eci:eci-dev-only@localhost:5432/eci?sslmode=disable`
-   e `NEO4J_USER=neo4j NEO4J_PASSWORD=eci-dev-only` come override, nessuna
-   modifica ai default di SPEC-005 (restano corretti per l'uso con
-   testcontainers, che non hanno queste credenziali). Da tenere a mente
-   quando si scriverà il README/onboarding di uso quotidiano dello stack.
+6. **Credenziali di `task db:migrate`/`task db:neo4j:migrate` disallineate
+   da questo stack (emerso allo scenario 5)**: i default introdotti in
+   SPEC-005/SPEC-004 (`POSTGRES_URL` con password `eci`; nessun default per
+   `NEO4J_USER`/`NEO4J_PASSWORD`) non coincidevano con le credenziali dev di
+   questo compose (`eci-dev-only`). Anziché continuare a passare override
+   manuali a ogni invocazione, i default stessi sono stati cambiati per
+   allinearli allo stack di SPEC-006:
+   - `Taskfile.yml`, target `db:migrate` e `db:migrate:down`: la variabile
+     Task `POSTGRES_URL` è stata sostituita, in entrambi i target, da
+     un'espansione a variabile d'ambiente shell
+     `${POSTGRES_DSN:-postgres://eci:eci-dev-only@localhost:5432/eci?sslmode=disable}`
+     (nome variabile cambiato da `POSTGRES_URL` a `POSTGRES_DSN`, default
+     ora con password `eci-dev-only`) — i due target restano coerenti tra
+     loro.
+   - `tools/migrate-neo4j/internal/migrate/runner.go`, `ConfigFromEnv`:
+     `NEO4J_USER`/`NEO4J_PASSWORD` ora hanno default `neo4j`/`eci-dev-only`
+     (prima: stringa vuota, nessun default). `TestConfigFromEnvDefaults` è
+     stato aggiornato di conseguenza per aspettarsi questi nuovi default
+     invece di stringhe vuote.
+   - Il test di integrazione di `tools/migrate-neo4j` non è impattato:
+     costruisce il proprio `Config` esplicitamente (credenziali del proprio
+     container testcontainers), non passa da `ConfigFromEnv`.

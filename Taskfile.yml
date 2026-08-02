@@ -75,17 +75,13 @@ tasks:
 
   db:migrate:
     desc: Applica le migration Postgres
-    vars:
-      POSTGRES_URL: '{{.POSTGRES_URL | default "postgres://eci:eci@localhost:5432/eci?sslmode=disable"}}'
     cmds:
-      - migrate -source file://contracts/sql/migrations -database "{{.POSTGRES_URL}}" up
+      - migrate -source file://contracts/sql/migrations -database "${POSTGRES_DSN:-postgres://eci:eci-dev-only@localhost:5432/eci?sslmode=disable}" up
 
   db:migrate:down:
     desc: Rollback dell'ultima migration Postgres
-    vars:
-      POSTGRES_URL: '{{.POSTGRES_URL | default "postgres://eci:eci@localhost:5432/eci?sslmode=disable"}}'
     cmds:
-      - migrate -source file://contracts/sql/migrations -database "{{.POSTGRES_URL}}" down 1
+      - migrate -source file://contracts/sql/migrations -database "${POSTGRES_DSN:-postgres://eci:eci-dev-only@localhost:5432/eci?sslmode=disable}" down 1
 
   db:migrate:new:
     desc: 'Crea una nuova coppia di file di migration vuota (uso: task db:migrate:new NAME=slug)'
