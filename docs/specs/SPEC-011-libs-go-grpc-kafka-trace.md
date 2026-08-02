@@ -1,5 +1,5 @@
 # SPEC-011 — libs/go: OTel + config + interceptor gRPC (SecurityContext) + estrazione trace_id da header Kafka (T0.8, parte Go)
-Stato: implemented
+Stato: verified
 Task-tree: T0.8 (split per linguaggio — Go, secondo dei tre) · Servizio: libs/go/eci/{observability,config,secctx,kafkatrace} · ADD: Modulo 3 (SecurityContext, API Contracts), Modulo 4 §3.1 (Observability)
 Contratti: contracts/proto/eci/retrieval/v1/retrieval.proto (SecurityContext, letto — non modificato)
 
