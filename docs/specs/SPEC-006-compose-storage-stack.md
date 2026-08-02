@@ -1,5 +1,5 @@
 # SPEC-006 — Compose di sviluppo: datastore storage (Postgres, Neo4j, Qdrant, OpenSearch, MinIO)
-Stato: implemented
+Stato: verified
 Task-tree: T0.6 (split — vedi §5 Non-goals) · Servizio: deploy/compose · ADD: Modulo 1 (datastore), Modulo 4 §2 (deployment strategy, qui in versione dev locale)
 Contratti: nessuno (nessun file sotto contracts/ toccato)
 
