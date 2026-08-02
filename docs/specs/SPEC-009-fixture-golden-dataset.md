@@ -1,5 +1,5 @@
 # SPEC-009 — Fixture di ingestion (sample-repo) + golden dataset v0
-Stato: implemented
+Stato: verified
 Task-tree: T0.10 (ultimo prerequisito di Fase 0, sblocca T1.1) · Servizio: tests/fixtures, tests/golden · ADD: Modulo 1 (CPG: File/Class/Interface/Method/Function/CallSite, archi CONTAINS/CALLS)
 Contratti: nessuno (nessun file sotto contracts/ toccato)
 
