@@ -79,8 +79,13 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 	if cfg.URI != "bolt://localhost:7687" {
 		t.Errorf("URI = %q, want default bolt://localhost:7687", cfg.URI)
 	}
-	if cfg.Username != "" || cfg.Password != "" {
-		t.Errorf("Username/Password = %q/%q, want empty defaults", cfg.Username, cfg.Password)
+	// Default allineato a NEO4J_AUTH=neo4j/eci-dev-only in
+	// deploy/compose/docker-compose.yml (SPEC-006), non credenziali vuote.
+	if cfg.Username != "neo4j" {
+		t.Errorf("Username = %q, want default neo4j", cfg.Username)
+	}
+	if cfg.Password != "eci-dev-only" {
+		t.Errorf("Password = %q, want default eci-dev-only", cfg.Password)
 	}
 }
 

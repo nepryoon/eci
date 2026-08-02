@@ -2,14 +2,19 @@ version: '3'
 
 tasks:
   up:
-    desc: Avvia lo stack di sviluppo locale (docker compose)
+    desc: Avvia lo stack di sviluppo locale (docker compose) e attende che tutti i servizi siano healthy
     cmds:
-      - echo "not implemented yet — see T0.6"
+      - bash deploy/compose/up.sh
 
   down:
-    desc: Ferma lo stack di sviluppo locale (docker compose)
+    desc: Ferma lo stack di sviluppo locale (docker compose); i volumi nominati non vengono rimossi
     cmds:
-      - echo "not implemented yet — see T0.6"
+      - docker compose -f deploy/compose/docker-compose.yml down
+
+  up:verify:
+    desc: Verifica connettività reale ai 5 datastore dello stack già in esecuzione
+    cmds:
+      - bash deploy/compose/verify.sh
 
   build:
     desc: Compila ogni modulo Go/Rust/Python popolato in services/
@@ -70,17 +75,13 @@ tasks:
 
   db:migrate:
     desc: Applica le migration Postgres
-    vars:
-      POSTGRES_URL: '{{.POSTGRES_URL | default "postgres://eci:eci@localhost:5432/eci?sslmode=disable"}}'
     cmds:
-      - migrate -source file://contracts/sql/migrations -database "{{.POSTGRES_URL}}" up
+      - migrate -source file://contracts/sql/migrations -database "${POSTGRES_DSN:-postgres://eci:eci-dev-only@localhost:5432/eci?sslmode=disable}" up
 
   db:migrate:down:
     desc: Rollback dell'ultima migration Postgres
-    vars:
-      POSTGRES_URL: '{{.POSTGRES_URL | default "postgres://eci:eci@localhost:5432/eci?sslmode=disable"}}'
     cmds:
-      - migrate -source file://contracts/sql/migrations -database "{{.POSTGRES_URL}}" down 1
+      - migrate -source file://contracts/sql/migrations -database "${POSTGRES_DSN:-postgres://eci:eci-dev-only@localhost:5432/eci?sslmode=disable}" down 1
 
   db:migrate:new:
     desc: 'Crea una nuova coppia di file di migration vuota (uso: task db:migrate:new NAME=slug)'
