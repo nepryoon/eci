@@ -117,6 +117,25 @@ topic Kafka) non è verificato qui: questa SPEC si ferma allo stato
 `connector.state=RUNNING`, confermato via REST API. Il test end-to-end è
 SPEC-008.
 
+### Su uno stack fresco: esegui `task db:migrate` prima di fidarti di RUNNING
+
+`task up` registra il connector Debezium e ne attende lo stato `RUNNING`
+anche se `task db:migrate` non è ancora stato eseguito — su uno stack
+fresco `public.outbox` non esiste ancora, e Debezium lo logga
+esplicitamente (`docker compose logs kafka-connect`):
+
+```
+WARN ... After applying the include/exclude list filters, no changes will be captured. Please check your configuration!
+```
+
+Il connector risulta comunque `RUNNING` (il processo è vivo, si è
+registrato correttamente), ma **non cattura nulla** finché la tabella
+`outbox` non esiste. `connector.state=RUNNING` conferma solo che il
+processo Debezium è in esecuzione, non che stia effettivamente catturando
+eventi reali dall'outbox. Su uno stack fresco, esegui **prima** `task
+db:migrate` (che crea `public.outbox`) e solo dopo considera il connector
+operativo.
+
 ### Replication slot residuo dopo `down`/`up`
 
 Il connector usa uno slot di replica Postgres con nome fisso

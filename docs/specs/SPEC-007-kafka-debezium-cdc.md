@@ -104,12 +104,12 @@ Nessun testcontainers qui (come SPEC-006: lo stack stesso è l'oggetto sotto ver
 Non applicabile in questa SPEC (osservabilità vera è Fase 7 / Modulo 4). I log di `kafka-connect` (`docker compose logs kafka-connect`) sono la fonte primaria per diagnosticare problemi del connector durante lo sviluppo.
 
 ## 9. Criteri di accettazione
-- [x] `task up` porta anche `kafka`/`kafka-connect` a stato `healthy` e registra il connector senza errori — stack reale, tutti i 7 servizi healthy in 36-40s, connector registrato (201 Created) al primo run.
+- [x] `task up` porta anche `kafka`/`kafka-connect` a stato `healthy` e registra il connector senza errori — stack reale, tutti i 7 servizi healthy in 36-40s, connector registrato (201 Created) al primo run. Riverificato anche con `public.outbox` presente (dopo `task db:migrate`, eseguito dopo `task up` in questo test): `table.include.list=public.outbox` risulta l'unica tabella catturata su 5 nello schema `public` (`code_node`, `code_relation`, `outbox`, `processed_events`, `schema_migrations` — quest'ultima è la tabella di bookkeeping di `golang-migrate`), confermato via `GET /connectors/eci-outbox-connector/config`. La pubblicazione Postgres `eci_outbox_publication` è invece `FOR ALL TABLES` (`puballtables=t` in `pg_publication`) e quindi traccia tutte e 5 le tabelle a livello WAL (`pg_publication_tables` le elenca tutte e 5, con gli `attnames` reali di ciascuna — per `outbox`: `{id,aggregate_type,aggregate_id,event_type,payload,trace_id,created_at}`, che coincidono esattamente con le colonne di SPEC-005) — è `table.include.list` lato Debezium, non la pubblicazione Postgres, a restringere la cattura effettiva alla sola `outbox`.
 - [x] `task up:verify` conferma `connector.state=RUNNING` e tutti i task `RUNNING` (scenario 2) — confermato via REST reale (`GET /connectors/eci-outbox-connector/status`).
 - [x] `task up` rilanciato una seconda volta non fallisce sulla registrazione del connector (scenario 3) — rilanciato più volte di seguito (worker Kafka Connect ancora attivo): `register-connector.sh` riceve 409, lo tratta come successo, `task up` esce con rc=0, connector resta RUNNING.
 - [x] `SHOW wal_level;` su Postgres restituisce `logical` (scenario 4) — interrogato direttamente via `psql`, risposta `logical`.
 - [x] Comportamento su slot di replica residuo dopo `down`/`up` verificato (scenario 5) — vedi §10 per il meccanismo osservato esattamente (non quello ipotizzato nel testo originale della SPEC).
-- [x] README aggiornato con: prerequisito `wal_level=logical` (motivato), nuove porte (`9094` Kafka esterno, `8083` Kafka Connect REST), fix manuale per lo slot di replica residuo.
+- [x] README aggiornato con: prerequisito `wal_level=logical` (motivato), nuove porte (`9094` Kafka esterno, `8083` Kafka Connect REST), fix manuale per lo slot di replica residuo, e la nota su stack fresco/`task db:migrate` prima di considerare il connector operativo (vedi sotto).
 
 ## 10. Deviazioni rispetto alla SPEC
 
@@ -136,17 +136,26 @@ Non applicabile in questa SPEC (osservabilità vera è Fase 7 / Modulo 4). I log
    caso: `register-connector.sh` riceve **201 Created** (non 409) a ogni
    riavvio completo dello stack, perché il worker Kafka Connect ricreato
    non ha lo stato del connector precedente in memoria al momento del POST.
-   Nonostante questo, non si verifica mai un fallimento: Postgres/Debezium
-   riusa correttamente lo slot di replica esistente sul volume persistito
-   (verificato via `SELECT slot_name, active, plugin FROM
-   pg_replication_slots;`: un solo slot `eci_outbox_slot`, `active=t`,
-   nessun duplicato) e il connector converge sempre a un singolo
-   `eci-outbox-connector` in stato `RUNNING` con un solo task `RUNNING`
-   (confermato via log `kafka-connect`: una sola riga "Creating connector
-   .../Finished creating connector" per riavvio, nessun errore di slot).
-   Il fix manuale per lo scenario realmente problematico (slot esistente
-   ma inconsistente) resta documentato nel README come da SPEC, anche se
-   non è mai stato necessario innescarlo nei test di questa sessione.
+
+   Nonostante questo, non si verifica mai un fallimento — ma la
+   convergenza a uno stato consistente **non è immediata, verificato
+   empiricamente**: subito dopo il 201/409 (in entrambi i casi, non solo
+   al 201), `GET .../status` può mostrare temporaneamente `tasks: []`
+   (nessun task ancora assegnato) e lo slot di replica Postgres con
+   `active=false`, perché in modalità distribuita Kafka Connect assegna il
+   task al worker solo dopo un rebalance che richiede alcuni secondi (~15s
+   osservati). Solo dopo quell'intervallo il task passa a `RUNNING` e lo
+   slot diventa `active=true`. Per questo `register-connector.sh` non
+   dichiara più successo al solo 201/409: dopo la registrazione fa il poll
+   di `GET .../status` (timeout separato, `RUNNING_TIMEOUT_SECONDS`,
+   default 60s) finché `connector.state=RUNNING` **e** almeno un elemento
+   di `tasks[]` è `RUNNING`, prima di ritornare. Verificato via `SELECT
+   slot_name, active, plugin FROM pg_replication_slots;`: un solo slot
+   `eci_outbox_slot`, nessun duplicato, `active=t` una volta che il poll
+   ha confermato successo. Il fix manuale per lo scenario realmente
+   problematico (slot esistente ma inconsistente) resta documentato nel
+   README come da SPEC, anche se non è mai stato necessario innescarlo nei
+   test di questa sessione.
 
 4. **`up.sh`/`verify.sh` estesi, non nuovi script**: coerente con
    l'indicazione della SPEC di estendere `task up`/`task up:verify` senza
