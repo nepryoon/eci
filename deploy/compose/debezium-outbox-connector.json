@@ -1,0 +1,20 @@
+{
+  "name": "eci-outbox-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "eci",
+    "database.password": "eci-dev-only",
+    "database.dbname": "eci",
+    "topic.prefix": "eci",
+    "table.include.list": "public.outbox",
+    "plugin.name": "pgoutput",
+    "slot.name": "eci_outbox_slot",
+    "publication.name": "eci_outbox_publication",
+    "transforms": "outbox",
+    "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+    "transforms.outbox.route.by.field": "aggregate_type",
+    "transforms.outbox.table.field.event.key": "aggregate_id"
+  }
+}
