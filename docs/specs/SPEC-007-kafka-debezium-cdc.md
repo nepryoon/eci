@@ -1,5 +1,5 @@
 # SPEC-007 — Compose di sviluppo: Kafka KRaft + Debezium/Kafka Connect (CDC outbox)
-Stato: implemented
+Stato: verified
 Task-tree: T0.6b (secondo split di T0.6 — vedi SPEC-006 §5) · Servizio: deploy/compose · ADD: Modulo 1 §2.2 (CDC & Eventual Consistency)
 Contratti: nessuno (nessun file sotto contracts/ toccato)
 
