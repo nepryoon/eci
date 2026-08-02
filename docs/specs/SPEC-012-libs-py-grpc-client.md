@@ -1,5 +1,5 @@
 # SPEC-012 — libs/py: OTel + config + interceptor gRPC client (SecurityContext) (T0.8, parte Python — ultima delle tre)
-Stato: implemented
+Stato: verified
 Task-tree: T0.8 (split per linguaggio — Python, terzo e ultimo dei tre) · Servizio: libs/py/eci_core (moduli aggiunti al package già esistente da SPEC-003) · ADD: Modulo 3 (SecurityContext, API Contracts), Modulo 4 §3.1 (Observability)
 Contratti: contracts/proto/eci/retrieval/v1/retrieval.proto (SecurityContext, letto — non modificato)
 
