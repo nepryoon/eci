@@ -1,0 +1,82 @@
+[
+  {
+    "id": "g01",
+    "query": "Chi chiama Validate?",
+    "expected_facts": {
+      "callers": ["OrderService.Validate <- OrderService.Process"]
+    },
+    "scope_note": "intra-file (order_service.go), deve essere trovato da T1.1"
+  },
+  {
+    "id": "g02",
+    "query": "Chi chiama Process?",
+    "expected_facts": {
+      "callers": []
+    },
+    "scope_note": "main (main.go) chiama OrderService.Process (order_service.go): cross-file, T1.1 non cattura CALLS cross-file per design — nessun caller atteso a questo stadio, limite noto non un buco silenzioso"
+  },
+  {
+    "id": "g03",
+    "query": "Chi chiama computeTotal?",
+    "expected_facts": {
+      "callers": []
+    },
+    "scope_note": "OrderService.Process (order_service.go) chiama computeTotal (util.go): cross-file, T1.1 non cattura CALLS cross-file per design — nessun caller atteso a questo stadio, limite noto non un buco silenzioso"
+  },
+  {
+    "id": "g04",
+    "query": "Quali metodi ha OrderService?",
+    "expected_facts": {
+      "methods": ["OrderService.Process", "OrderService.Validate"]
+    },
+    "scope_note": "membri di una Class, entrambe le dichiarazioni in order_service.go"
+  },
+  {
+    "id": "g05",
+    "query": "Quali tipi implementano l'interfaccia Notifier?",
+    "expected_facts": {
+      "implementations": ["EmailNotifier"]
+    },
+    "scope_note": "Interface Notifier e la sua implementazione EmailNotifier, entrambe in notifier.go"
+  },
+  {
+    "id": "g06",
+    "query": "Cosa contiene order_service.go?",
+    "expected_facts": {
+      "contains": ["OrderService", "OrderService.Process", "OrderService.Validate"]
+    },
+    "scope_note": "arco CONTAINS di un File verso le entità che dichiara"
+  },
+  {
+    "id": "g07",
+    "query": "Cosa contiene notifier.go?",
+    "expected_facts": {
+      "contains": ["Notifier", "EmailNotifier", "EmailNotifier.Notify"]
+    },
+    "scope_note": "arco CONTAINS, copre sia un'Interface sia una Class nello stesso file"
+  },
+  {
+    "id": "g08",
+    "query": "Cosa contiene util.go?",
+    "expected_facts": {
+      "contains": ["computeTotal"]
+    },
+    "scope_note": "file con una singola funzione standalone, nessuna Class/Interface"
+  },
+  {
+    "id": "g09",
+    "query": "Cosa contiene main.go?",
+    "expected_facts": {
+      "contains": ["main"]
+    },
+    "scope_note": "file con una singola funzione standalone (main); la chiamata in uscita verso OrderService.Process non produce un arco CALLS essendo cross-file"
+  },
+  {
+    "id": "g10",
+    "query": "OrderService è una Class o una Interface?",
+    "expected_facts": {
+      "node_type": "Class"
+    },
+    "scope_note": "verifica la mappatura struct -> Class (SPEC-009 §2); nessuna ambiguità per questo fixture"
+  }
+]
