@@ -1,5 +1,5 @@
 # SPEC-010 — libs/rust: bootstrap OTel + config loader (T0.8, parte Rust)
-Stato: implemented
+Stato: verified
 Task-tree: T0.8 (split per linguaggio — Rust, primo dei tre) · Servizio: libs/rust/eci-common · ADD: Modulo 4 §3.1 (Observability & Agent Tracing, OTel end-to-end)
 Contratti: nessuno (nessun file sotto contracts/ toccato)
 
