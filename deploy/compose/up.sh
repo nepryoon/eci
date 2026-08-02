@@ -3,6 +3,8 @@
 # healthcheck risultino "healthy" entro un timeout complessivo (default 90s).
 # Se il timeout scade, fallisce elencando esplicitamente quali servizi non
 # sono diventati healthy (non un timeout muto).
+# SPEC-007 §2 (estensione): una volta tutti healthy (kafka/kafka-connect
+# inclusi), registra il connector Debezium outbox.
 set -uo pipefail
 
 COMPOSE_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/docker-compose.yml"
@@ -30,7 +32,10 @@ while true; do
 
   if [ "${#not_healthy[@]}" -eq 0 ]; then
     echo "Tutti i servizi sono healthy dopo ${elapsed}s."
-    exit 0
+    # SPEC-007 §2: registra (o conferma già registrato, 409=successo) il
+    # connector Debezium outbox una volta che kafka-connect è healthy.
+    bash "$(dirname "${BASH_SOURCE[0]}")/register-connector.sh"
+    exit $?
   fi
 
   if [ "${elapsed}" -ge "${TIMEOUT_SECONDS}" ]; then

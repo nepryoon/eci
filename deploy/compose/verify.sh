@@ -5,6 +5,8 @@
 # fallimento, mai un errore aggregato generico. Se lo stack non è in
 # esecuzione, fallisce dicendolo esplicitamente (non con un timeout di
 # connessione criptico).
+# SPEC-007 §2/§3 scenario 2 (estensione): verifica anche che il connector
+# Debezium outbox sia connector.state=RUNNING con tutti i task RUNNING.
 set -uo pipefail
 
 COMPOSE_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/docker-compose.yml"
@@ -12,6 +14,8 @@ POSTGRES_HOST_PORT="${POSTGRES_HOST_PORT:-5432}"
 QDRANT_HOST_PORT="${QDRANT_HOST_PORT:-6333}"
 OPENSEARCH_HOST_PORT="${OPENSEARCH_HOST_PORT:-9200}"
 MINIO_HOST_PORT="${MINIO_HOST_PORT:-9000}"
+KAFKA_CONNECT_HOST_PORT="${KAFKA_CONNECT_HOST_PORT:-8083}"
+CONNECTOR_NAME="eci-outbox-connector"
 
 overall_rc=0
 
@@ -87,6 +91,21 @@ if check_running minio; then
     echo "OK   minio: GET /minio/health/live -> 200"
   else
     echo "FAIL minio: GET /minio/health/live -> ${http_code} (atteso 200)"
+    overall_rc=1
+  fi
+fi
+
+# kafka-connect: connector.state=RUNNING e tutti i task in tasks[] RUNNING
+# (SPEC-007 §3 scenario 2)
+if check_running kafka-connect; then
+  status_body="$(curl -s "http://localhost:${KAFKA_CONNECT_HOST_PORT}/connectors/${CONNECTOR_NAME}/status" 2>&1)"
+  connector_state="$(echo "${status_body}" | jq -r '.connector.state // "sconosciuto"' 2>/dev/null)"
+  failed_tasks="$(echo "${status_body}" | jq -r '[.tasks[]? | select(.state != "RUNNING") | "\(.id):\(.state)"] | join(",")' 2>/dev/null)"
+  task_count="$(echo "${status_body}" | jq -r '.tasks | length' 2>/dev/null)"
+  if [ "${connector_state}" = "RUNNING" ] && [ -z "${failed_tasks}" ]; then
+    echo "OK   kafka-connect: connector ${CONNECTOR_NAME} RUNNING (${task_count} task, tutti RUNNING)"
+  else
+    echo "FAIL kafka-connect: connector ${CONNECTOR_NAME} state=${connector_state}, task non RUNNING: [${failed_tasks}] (risposta: ${status_body})"
     overall_rc=1
   fi
 fi

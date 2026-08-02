@@ -34,10 +34,19 @@ volumes:
     name: eci_opensearch_data
   eci_minio_data:
     name: eci_minio_data
+  eci_kafka_data:
+    name: eci_kafka_data
 
 services:
   postgres:
     image: postgres:17
+    # wal_level=logical: richiesto da Debezium per il logical decoding
+    # (SPEC-007 §2) — senza, il connector fallisce alla registrazione con un
+    # errore esplicito, non un timeout criptico. max_wal_senders/
+    # max_replication_slots=4 sono ampiamente sufficienti per un solo
+    # connector dev (esplicitati per documentare l'intento, il default
+    # Postgres è già 10).
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_wal_senders=4", "-c", "max_replication_slots=4"]
     environment:
       POSTGRES_USER: eci
       POSTGRES_PASSWORD: eci-dev-only
@@ -138,3 +147,62 @@ services:
       timeout: 5s
       retries: 15
       start_period: 10s
+
+  kafka:
+    # :latest verificato al momento dell'implementazione: risolve a Kafka
+    # 4.3.1 (KRaft-only dalla 4.0 — nessuna modalità ZooKeeper da escludere
+    # esplicitamente). Nessun pin esplicito necessario (stesso trattamento
+    # di Qdrant in SPEC-006, vedi deviazione in SPEC-007 §10).
+    image: apache/kafka:latest
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    ports:
+      - "9094:9094"
+    volumes:
+      - eci_kafka_data:/var/lib/kafka/data
+    networks:
+      - eci-dev
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  kafka-connect:
+    # SPEC-007 §2 chiede debezium/connect:latest, ma quel repository/tag
+    # non esiste su Docker Hub (solo tag di versione esplicita, es.
+    # 2.7.3.Final, mai "latest" — verificato al momento dell'implementazione,
+    # `docker pull debezium/connect:latest` fallisce con "not found").
+    # L'immagine ufficiale equivalente con tag :latest è pubblicata su Quay
+    # (stessi plugin Debezium preinstallati, incluso il connector
+    # PostgreSQL). Deviazione annotata in SPEC-007 §10.
+    image: quay.io/debezium/connect:latest
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: eci-connect
+      CONFIG_STORAGE_TOPIC: eci_connect_configs
+      OFFSET_STORAGE_TOPIC: eci_connect_offsets
+      STATUS_STORAGE_TOPIC: eci_connect_status
+    ports:
+      - "8083:8083"
+    depends_on:
+      - kafka
+      - postgres
+    networks:
+      - eci-dev
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
