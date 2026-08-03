@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+tree-sitter = "0.26.11"
+tree-sitter-go = "0.25.0"
+sha2 = "0.11.0"
+tracing = "0.1.44"
+eci-common = { path = "../../libs/rust/eci-common" }
