@@ -40,12 +40,21 @@ pub fn parse_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRela
         .expect("grammatica tree-sitter-go valida");
     // tree-sitter ha error recovery nativo (SPEC-013 §4): anche con
     // errori di sintassi, `parse` ritorna sempre un albero (mai `None`
-    // per una grammatica non-None come questa), con nodi ERROR al posto
-    // delle porzioni non valide. Il loop sui figli di primo livello sotto
-    // riconosce solo kind espliciti ("type_declaration",
-    // "function_declaration", "method_declaration"): un nodo ERROR non
-    // corrisponde a nessuno di questi e viene naturalmente ignorato,
-    // senza bisogno di gestione speciale.
+    // per una grammatica non-None come questa). Verificato ispezionando
+    // l'albero prodotto per il caso di test dedicato: quando manca un
+    // punto di sincronizzazione esplicito (es. `type Broken struct` senza
+    // il corpo `{}`), Tree-sitter non isola l'errore in un nodo ERROR
+    // sibling che si possa semplicemente saltare — ri-annida il testo
+    // sorgente successivo (fino al prossimo punto in cui riesce a
+    // risincronizzarsi) DENTRO lo span del nodo malformato stesso, come
+    // figli spuri (es. una `function_declaration` successiva diventa una
+    // `field_declaration` innestata nello `struct_type` rotto). Per
+    // questo il loop sui figli di primo livello sotto, che riconosce solo
+    // kind espliciti ("type_declaration", "function_declaration",
+    // "method_declaration"), la omette naturalmente: non perché un nodo
+    // ERROR viene incontrato e ignorato, ma perché a livello di root la
+    // dichiarazione inghiottita non esiste più come proprio kind — è
+    // diventata un dettaglio interno del nodo malformato adiacente.
     let tree = parser.parse(source, None).expect("tree-sitter parse");
     let root = tree.root_node();
 

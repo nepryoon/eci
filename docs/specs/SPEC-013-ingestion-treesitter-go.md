@@ -68,7 +68,7 @@ Verificati direttamente contro il fixture di SPEC-009 (`tests/fixtures/sample-re
 
 | Condizione | Comportamento atteso |
 |---|---|
-| Codice Go con errori di sintassi (Tree-sitter ha error recovery nativo, per design tollera input parzialmente invalido) | Il parsing prosegue sulle parti valide; le entità non estraibili dalla porzione con errore vengono omesse, non causano un panic o un fallimento dell'intero file — coerente con l'error recovery per-unità già menzionato nell'ADD (Modulo 1 §1.5, "fault-isolation per unità") |
+| Codice Go con errori di sintassi (Tree-sitter ha error recovery nativo, per design tollera input parzialmente invalido) | Il parsing prosegue sulle parti valide; le entità non estraibili dalla porzione con errore vengono omesse, non causano un panic o un fallimento dell'intero file — questo è il comportamento accettato per design, non solo rimandato: l'ADD (Modulo 1 §1.5, "fault-isolation per unità") richiede esplicitamente che un errore sia isolato all'unità che lo contiene, senza propagarsi. Verificato empiricamente che l'isolamento è stretto: il recovery di Tree-sitter inghiotte al più la dichiarazione immediatamente adiacente a quella malformata (ri-annidata nel suo span, es. come `field_declaration` spuria dentro uno `struct_type` rotto), poi si risincronizza correttamente sulle dichiarazioni successive — non un effetto a cascata sul resto del file. Dettaglio ed evidenza in §10 punto 5 |
 | Un file Go vuoto o senza dichiarazioni di primo livello | Produce comunque 1 `CodeNode` File, zero altre entità, zero archi — non un errore |
 | Due funzioni con lo stesso nome in file diversi (normale in Go, namespacing per package/file) | Non genera falsi positivi di risoluzione CALLS: la mappa nome→id è costruita per-file, non globale — un nome che esiste anche altrove ma non nel file corrente resta non trovato, coerente con lo scope intra-file dichiarato |
 
@@ -175,6 +175,27 @@ Uso di `libs/rust/eci-common::observability::init_tracing` (SPEC-010): uno span 
    asserito nel test finale, che verifica il comportamento osservabile —
    nodi prodotti/omessi — non un dettaglio interno dell'albero
    Tree-sitter).
+
+   **Ampiezza del recovery, verificata separatamente (non nel test
+   committato)**: ispezionando l'albero prodotto per varianti del
+   sorgente con dichiarazioni aggiuntive dopo `alsoValid()` (es. `func
+   third() {...}`, poi anche un `type AnotherOne struct {...}` valido e
+   `func fourth() {}`), Tree-sitter risincronizza correttamente sul primo
+   costrutto di primo livello riconoscibile subito dopo la dichiarazione
+   inghiottita: SOLO `alsoValid()` — la dichiarazione immediatamente
+   adiacente a quella malformata — finisce ri-annidata nello span
+   dell'errore; tutte le dichiarazioni successive tornano ad essere figli
+   diretti di `root_node()` e vengono estratte normalmente. Questo
+   conferma che l'isolamento richiesto dall'ADD (Modulo 1 §1.5,
+   "fault-isolation per unità") è rispettato in senso stretto anche nel
+   caso peggiore osservato qui: un errore di sintassi precoce in un file
+   più grande non fa perdere l'intero resto del file, ma al più la singola
+   unità adiacente a quella malformata. Non è stato investigato se esista
+   una forma di errore che ingoi più di una dichiarazione adiacente (il
+   comportamento di recovery di Tree-sitter è euristico, non specificato
+   come contratto) — se osservato in futuro su codice reale, va trattato
+   come nuovo edge case da documentare, non come violazione di questa
+   garanzia.
 
 ### Evidenza scenari 1/2/3 (order_service.go, conteggi esatti)
 
