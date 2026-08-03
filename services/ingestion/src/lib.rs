@@ -1,10 +1,15 @@
 //! `ingestion` — parsing Go con Tree-sitter -> CPG walking skeleton
-//! (SPEC-013, T1.1). `parse_file` produce `CodeNode`/`CodeRelation` in
-//! memoria (nessuna scrittura Postgres qui, vedi SPEC-013 §5).
+//! (SPEC-013, T1.1) più persistenza PostgreSQL transazionale (SPEC-014,
+//! T1.2). `parse_file` produce `CodeNode`/`CodeRelation` in memoria;
+//! `persist_parsed_file` (modulo [`persist`]) li scrive dentro un'unica
+//! transazione ACID (nodi upsert, relazioni sostituite, righe outbox).
 
 use std::collections::HashMap;
 
 use tree_sitter::Node;
+
+pub mod persist;
+pub use persist::{persist_parsed_file, PersistError, PersistSummary};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeNode {
