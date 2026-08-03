@@ -178,8 +178,20 @@ Uso di `eci_common::observability::current_trace_id_hex()` (SPEC-010) per popola
    di §2 (`ingestion::persist_parsed_file(...)`) nonostante la separazione
    fisica del file.
 
-6. **Non wired in `Taskfile.yml`** (`task test:integration` non invoca i
-   test di questo file): il perimetro file assegnato per questa sessione era
-   `services/ingestion` e questa SPEC — `Taskfile.yml` è fuori scope. Stesso
-   precedente esplicito di SPEC-008 §10 deviazione #5
-   (`tests/integration/outbox_cdc` non wired nella stessa sessione).
+6. **Wired in `Taskfile.yml`** (aggiunto in una sessione successiva,
+   esplicitamente richiesta dall'utente — il perimetro file iniziale non
+   includeva `Taskfile.yml`, poi ampliato): `task lint` esegue
+   `cd services/ingestion && cargo clippy --test persist_integration_test`
+   (riga dedicata, stesso pattern di `go vet -tags=integration ./...` per
+   `tests/integration/postgres_ddl`/`outbox_cdc` — anche se qui è in
+   parte ridondante con `cargo clippy --all-targets` già eseguito da
+   `scripts/task-lint.sh` per `services/ingestion`, dato che i test di
+   integrazione Rust vivono nello STESSO crate, non in un modulo Go
+   separato come `tests/integration/*`: `--all-targets` li copre già
+   implicitamente. La riga dedicata resta comunque utile per la visibilità
+   esplicita in `task lint`, come richiesto). `task test:integration`
+   esegue `cd services/ingestion && cargo test --test
+   persist_integration_test -- --ignored --test-threads=1` — entrambe
+   verificate con un'esecuzione reale di `task lint`/`task test:integration`
+   (quest'ultima con Docker disponibile: 2 test eseguiti realmente, non
+   solo compilati, entrambi verdi).
