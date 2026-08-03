@@ -1,5 +1,5 @@
 # SPEC-013 — ingestion v0: parsing Go con Tree-sitter → CPG walking skeleton (T1.1)
-Stato: implemented
+Stato: verified
 Task-tree: T1.1 (primo task di Fase 1) · Servizio: services/ingestion (Rust) · ADD: Modulo 1 §1.2-1.3 (CPG a livello statement), §1.4 (name resolution — qui solo intra-file)
 Contratti: contracts/jsonschema/hybrid-graph.json (D2, letto come riferimento — CodeNode/CodeRelation, non modificato)
 
