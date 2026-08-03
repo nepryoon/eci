@@ -1,5 +1,5 @@
 # SPEC-014 — Scrittura PostgreSQL: transazione ACID + outbox (T1.2)
-Stato: implemented
+Stato: verified
 Task-tree: T1.2 (secondo task di Fase 1) · Servizio: services/ingestion (Rust, estende T1.1) · ADD: Modulo 1 §2.2.1 (pattern outbox, Postgres come sorgente di verità)
 Contratti: contracts/sql/migrations/0001_init.up.sql (schema reale, letto — non modificato), contracts/jsonschema/hybrid-graph.json (D2, forma del payload outbox)
 
