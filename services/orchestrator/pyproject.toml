@@ -2,7 +2,37 @@
 name = "orchestrator"
 version = "0.1.0"
 requires-python = ">=3.11"
+dependencies = [
+    "grpcio>=1.60",
+    "protobuf>=5",
+    "opentelemetry-api>=1.44.0",
+    "opentelemetry-sdk>=1.44.0",
+    "opentelemetry-instrumentation-grpc>=0.65b0",
+    # Client HTTP verso vllm-fake (SPEC-017) — non "extra": dipendenza
+    # diretta di runtime, non solo di test (a differenza di come è usata
+    # in fakes/vllm-fake, dove serve solo a TestClient).
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+    # SPEC-018 §7: retrieval-engine reale con testcontainers Neo4j,
+    # stesso pattern SPEC-016 — qui lato Python (nessun binding Go da
+    # questo processo, il server retrieval-engine è avviato come
+    # sottoprocesso separato, vedi conftest.py).
+    "testcontainers[neo4j]>=4.15",
+]
+
+[project.scripts]
+eci = "orchestrator.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["orchestrator*"]
+
+[tool.ruff]
+extend-exclude = [".venv"]
