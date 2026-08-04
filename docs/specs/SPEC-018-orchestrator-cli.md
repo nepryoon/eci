@@ -1,5 +1,5 @@
 # SPEC-018 — orchestrator v0: CLI `eci ask`, query→retrieval→prompt→vllm-fake→risposta con provenance (T1.5)
-Stato: implemented
+Stato: verified
 Task-tree: T1.5 (quinto task di Fase 1, penultimo) · Servizio: services/orchestrator (Python, finora solo scaffold vuoto) · ADD: Modulo 2 (Agentic Reasoning, qui nella sua forma più semplice — nessun agente reale ancora)
 Contratti: contracts/proto/eci/retrieval/v1/retrieval.proto (D7, client — non modificato)
 
