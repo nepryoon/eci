@@ -69,6 +69,7 @@ for svc in "${PY_SERVICES[@]}"; do
     status=1
     continue
   fi
+  "${venv}/bin/python" -m pip install -q -e "libs/py" || { status=1; continue; }
   "${venv}/bin/python" -m pip install -q -e "${dir}" || status=1
 done
 
