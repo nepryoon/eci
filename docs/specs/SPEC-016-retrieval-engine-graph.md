@@ -1,5 +1,5 @@
 # SPEC-016 — retrieval-engine v0: server gRPC sulla sola gamba grafo (T1.4)
-Stato: implemented
+Stato: verified
 Task-tree: T1.4 (quarto task di Fase 1) · Servizio: services/retrieval-engine (Go, finora solo scaffold vuoto) · ADD: Modulo 2 (Retrieval), Modulo 3 (API Contracts)
 Contratti: contracts/proto/eci/retrieval/v1/retrieval.proto (D7, letto — non modificato)
 
