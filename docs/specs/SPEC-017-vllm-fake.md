@@ -1,5 +1,5 @@
 # SPEC-017 — vllm-fake: LLM fake OpenAI-compatible, risposte deterministiche (T0.9, scope rivisto)
-Stato: implemented
+Stato: verified
 Task-tree: T0.9 (recuperato dopo Fase 0 — scope rivisto, vedi §1) · Servizio: fakes/vllm-fake (Python, directory seedata ma vuota da Step 1-3) · ADD: Modulo 4 (Tech Stack — vLLM come backend LLM reale in Fase 5)
 Contratti: nessuno (nessun file sotto contracts/ toccato)
 
