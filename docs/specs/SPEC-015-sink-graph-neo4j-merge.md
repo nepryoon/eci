@@ -1,5 +1,5 @@
 # SPEC-015 — sink-graph v0: consumer Kafka + MERGE idempotente Neo4j (T1.3)
-Stato: implemented
+Stato: verified
 Task-tree: T1.3 (terzo task di Fase 1) · Servizio: services/sink-graph (Go, finora solo scaffold vuoto) · ADD: Modulo 1 §2.2 (CDC), Modulo 1 §1.2-1.3 (CPG, schema D3)
 Contratti: deploy/compose/debezium-outbox-connector.json (addendum), contracts/cypher/schema.cypher (D3, letto — vincoli reali verificati, non modificato)
 
