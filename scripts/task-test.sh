@@ -67,6 +67,13 @@ for svc in "${PY_SERVICES[@]}"; do
     status=1
     continue
   fi
+  "${venv}/bin/python" -m pip install -q -e "libs/py" || { status=1; continue; }
+  # [test]: dipendenze extra dichiarate solo da alcuni servizi (es.
+  # testcontainers per orchestrator, SPEC-018) — richiedere l'extra su un
+  # pacchetto che non la definisce produce solo un warning pip innocuo
+  # ("does not provide the extra"), non un errore, verificato prima di
+  # applicare questo cambio a tutti e tre i PY_SERVICES indistintamente.
+  "${venv}/bin/python" -m pip install -q -e "${dir}[test]" || { status=1; continue; }
   if [ ! -x "${venv}/bin/pytest" ]; then
     "${venv}/bin/python" -m pip install -q pytest || { status=1; continue; }
   fi
