@@ -8,7 +8,6 @@ da SPEC-018 §7."""
 import os
 import socket
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -137,6 +136,49 @@ def retrieval_engine_addr(neo4j_bolt_url):
             proc.kill()
 
 
+def _create_venv(venv_dir: Path) -> None:
+    """Stesso fallback di scripts/task-build.sh:ensure_venv() — replicato
+    qui, non reinventato: `python3 -m venv` (stdlib, sempre disponibile)
+    tentato per primo, `python3 -m virtualenv` SOLO se quello fallisce.
+    Causa reale osservata (non ipotetica): nell'immagine Docker
+    python:3.11 usata in CI, `python -m virtualenv` diretto falliva con
+    `ModuleNotFoundError` (virtualenv non installato nel Python di
+    sistema), mentre `python -m venv` — modulo stdlib — funziona sempre,
+    a meno che manchi `ensurepip` (lo stesso caso limite già gestito dal
+    fallback bash, non specifico di questo file).
+
+    Deliberatamente `"python3"` (risolto da PATH), NON `sys.executable`:
+    questa funzione gira DENTRO pytest, già in esecuzione nel venv di
+    orchestrator — `sys.executable` punterebbe al python DI QUEL venv,
+    che non eredita gli user site-packages del sistema (isolamento
+    standard di un venv). Verificato empiricamente che questo importa
+    davvero: su questo host `python3 -m venv` fallisce comunque
+    (ensurepip mancante, indipendentemente da quale interprete lo invoca)
+    ma il fallback `python3 -m virtualenv` funziona SOLO se `python3` è
+    il Python di sistema (dove `virtualenv` è installato in
+    `~/.local/lib/.../site-packages`) — dallo stesso identico comando
+    lanciato tramite l'interprete di un venv nidificato, `virtualenv` non
+    è importabile e il fallback fallirebbe silenziosamente. `python3` via
+    PATH è esattamente cosa fa `scripts/task-build.sh:ensure_venv()`
+    quando bash la invoca — stessa risoluzione, non solo la stessa
+    sequenza di comandi."""
+    result = subprocess.run(["python3", "-m", "venv", str(venv_dir)], capture_output=True, text=True, check=False)
+    if result.returncode == 0:
+        return
+
+    result_virtualenv = subprocess.run(
+        ["python3", "-m", "virtualenv", "-q", str(venv_dir)], capture_output=True, text=True, check=False
+    )
+    if result_virtualenv.returncode == 0:
+        return
+
+    raise RuntimeError(
+        f"impossibile creare il venv in {venv_dir}: "
+        f"'python3 -m venv' -> {result.stdout.strip()!r} {result.stderr.strip()!r}; "
+        f"'python3 -m virtualenv' -> {result_virtualenv.stdout.strip()!r} {result_virtualenv.stderr.strip()!r}"
+    )
+
+
 def _ensure_vllm_fake_venv() -> Path:
     """Bootstrap del venv di fakes/vllm-fake se assente — stessi comandi
     del suo README (SPEC-017), eseguiti qui invece che a mano: questo
@@ -146,7 +188,7 @@ def _ensure_vllm_fake_venv() -> Path:
         return uvicorn_bin
 
     venv_dir = VLLM_FAKE_DIR / ".venv"
-    subprocess.run([sys.executable, "-m", "virtualenv", "-q", str(venv_dir)], check=True)
+    _create_venv(venv_dir)
     subprocess.run(
         [
             str(venv_dir / "bin" / "pip"),
