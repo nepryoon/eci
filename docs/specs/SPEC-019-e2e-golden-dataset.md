@@ -1,5 +1,5 @@
 # SPEC-019 — Test E2E: golden dataset contro la pipeline reale (T1.6, Milestone A)
-Stato: implemented
+Stato: verified
 Task-tree: T1.6 (ultimo task di Fase 1) · Nuovo: tests/e2e/ (Python) · ADD: Milestone A del piano originale ("pipeline viva end-to-end")
 Contratti: tests/golden/queries_v0.json (SPEC-009, letto — non modificato)
 
