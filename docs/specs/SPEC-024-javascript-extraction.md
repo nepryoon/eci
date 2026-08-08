@@ -1,5 +1,5 @@
 # SPEC-024 — Estrazione CPG JavaScript (T2.5, parte 1/3)
-Stato: implemented
+Stato: verified
 Task-tree: T2.5 (primo di tre sotto-task concordati: estrazione, poi stack-graphs JS, poi TypeScript) · Servizio: services/ingestion (Rust, estende T1.1) · ADD: Modulo 1 §1.2-1.4
 Contratti: nessuno sotto contracts/ (stesso schema CodeNode/CodeRelation di T1.1, nessuna estensione di schema richiesta)
 
