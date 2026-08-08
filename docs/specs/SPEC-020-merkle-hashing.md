@@ -1,5 +1,5 @@
 # SPEC-020 — Hashing Merkle SHA-256 + normalizzazione (T2.1)
-Stato: implemented
+Stato: verified
 Task-tree: T2.1 (primo task di Fase 2 — tutti gli altri task di Fase 2 tranne T2.4/T2.5 dipendono da questo) · Servizio: services/ingestion (Rust, estende T1.1) · ADD: Modulo 1 §1.6.1-1.6.2
 Contratti: nessuno (nessun file sotto contracts/ toccato — `ast_hash` resta `CHAR(64)` come già in SPEC-005, cambia solo come viene calcolato)
 
