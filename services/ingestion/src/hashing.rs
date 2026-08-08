@@ -627,8 +627,46 @@ func Validate() int {
         use super::*;
         use proptest::prelude::*;
 
+        // Le 25 keyword riservate della Go language spec
+        // (go.dev/ref/spec#Keywords) — non solo quelle usate nel template
+        // fisso di questo test. Verificato empiricamente che una sola
+        // dimenticanza (mancava "go") produce un albero Tree-sitter
+        // malformato quando pescata come nome di variabile locale
+        // (`go := 2` genera `go_statement (ERROR)`, non una
+        // `short_var_declaration` valida — confermato con `has_error()`):
+        // la stessa classe di bug si ripresenta per qualunque altra
+        // keyword mancante dalla lista, non solo "go".
         const GO_KEYWORDS: &[&str] = &[
-            "func", "int", "return", "package", "var", "if", "for", "else", "range", "case",
+            "break",
+            "case",
+            "chan",
+            "const",
+            "continue",
+            "default",
+            "defer",
+            "else",
+            "fallthrough",
+            "for",
+            "func",
+            "go",
+            "goto",
+            "if",
+            "import",
+            "interface",
+            "map",
+            "package",
+            "range",
+            "return",
+            "select",
+            "struct",
+            "switch",
+            "type",
+            "var",
+            // Non una keyword riservata (resta un identificatore legale in
+            // Go), ma è il tipo di ritorno letterale nel template fisso
+            // qui sotto (`func Compute() int`) — esclusa per prudenza,
+            // non perché romperebbe il parser.
+            "int",
         ];
 
         fn arb_identifier() -> impl Strategy<Value = String> {
