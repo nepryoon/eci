@@ -226,3 +226,30 @@ services:
       timeout: 5s
       retries: 15
       start_period: 10s
+
+  tei-embedding:
+    # SPEC-023 §2 — Text Embeddings Inference, variante GPU ufficiale, per
+    # il vero jina-code-embeddings-1.5b (1536 dim di default) quando una
+    # GPU e' disponibile. `profiles: ["gpu"]`: NON avviato da `task up`/
+    # `docker compose up` di default (nessuna GPU garantita sulla macchina
+    # di sviluppo) — richiede esplicitamente
+    # `docker compose --profile gpu up tei-embedding`. Non verificato con
+    # un avvio reale in questa SPEC (§5 Non-goals): solo validazione
+    # sintattica (`docker compose config`), nessuna GPU disponibile al
+    # momento dell'implementazione (verificato: ne' `nvidia-smi` ne'
+    # `/dev/nvidia*` presenti in questa sessione).
+    image: ghcr.io/huggingface/text-embeddings-inference:latest-cuda
+    profiles: ["gpu"]
+    environment:
+      HF_MODEL_ID: jinaai/jina-code-embeddings-1.5b
+    ports:
+      - "8002:80"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: ["gpu"]
+    networks:
+      - eci-dev
