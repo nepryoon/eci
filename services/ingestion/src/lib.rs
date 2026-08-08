@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use tree_sitter::Node;
 
 pub mod chunking;
+pub mod embedding;
 pub mod hashing;
 pub mod persist;
 pub use persist::{persist_parsed_file, PersistError, PersistSummary};
