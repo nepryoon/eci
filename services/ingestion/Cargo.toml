@@ -13,6 +13,7 @@ rust_decimal = { version = "1.42.1", features = ["db-postgres"] }
 serde_json = "1.0.151"
 postgres = { version = "0.19.14", features = ["with-serde_json-1"] }
 ureq = { version = "3.3.0", features = ["json"] }
+tree-sitter-javascript = "0.25.0"
 
 [dev-dependencies]
 testcontainers = { version = "0.27.3", features = ["blocking"] }
