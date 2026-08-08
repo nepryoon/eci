@@ -139,6 +139,51 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Cattura il commento di documentazione immediatamente precedente `node`
+/// (SPEC-021 §2, convenzione Go): uno o più nodi `comment` consecutivi
+/// nei fratelli precedenti di `node`, senza riga vuota né tra l'ultimo
+/// commento e `node` né tra i commenti stessi. `None` se non ce n'è
+/// nessuno con queste caratteristiche immediatamente prima. Il testo
+/// hashato è lo slice grezzo di sorgente dal primo all'ultimo commento
+/// trovato: preserva esattamente il whitespace originale tra loro (una
+/// docstring è prosa, non codice — non ha senso normalizzarla come
+/// `ast_hash`, SPEC-021 §2).
+pub fn doc_hash(node: Node, source: &[u8]) -> Option<String> {
+    let mut comments: Vec<Node> = Vec::new();
+    let mut expected_end_row = node.start_position().row;
+    let mut current = node.prev_sibling();
+
+    while let Some(sibling) = current {
+        if sibling.kind() != "comment" {
+            break;
+        }
+        // Nessuna riga vuota tra questo commento e ciò che lo segue
+        // (l'ultimo commento raccolto finora, o `node` stesso al primo
+        // giro): la riga finale del commento dev'essere esattamente la
+        // riga precedente.
+        if sibling.end_position().row + 1 != expected_end_row {
+            break;
+        }
+        expected_end_row = sibling.start_position().row;
+        comments.push(sibling);
+        current = sibling.prev_sibling();
+    }
+
+    if comments.is_empty() {
+        return None;
+    }
+
+    // `comments` è stato accumulato dal più vicino al più lontano da
+    // `node`: il primo per posizione nel sorgente è l'ultimo raccolto.
+    let first = *comments.last().unwrap();
+    let last = *comments.first().unwrap();
+    let span = &source[first.start_byte()..last.end_byte()];
+
+    let mut hasher = Sha256::new();
+    hasher.update(span);
+    Some(hex(hasher.finalize().as_slice()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,5 +692,117 @@ func Validate() int {
                 );
             }
         }
+    }
+
+    // --- SPEC-021 §3 scenario 1: doc_hash su un'entità con un commento
+    // Go-doc immediatamente precedente reale nel fixture. Notify
+    // (notifier.go) ha 3 righe di commento immediatamente prima —
+    // verificato leggendo il fixture, non assunto. ---
+    #[test]
+    fn spec021_scenario1_doc_hash_some_for_entity_with_immediately_preceding_comment() {
+        let source = read_fixture("notifier.go");
+        let tree = parse(&source);
+        let notify = find_callable(tree.root_node(), &source, "Notify");
+
+        let hash = doc_hash(notify, source.as_bytes());
+        assert!(
+            hash.is_some(),
+            "Notify ha un commento Go-doc immediatamente precedente nel fixture, doc_hash deve essere Some"
+        );
+        assert_eq!(hash.unwrap().len(), 64, "SHA-256 esadecimale: 64 caratteri");
+    }
+
+    // --- SPEC-021 §3 scenario 2: doc_hash None per un'entità senza
+    // commento immediatamente precedente. DEVIAZIONE dal testo della
+    // SPEC: l'esempio suggerito ("Process in order_service.go, se non ne
+    // ha uno") in realtà HA un commento Go-doc immediatamente precedente
+    // nel fixture reale (verificato leggendo order_service.go) — ogni
+    // entità top-level del fixture di SPEC-009 è documentata. Caso
+    // dedicato inline, esplicitamente dichiarato come tale (stesso
+    // principio ammesso da SPEC-020 §7 e da questa SPEC §7). ---
+    #[test]
+    fn spec021_scenario2_doc_hash_none_for_entity_without_preceding_comment() {
+        let source = "package main\n\nfunc NoDoc() int {\n\treturn 1\n}\n";
+        let tree = parse(source);
+        let no_doc = find_callable(tree.root_node(), source, "NoDoc");
+
+        assert_eq!(
+            doc_hash(no_doc, source.as_bytes()),
+            None,
+            "nessun commento immediatamente precedente: doc_hash deve essere None"
+        );
+    }
+
+    // Variante dedicata: un commento SEPARATO da una riga vuota non conta
+    // come doc comment (SPEC-021 §2: "senza riga vuota tra l'ultimo
+    // commento e la dichiarazione").
+    #[test]
+    fn edge_case_doc_hash_none_when_blank_line_separates_comment_from_declaration() {
+        let source = "package main\n\n// commento non immediatamente precedente\n\nfunc NoDoc() int {\n\treturn 1\n}\n";
+        let tree = parse(source);
+        let no_doc = find_callable(tree.root_node(), source, "NoDoc");
+
+        assert_eq!(
+            doc_hash(no_doc, source.as_bytes()),
+            None,
+            "una riga vuota tra il commento e la dichiarazione invalida il doc comment"
+        );
+    }
+
+    // --- SPEC-021 §3 scenario 3: modificare SOLO il testo del commento
+    // di documentazione cambia doc_hash ma NON merkle_hash (T2.1) —
+    // verifica diretta dell'indipendenza dei due fingerprint. Usa
+    // Validate (order_service.go), che nel fixture reale ha un commento
+    // Go-doc di due righe immediatamente precedente. ---
+    #[test]
+    fn spec021_scenario3_changing_only_doc_comment_changes_doc_hash_not_merkle_hash() {
+        let original = read_fixture("order_service.go");
+        let doc_changed = original.replace(
+            "// Validate è un nodo Method (receiver *OrderService), nessuna chiamata in\n// uscita.",
+            "// Validate controlla che il carrello abbia abbastanza articoli.",
+        );
+        assert_ne!(original, doc_changed, "il replace deve aver avuto effetto");
+
+        let tree_a = parse(&original);
+        let tree_b = parse(&doc_changed);
+        let validate_a = find_callable(tree_a.root_node(), &original, "Validate");
+        let validate_b = find_callable(tree_b.root_node(), &doc_changed, "Validate");
+
+        let doc_hash_a = doc_hash(validate_a, original.as_bytes());
+        let doc_hash_b = doc_hash(validate_b, doc_changed.as_bytes());
+        assert!(doc_hash_a.is_some() && doc_hash_b.is_some());
+        assert_ne!(doc_hash_a, doc_hash_b, "doc_hash deve cambiare: il testo del commento è cambiato");
+
+        let merkle_a = merkle_hash(validate_a, original.as_bytes());
+        let merkle_b = merkle_hash(validate_b, doc_changed.as_bytes());
+        assert_eq!(
+            merkle_a, merkle_b,
+            "merkle_hash NON deve cambiare: il codice (esclusi i commenti) è identico"
+        );
+    }
+
+    // --- SPEC-021 §3 scenario 1 variante: due commenti consecutivi su
+    // righe distinte contribuiscono ENTRAMBI (concatenazione nell'ordine
+    // di apparizione) — non solo l'ultimo prima della dichiarazione.
+    // Dimostrato confrontando con una variante che ha SOLO la seconda
+    // riga di commento: hash diverso, prova che la prima riga contribuisce
+    // davvero al fingerprint.
+    #[test]
+    fn edge_case_doc_hash_includes_all_consecutive_comment_lines_not_only_the_last() {
+        let two_lines = "package main\n\n// prima riga\n// seconda riga\nfunc F() int {\n\treturn 1\n}\n";
+        let one_line = "package main\n\n// seconda riga\nfunc F() int {\n\treturn 1\n}\n";
+
+        let tree_a = parse(two_lines);
+        let tree_b = parse(one_line);
+        let f_a = find_callable(tree_a.root_node(), two_lines, "F");
+        let f_b = find_callable(tree_b.root_node(), one_line, "F");
+
+        let hash_a = doc_hash(f_a, two_lines.as_bytes());
+        let hash_b = doc_hash(f_b, one_line.as_bytes());
+        assert!(hash_a.is_some() && hash_b.is_some());
+        assert_ne!(
+            hash_a, hash_b,
+            "la prima riga di commento deve contribuire al fingerprint, non solo l'ultima"
+        );
     }
 }

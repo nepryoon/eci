@@ -2,14 +2,17 @@
 //! (SPEC-013, T1.1) più persistenza PostgreSQL transazionale (SPEC-014,
 //! T1.2) più hashing Merkle bottom-up di `ast_hash` (SPEC-020, T2.1,
 //! modulo [`hashing`], che sostituisce il placeholder `sha256_hex(source)`
-//! di T1.1). `parse_file` produce `CodeNode`/`CodeRelation` in memoria;
-//! `persist_parsed_file` (modulo [`persist`]) li scrive dentro un'unica
-//! transazione ACID (nodi upsert, relazioni sostituite, righe outbox).
+//! di T1.1) più `doc_hash` (modulo [`hashing`]) e chunking cAST configurabile
+//! (SPEC-021, T2.2, modulo [`chunking`]). `parse_file` produce
+//! `CodeNode`/`CodeRelation` in memoria; `persist_parsed_file` (modulo
+//! [`persist`]) li scrive dentro un'unica transazione ACID (nodi upsert,
+//! relazioni sostituite, righe outbox).
 
 use std::collections::HashMap;
 
 use tree_sitter::Node;
 
+pub mod chunking;
 pub mod hashing;
 pub mod persist;
 pub use persist::{persist_parsed_file, PersistError, PersistSummary};
