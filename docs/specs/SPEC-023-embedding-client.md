@@ -1,5 +1,5 @@
 # SPEC-023 — Embedding: embedder-fake + client configurabile (T2.4)
-Stato: implemented
+Stato: verified
 Task-tree: T2.4 (quarto task di Fase 2) · Nuovo: fakes/embedder-fake (Python, stesso pattern di fakes/vllm-fake) + services/ingestion (Rust, nuovo client) · ADD: Modulo 1 §1.6.3 (embedding_ref), Modulo 4 (tech stack)
 Contratti: nessuno sotto contracts/; modifica dichiarata a `deploy/compose/docker-compose.yml` (nuovo profilo Docker Compose `gpu`, non parte di `task up` di default)
 
