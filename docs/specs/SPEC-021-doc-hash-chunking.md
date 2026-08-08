@@ -1,5 +1,5 @@
 # SPEC-021 — doc_hash separato + chunking cAST configurabile (T2.2)
-Stato: implemented
+Stato: verified
 Task-tree: T2.2 (secondo task di Fase 2) · Servizio: services/ingestion (Rust, estende T1.1/T2.1) · ADD: Modulo 1 §1.1 (cAST), §1.6.2 (doc_hash)
 Contratti: nessuno (nessun file sotto contracts/ toccato)
 
