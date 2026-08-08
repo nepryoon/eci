@@ -3,10 +3,13 @@
 //! T1.2) più hashing Merkle bottom-up di `ast_hash` (SPEC-020, T2.1,
 //! modulo [`hashing`], che sostituisce il placeholder `sha256_hex(source)`
 //! di T1.1) più `doc_hash` (modulo [`hashing`]) e chunking cAST configurabile
-//! (SPEC-021, T2.2, modulo [`chunking`]). `parse_file` produce
-//! `CodeNode`/`CodeRelation` in memoria; `persist_parsed_file` (modulo
-//! [`persist`]) li scrive dentro un'unica transazione ACID (nodi upsert,
-//! relazioni sostituite, righe outbox).
+//! (SPEC-021, T2.2, modulo [`chunking`]) più estrazione CPG JavaScript
+//! (SPEC-024, T2.5 parte 1/3): `parse_file` dispatcha per estensione del
+//! path (`.go` -> `parse_go_file`, `.js` -> `parse_js_file`, entrambe
+//! funzioni interne con lo stesso contratto di output). `parse_file`
+//! produce `CodeNode`/`CodeRelation` in memoria; `persist_parsed_file`
+//! (modulo [`persist`]) li scrive dentro un'unica transazione ACID (nodi
+//! upsert, relazioni sostituite, righe outbox).
 
 use std::collections::HashMap;
 
@@ -37,15 +40,41 @@ pub struct CodeRelation {
     pub weight: Option<u32>,
 }
 
+/// Dispatch per linguaggio (SPEC-024 §2, prima volta che serve — fino a
+/// T2.4 `services/ingestion` era implicitamente solo-Go): l'estensione
+/// del path determina la strada, nessun altro meccanismo (nessuno
+/// sniffing del contenuto). Stesso span `parse_file` di sempre, con un
+/// attributo `language` in più (§8) per distinguere le due strade.
+pub fn parse_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelation>) {
+    let language = match std::path::Path::new(file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+    {
+        Some("go") => "go",
+        Some("js") => "javascript",
+        other => panic!(
+            "parse_file({file_path:?}): estensione non supportata ({other:?}) — \
+             il dispatch per linguaggio è limitato a .go/.js (SPEC-024 §2)"
+        ),
+    };
+    let _span = tracing::info_span!("parse_file", file_path = file_path, language = language).entered();
+
+    match language {
+        "go" => parse_go_file(file_path, source),
+        "javascript" => parse_js_file(file_path, source),
+        _ => unreachable!("language già validato sopra"),
+    }
+}
+
 /// Parsa il sorgente Go di un singolo file e produce i `CodeNode`/
 /// `CodeRelation` corrispondenti (SPEC-013 §2): un `CodeNode` `File`,
 /// un `CodeNode` per ogni `Class`/`Interface`/`Method`/`Function` di
 /// primo livello, un arco `CONTAINS` da `File` verso ciascuno, e archi
 /// `CALLS` risolti per nome **solo intra-file** (§2/§5 — nessuna
-/// risoluzione cross-file, quella è T2.5).
-pub fn parse_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelation>) {
-    let _span = tracing::info_span!("parse_file", file_path = file_path).entered();
-
+/// risoluzione cross-file, quella è T2.5/SPEC-024, e nemmeno lì:
+/// SPEC-024 stessa introduce solo l'estrazione JS, la risoluzione
+/// cross-file resta un sotto-task successivo, parte 2/3).
+fn parse_go_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelation>) {
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&tree_sitter_go::LANGUAGE.into())
@@ -188,6 +217,198 @@ pub fn parse_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRela
     }
 
     (nodes, relations)
+}
+
+/// Parsa il sorgente JavaScript di un singolo file (SPEC-024 §2): stesso
+/// contratto di output di [`parse_go_file`], adattato alla struttura
+/// reale di JavaScript (`class_declaration` contiene realmente i propri
+/// `method_definition` come figli — CONTAINS Class->Method deriva
+/// direttamente dall'albero, non un escamotage). Nessuna risoluzione
+/// cross-file (§5), nessuna estrazione di function expression/arrow
+/// function assegnate a variabile (§2, Non-goal dichiarato).
+fn parse_js_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelation>) {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .expect("grammatica tree-sitter-javascript valida");
+    // Stesso error recovery nativo di Tree-sitter già sfruttato per Go
+    // (SPEC-013 §4): `parse` ritorna sempre un albero. Verificato
+    // empiricamente (SPEC-024 §10) che una `class` con corpo non chiuso
+    // resta comunque un `class_declaration` di primo livello proprio (a
+    // differenza del caso Go analogo, dove la dichiarazione successiva
+    // veniva inghiottita SENZA restare un proprio kind riconoscibile) —
+    // qui è la porzione interna al corpo malformato che diventa un
+    // `method_definition` spurio, non la dichiarazione esterna stessa.
+    let tree = parser.parse(source, None).expect("tree-sitter parse");
+    let root = tree.root_node();
+
+    let mut nodes = Vec::new();
+    let mut relations = Vec::new();
+
+    let file_id = make_id(file_path, file_path);
+    nodes.push(CodeNode {
+        id: file_id.clone(),
+        domain: "code".to_string(),
+        node_type: "File".to_string(),
+        name: file_path.to_string(),
+        ast_hash: hashing::merkle_hash(root, source.as_bytes()),
+        file_path: file_path.to_string(),
+    });
+
+    let mut name_to_id: HashMap<String, String> = HashMap::new();
+    let mut callable_bodies: Vec<(String, Node)> = Vec::new();
+
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        match child.kind() {
+            "class_declaration" => {
+                let Some(name_node) = child.child_by_field_name("name") else {
+                    continue;
+                };
+                let class_name = text(name_node, source);
+                let class_id = make_id(file_path, &class_name);
+                nodes.push(CodeNode {
+                    id: class_id.clone(),
+                    domain: "code".to_string(),
+                    node_type: "Class".to_string(),
+                    name: class_name.clone(),
+                    // Nodo dell'INTERA class_declaration (nome + body):
+                    // a differenza di Go (dove il "nodo in mano" per una
+                    // Class, `type_spec`, non contiene i Method,
+                    // strutturalmente separati — SPEC-020 §10), qui
+                    // `class_body` contiene realmente i `method_definition`
+                    // come figli, quindi l'hash della Class si propaga
+                    // correttamente fino a includerli (SPEC-024 §2).
+                    ast_hash: hashing::merkle_hash(child, source.as_bytes()),
+                    file_path: file_path.to_string(),
+                });
+                name_to_id.insert(class_name.clone(), class_id.clone());
+                relations.push(CodeRelation {
+                    domain: "code".to_string(),
+                    rel_type: "CONTAINS".to_string(),
+                    from_id: file_id.clone(),
+                    to_id: class_id.clone(),
+                    weight: None,
+                });
+
+                if let Some(class_body) = child.child_by_field_name("body") {
+                    let mut member_cursor = class_body.walk();
+                    for member in class_body
+                        .children(&mut member_cursor)
+                        .filter(|m| m.kind() == "method_definition")
+                    {
+                        let Some(method_name_node) = member.child_by_field_name("name") else {
+                            continue;
+                        };
+                        let simple_name = text(method_name_node, source);
+                        let qualified_name = format!("{class_name}.{simple_name}");
+                        let method_id = make_id(file_path, &qualified_name);
+                        nodes.push(CodeNode {
+                            id: method_id.clone(),
+                            domain: "code".to_string(),
+                            node_type: "Method".to_string(),
+                            name: simple_name.clone(),
+                            ast_hash: hashing::merkle_hash(member, source.as_bytes()),
+                            file_path: file_path.to_string(),
+                        });
+                        name_to_id.insert(simple_name, method_id.clone());
+                        // Class->Method: derivabile direttamente
+                        // dall'albero (SPEC-024 §2), non un escamotage
+                        // come sarebbe stato necessario per Go.
+                        relations.push(CodeRelation {
+                            domain: "code".to_string(),
+                            rel_type: "CONTAINS".to_string(),
+                            from_id: class_id.clone(),
+                            to_id: method_id.clone(),
+                            weight: None,
+                        });
+                        if let Some(body) = member.child_by_field_name("body") {
+                            callable_bodies.push((method_id, body));
+                        }
+                    }
+                }
+            }
+            "function_declaration" => {
+                let Some(name_node) = child.child_by_field_name("name") else {
+                    continue;
+                };
+                let simple_name = text(name_node, source);
+                let id = make_id(file_path, &simple_name);
+                nodes.push(CodeNode {
+                    id: id.clone(),
+                    domain: "code".to_string(),
+                    node_type: "Function".to_string(),
+                    name: simple_name.clone(),
+                    ast_hash: hashing::merkle_hash(child, source.as_bytes()),
+                    file_path: file_path.to_string(),
+                });
+                name_to_id.insert(simple_name, id.clone());
+                relations.push(CodeRelation {
+                    domain: "code".to_string(),
+                    rel_type: "CONTAINS".to_string(),
+                    from_id: file_id.clone(),
+                    to_id: id.clone(),
+                    weight: None,
+                });
+                if let Some(body) = child.child_by_field_name("body") {
+                    callable_bodies.push((id, body));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (caller_id, body) in callable_bodies {
+        let mut call_counts: HashMap<String, u32> = HashMap::new();
+        collect_calls_js(body, source, &name_to_id, &mut call_counts);
+        for (callee_id, weight) in call_counts {
+            relations.push(CodeRelation {
+                domain: "code".to_string(),
+                rel_type: "CALLS".to_string(),
+                from_id: caller_id.clone(),
+                to_id: callee_id,
+                weight: Some(weight),
+            });
+        }
+    }
+
+    (nodes, relations)
+}
+
+/// Cammina ricorsivamente il corpo di una funzione/metodo JS cercando
+/// `call_expression`: risolve il nome del target (identifier semplice,
+/// es. `computeTotal(...)`, o il campo `property` di una
+/// `member_expression` per le chiamate a metodo, es. `this.validate(...)`/
+/// `obj.metodo(...)` -> `validate`/`metodo` — equivalente JS della
+/// `selector_expression` di Go) contro `name_to_id`, SOLO nomi dichiarati
+/// in questo stesso file (SPEC-024 §2, stesso limite di SPEC-013 §2).
+/// `new X(...)` produce un nodo `new_expression`, non `call_expression`:
+/// non entra in questo percorso per costruzione, non per un filtro
+/// esplicito (verificato empiricamente, SPEC-024 §10).
+fn collect_calls_js(
+    node: Node,
+    source: &str,
+    name_to_id: &HashMap<String, String>,
+    call_counts: &mut HashMap<String, u32>,
+) {
+    if node.kind() == "call_expression" {
+        if let Some(function_node) = node.child_by_field_name("function") {
+            let callee_name = match function_node.kind() {
+                "identifier" => Some(text(function_node, source)),
+                "member_expression" => function_node
+                    .child_by_field_name("property")
+                    .map(|f| text(f, source)),
+                _ => None,
+            };
+            if let Some(id) = callee_name.and_then(|name| name_to_id.get(&name)) {
+                *call_counts.entry(id.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_calls_js(child, source, name_to_id, call_counts);
+    }
 }
 
 /// Estrae il nome del tipo receiver da un `parameter_list` di receiver
@@ -507,5 +728,275 @@ func alsoValid() {
             "\"alsoValid\" viene inghiottita dalla regione di errore di \
              \"type Broken struct\" (nessun corpo `{{}}`): omessa, non un panic — comportamento atteso (§4): {nodes:?}"
         );
+    }
+
+    // ============================================================
+    // SPEC-024 §3/§4 — estrazione CPG JavaScript (T2.5, parte 1/3),
+    // mirror diretto degli scenari di T1.1/SPEC-013 sopra, stessa
+    // numerazione concettuale, fixture in tests/fixtures/sample-repo-js/.
+    // ============================================================
+    mod js_tests {
+        use super::*;
+
+        fn read_js_fixture(name: &str) -> String {
+            let path = format!(
+                "{}/../../tests/fixtures/sample-repo-js/{name}",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("lettura fixture {path}: {e}"))
+        }
+
+        // SPEC-024 §3 scenario 1.
+        #[test]
+        fn scenario1_order_service_nodes_and_contains() {
+            let source = read_js_fixture("order_service.js");
+            let (nodes, relations) = parse_file("order_service.js", &source);
+
+            assert_eq!(
+                nodes.len(),
+                5,
+                "attesi 5 CodeNode (File, Class, 3 Method: constructor/process/validate), ottenuti: {:?}",
+                node_types(&nodes)
+            );
+            let types = node_types(&nodes);
+            assert!(types.contains(&("File", "order_service.js")));
+            assert!(types.contains(&("Class", "OrderService")));
+            assert!(types.contains(&("Method", "constructor")));
+            assert!(types.contains(&("Method", "process")));
+            assert!(types.contains(&("Method", "validate")));
+
+            let contains: Vec<_> = relations.iter().filter(|r| r.rel_type == "CONTAINS").collect();
+            assert_eq!(
+                contains.len(),
+                4,
+                "attesi 4 archi CONTAINS (File->Class, Class->constructor, Class->process, Class->validate), ottenuti: {contains:?}"
+            );
+            let file_id = find_id(&nodes, "File", "order_service.js");
+            let class_id = find_id(&nodes, "Class", "OrderService");
+            let constructor_id = find_id(&nodes, "Method", "constructor");
+            let process_id = find_id(&nodes, "Method", "process");
+            let validate_id = find_id(&nodes, "Method", "validate");
+
+            let file_contains: Vec<_> = contains.iter().filter(|r| r.from_id == file_id).collect();
+            assert_eq!(file_contains.len(), 1, "atteso un solo CONTAINS da File");
+            assert_eq!(file_contains[0].to_id, class_id);
+
+            // Class->Method: tre archi, uno per metodo — NUOVO rispetto a
+            // Go, verificato esplicitamente qui (SPEC-024 §3 scenario 1).
+            let class_contains: HashSet<&str> = contains
+                .iter()
+                .filter(|r| r.from_id == class_id)
+                .map(|r| r.to_id.as_str())
+                .collect();
+            assert_eq!(
+                class_contains,
+                HashSet::from([constructor_id, process_id, validate_id])
+            );
+        }
+
+        // SPEC-024 §3 scenario 2.
+        #[test]
+        fn scenario2_process_calls_validate_intra_class() {
+            let source = read_js_fixture("order_service.js");
+            let (nodes, relations) = parse_file("order_service.js", &source);
+
+            let process_id = find_id(&nodes, "Method", "process").to_string();
+            let validate_id = find_id(&nodes, "Method", "validate").to_string();
+
+            let calls: Vec<_> = relations.iter().filter(|r| r.rel_type == "CALLS").collect();
+            assert_eq!(
+                calls.len(),
+                1,
+                "atteso ESATTAMENTE 1 arco CALLS (process->validate; process->computeTotal è cross-file, scenario 3), ottenuti: {calls:?}"
+            );
+            assert_eq!(calls[0].from_id, process_id);
+            assert_eq!(calls[0].to_id, validate_id);
+            assert_eq!(calls[0].weight, Some(1));
+        }
+
+        // SPEC-024 §3 scenario 3.
+        #[test]
+        fn scenario3_no_cross_file_call_to_compute_total() {
+            let source = read_js_fixture("order_service.js");
+            let (nodes, relations) = parse_file("order_service.js", &source);
+
+            assert!(
+                !nodes.iter().any(|n| n.name == "computeTotal"),
+                "computeTotal è dichiarata in util.js, non deve comparire parsando solo order_service.js"
+            );
+            let process_id = find_id(&nodes, "Method", "process").to_string();
+            assert!(
+                !relations.iter().any(|r| r.rel_type == "CALLS"
+                    && r.from_id == process_id
+                    && !nodes.iter().any(|n| n.id == r.to_id && n.name == "validate")),
+                "nessun arco CALLS da process verso un target diverso da validate (computeTotal è cross-file)"
+            );
+        }
+
+        // SPEC-024 §3 scenario 4.
+        #[test]
+        fn scenario4_util_compute_total_function() {
+            let source = read_js_fixture("util.js");
+            let (nodes, relations) = parse_file("util.js", &source);
+
+            assert_eq!(
+                nodes.len(),
+                2,
+                "attesi 2 CodeNode (File, Function computeTotal), ottenuti: {:?}",
+                node_types(&nodes)
+            );
+            let types = node_types(&nodes);
+            assert!(types.contains(&("File", "util.js")));
+            assert!(types.contains(&("Function", "computeTotal")));
+
+            assert_eq!(
+                relations.iter().filter(|r| r.rel_type == "CONTAINS").count(),
+                1,
+                "atteso 1 arco CONTAINS (File->computeTotal)"
+            );
+            assert_eq!(
+                relations.iter().filter(|r| r.rel_type == "CALLS").count(),
+                0,
+                "prices.reduce(...) chiama un metodo su un builtin, non una dichiarazione del file: nessun arco CALLS atteso"
+            );
+        }
+
+        // SPEC-024 §3 scenario 5.
+        #[test]
+        fn scenario5_main_isolated_no_cross_file_or_instance_call() {
+            let source = read_js_fixture("main.js");
+            let (nodes, relations) = parse_file("main.js", &source);
+
+            assert_eq!(
+                nodes.len(),
+                2,
+                "attesi 2 CodeNode (File, Function main), ottenuti: {:?}",
+                node_types(&nodes)
+            );
+            let types = node_types(&nodes);
+            assert!(types.contains(&("File", "main.js")));
+            assert!(types.contains(&("Function", "main")));
+
+            assert_eq!(
+                relations.iter().filter(|r| r.rel_type == "CONTAINS").count(),
+                1,
+                "atteso 1 arco CONTAINS (File->main)"
+            );
+            assert_eq!(
+                relations.iter().filter(|r| r.rel_type == "CALLS").count(),
+                0,
+                "service.process(...) è una chiamata su un'istanza, non risolvibile per nome in questo file; \
+                 new OrderService(2) è un new_expression, non un call_expression, nessuno dei due produce CALLS"
+            );
+        }
+
+        // SPEC-024 §3 scenario 6: error recovery, stesso principio di T1.1
+        // (SPEC-013 §4) — caso dedicato inline (non nel fixture, stesso
+        // principio già ammesso per Go, SPEC-013 §7). Verificato con
+        // `has_error()` che il source sia realmente malformato (una
+        // `class` con corpo non chiuso, `MISSING "}"` riportato da
+        // Tree-sitter) durante lo sviluppo — solo l'affermazione POSITIVA
+        // di §3 scenario 6 è verificata qui ("le porzioni non affette
+        // restano estraibili"), non ipotesi su come Tree-sitter tratti
+        // internamente la porzione malformata (comportamento diverso e
+        // più complesso di quello Go, non rilevante per questo scenario).
+        #[test]
+        fn scenario6_syntax_error_recovers_valid_declarations() {
+            let source = r#"function valid() {
+  helper();
+}
+
+class Broken {
+
+function alsoValid() {
+  valid();
+}
+"#;
+            let (nodes, _relations) = parse_file("broken.js", source);
+
+            assert_eq!(
+                nodes.iter().filter(|n| n.node_type == "File").count(),
+                1,
+                "il File node va comunque prodotto nonostante l'errore di sintassi"
+            );
+            assert!(
+                nodes.iter().any(|n| n.node_type == "Function" && n.name == "valid"),
+                "\"valid\" precede l'errore di sintassi, deve restare estratta correttamente: {nodes:?}"
+            );
+        }
+
+        // --- SPEC-024 §4 edge case: funzione nidificata dentro un'altra
+        // funzione (non top-level, non dentro una classe) — non estratta
+        // come Function, nessun crash. ---
+        #[test]
+        fn edge_case_nested_function_not_extracted() {
+            let source = r#"function outer() {
+  function inner() {}
+  inner();
+}
+"#;
+            let (nodes, _relations) = parse_file("nested.js", source);
+            assert!(
+                nodes.iter().any(|n| n.node_type == "Function" && n.name == "outer"),
+                "outer deve essere estratta: {nodes:?}"
+            );
+            assert!(
+                !nodes.iter().any(|n| n.name == "inner"),
+                "inner è nidificata, non deve produrre un proprio CodeNode: {nodes:?}"
+            );
+        }
+
+        // --- SPEC-024 §4 edge case: metodo statico, stesso trattamento
+        // di un Method ordinario. ---
+        #[test]
+        fn edge_case_static_method_extracted_as_ordinary_method() {
+            let source = r#"class Foo {
+  static bar() {}
+}
+"#;
+            let (nodes, _relations) = parse_file("static.js", source);
+            let bar = nodes
+                .iter()
+                .find(|n| n.name == "bar")
+                .unwrap_or_else(|| panic!("bar non trovato: {nodes:?}"));
+            assert_eq!(bar.node_type, "Method", "static non deve cambiare node_type");
+        }
+
+        // --- SPEC-024 §4 edge case: getter/setter, stesso trattamento di
+        // un Method ordinario. ---
+        #[test]
+        fn edge_case_getter_setter_extracted_as_ordinary_methods() {
+            let source = r#"class Foo {
+  get baz() { return 1; }
+  set baz(v) {}
+}
+"#;
+            let (nodes, _relations) = parse_file("accessors.js", source);
+            let methods: Vec<_> = nodes.iter().filter(|n| n.name == "baz").collect();
+            assert_eq!(
+                methods.len(),
+                2,
+                "getter e setter devono produrre due CodeNode distinti: {nodes:?}"
+            );
+            assert!(methods.iter().all(|n| n.node_type == "Method"));
+        }
+
+        // Verifica diretta del dispatch: l'estensione .js instrada
+        // sull'estrazione JS reale (non su un risultato vuoto/sbagliato).
+        #[test]
+        fn dispatch_routes_js_extension_correctly() {
+            let source = read_js_fixture("util.js");
+            let (nodes, _relations) = parse_file("util.js", &source);
+            assert!(
+                nodes.iter().any(|n| n.node_type == "Function" && n.name == "computeTotal"),
+                "il dispatch su .js deve produrre l'estrazione JS reale: {nodes:?}"
+            );
+        }
+
+        #[test]
+        #[should_panic(expected = "estensione non supportata")]
+        fn dispatch_panics_on_unsupported_extension() {
+            let _ = parse_file("mystery.py", "print('hello')");
+        }
     }
 }
