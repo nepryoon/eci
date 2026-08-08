@@ -1,6 +1,8 @@
 //! `ingestion` — parsing Go con Tree-sitter -> CPG walking skeleton
 //! (SPEC-013, T1.1) più persistenza PostgreSQL transazionale (SPEC-014,
-//! T1.2). `parse_file` produce `CodeNode`/`CodeRelation` in memoria;
+//! T1.2) più hashing Merkle bottom-up di `ast_hash` (SPEC-020, T2.1,
+//! modulo [`hashing`], che sostituisce il placeholder `sha256_hex(source)`
+//! di T1.1). `parse_file` produce `CodeNode`/`CodeRelation` in memoria;
 //! `persist_parsed_file` (modulo [`persist`]) li scrive dentro un'unica
 //! transazione ACID (nodi upsert, relazioni sostituite, righe outbox).
 
@@ -8,6 +10,7 @@ use std::collections::HashMap;
 
 use tree_sitter::Node;
 
+pub mod hashing;
 pub mod persist;
 pub use persist::{persist_parsed_file, PersistError, PersistSummary};
 
@@ -72,7 +75,7 @@ pub fn parse_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRela
         domain: "code".to_string(),
         node_type: "File".to_string(),
         name: file_path.to_string(),
-        ast_hash: sha256_hex(source),
+        ast_hash: hashing::merkle_hash(root, source.as_bytes()),
         file_path: file_path.to_string(),
     });
 
@@ -114,7 +117,7 @@ pub fn parse_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRela
                         domain: "code".to_string(),
                         node_type: node_type.to_string(),
                         name: name.clone(),
-                        ast_hash: sha256_hex(&text(spec, source)),
+                        ast_hash: hashing::merkle_hash(spec, source.as_bytes()),
                         file_path: file_path.to_string(),
                     });
                     name_to_id.insert(name, id.clone());
@@ -147,7 +150,7 @@ pub fn parse_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRela
                     domain: "code".to_string(),
                     node_type: node_type.to_string(),
                     name: simple_name.clone(),
-                    ast_hash: sha256_hex(&text(child, source)),
+                    ast_hash: hashing::merkle_hash(child, source.as_bytes()),
                     file_path: file_path.to_string(),
                 });
                 name_to_id.insert(simple_name, id.clone());
