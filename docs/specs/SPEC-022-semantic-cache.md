@@ -1,5 +1,5 @@
 # SPEC-022 — Semantic Cache Service (T2.3)
-Stato: implemented
+Stato: verified
 Task-tree: T2.3 (terzo task di Fase 2) · Nuovo servizio: services/semantic-cache (Go, scaffold vuoto da SPEC-001) · ADD: Modulo 1 §1.6.3, Modulo 3 §1.1/§2.6.3, Modulo 4 §1
 Contratti: nuovo `contracts/proto/eci/semanticcache/v1/semanticcache.proto`; modifica dichiarata a `deploy/compose/docker-compose.yml` (nuovo servizio Redis)
 
