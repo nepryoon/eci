@@ -206,3 +206,23 @@ services:
       timeout: 5s
       retries: 30
       start_period: 20s
+
+  redis:
+    # SPEC-022 §2 — storage del Semantic Cache Service (T2.3). Nessuna
+    # persistenza AOF/RDB (--save "" --appendonly no): e' un cache, non una
+    # fonte di verita' — il dato e' sempre ricostruibile ricomputando
+    # embedding/summary a monte (SPEC-022 §5 Non-goals). Nessun volume
+    # nominato per lo stesso motivo: un riavvio del container azzera
+    # legittimamente la cache.
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    networks:
+      - eci-dev
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s

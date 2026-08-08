@@ -1,0 +1,67 @@
+// eci/semanticcache/v1/semanticcache.proto
+// Contratto gRPC del Semantic Cache Service (SPEC-022, T2.3): cache
+// chiave->valore keyed su ast_hash + logic_fingerprint + acl_scope (ADD
+// Modulo 3 §2.6.3), a supporto di un futuro consumatore embedding/summary
+// (T2.4/T5.5, non ancora esistente — vedi SPEC-022 §5 Non-goals).
+// Versionamento: package versionato (v1); campi additivi only; nessun
+// riuso di tag; campi deprecati marcati reserved (stesso principio di
+// eci/retrieval/v1/retrieval.proto, SPEC-002).
+
+syntax = "proto3";
+
+package eci.semanticcache.v1;
+
+option java_multiple_files = true;
+option java_package = "com.eci.semanticcache.v1";
+option go_package = "eci/semanticcache/v1;semanticcachev1";
+
+// Chiave di cache: quadrupla entity_id + ast_hash + logic_fingerprint +
+// acl_scope (SPEC-022 §2). logic_fingerprint è una stringa opaca fornita
+// dal chiamante, non calcolata né interpretata da questo servizio.
+// acl_scope è plumbing (partiziona già la chiave per costruzione) senza
+// enforcement di autorizzazione in questa SPEC (Fase 6).
+message CacheKey {
+  string entity_id = 1;
+  string ast_hash = 2;
+  string logic_fingerprint = 3;
+  string acl_scope = 4;
+}
+
+// Valore di cache: riferimento a embedding + summary, versionato dal
+// modello che li ha prodotti. ttl_seconds = 0 significa nessuna scadenza.
+message CacheValue {
+  string embedding_ref = 1;
+  string summary = 2;
+  string model_id = 3;
+  uint32 embedding_dim = 4;
+  uint32 ttl_seconds = 5;
+}
+
+message GetResponse {
+  bool hit = 1;
+  CacheValue value = 2;
+}
+
+message PutRequest {
+  CacheKey key = 1;
+  CacheValue value = 2;
+}
+
+message PutResponse {}
+
+// Firma esattamente come da SPEC-022 §2 (Get prende CacheKey direttamente,
+// non un wrapper GetRequest — asimmetrico rispetto a Put per costruzione
+// dichiarata della SPEC, non un'incoerenza da correggere qui). SERVICE_SUFFIX/
+// RPC_REQUEST_STANDARD_NAME/RPC_RESPONSE_STANDARD_NAME sono già escluse dal
+// lint di modulo in contracts/buf.yaml per lo stesso motivo di
+// eci.retrieval.v1 (SPEC-002).
+service SemanticCache {
+  // Lookup per chiave esatta. hit=false (nessun errore) su cache miss
+  // genuino; Redis irraggiungibile è un errore gRPC Unavailable esplicito,
+  // mai un hit=false silenzioso (SPEC-022 §4).
+  rpc Get(CacheKey) returns (GetResponse);
+
+  // Scrittura idempotente (stessa chiave -> sovrascrive il valore
+  // precedente). TTL applicato nativamente da Redis (SET ... EX).
+  rpc Put(PutRequest) returns (PutResponse);
+}
