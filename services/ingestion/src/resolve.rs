@@ -98,9 +98,22 @@ fn resolve_module_path(
         return Some(candidate);
     }
     if candidate.extension().is_none() {
-        let with_ext = candidate.with_extension("js");
-        if files.iter().any(|(p, ..)| *p == with_ext) {
-            return Some(with_ext);
+        // SPEC-025 §2 diceva solo ".js" (unico linguaggio con questo
+        // resolver all'epoca). SPEC-026 §10: verificato EMPIRICAMENTE che
+        // il fixture TypeScript dichiarato in SPEC-026 §2 usa uno
+        // specifier senza estensione (`from './util'`, non `'./util.ts'`
+        // né `'./util.js'`) — con la sola prova ".js", uno scenario del
+        // genere contro un file .ts resterebbe non risolto per un
+        // dettaglio di implementazione del resolver, non per il limite
+        // dichiarato dello scope. Estesa la lista dei tentativi a ".ts"
+        // oltre a ".js": unica modifica a questo file per SPEC-026,
+        // deviazione dal "nessun codice nuovo" atteso da §2, motivata da
+        // questo fallimento empirico e non da un'estensione preventiva.
+        for ext in ["js", "ts"] {
+            let with_ext = candidate.with_extension(ext);
+            if files.iter().any(|(p, ..)| *p == with_ext) {
+                return Some(with_ext);
+            }
         }
     }
     None
