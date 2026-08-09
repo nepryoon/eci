@@ -17,6 +17,8 @@ use tree_sitter::Node;
 
 pub mod chunking;
 pub mod embedding;
+pub mod imports;
+pub mod resolve;
 pub mod hashing;
 pub mod persist;
 pub use persist::{persist_parsed_file, PersistError, PersistSummary};
@@ -227,6 +229,23 @@ fn parse_go_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelat
 /// cross-file (§5), nessuna estrazione di function expression/arrow
 /// function assegnate a variabile (§2, Non-goal dichiarato).
 fn parse_js_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelation>) {
+    let (nodes, relations, _unresolved) = parse_js_file_full(file_path, source);
+    (nodes, relations)
+}
+
+/// Variante "completa" di [`parse_js_file`] che espone anche le chiamate
+/// rimaste irrisolte a livello intra-file (SPEC-025 §2: "stesso
+/// meccanismo già esistente in SPEC-013/SPEC-024... qui riusato, non
+/// duplicato") — stesso identico algoritmo, in più raccoglie
+/// (caller_id, nome_chiamato, weight) per ogni `call_expression` il cui
+/// nome non risolve localmente, invece di scartarlo silenziosamente.
+/// `parse_js_file` resta il contratto pubblico invariato di SPEC-024 (ne
+/// scarta il terzo elemento). `pub(crate)`: consumata da [`resolve`] per
+/// costruire l'input di `resolve_cross_file_calls`.
+pub(crate) fn parse_js_file_full(
+    file_path: &str,
+    source: &str,
+) -> (Vec<CodeNode>, Vec<CodeRelation>, resolve::UnresolvedCalls) {
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&tree_sitter_javascript::LANGUAGE.into())
@@ -260,6 +279,20 @@ fn parse_js_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelat
 
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
+        // `export function f() {}`/`export class C {}` avvolgono la
+        // dichiarazione in un `export_statement` (campo `declaration`) —
+        // verificato empiricamente (SPEC-025 §10): il costrutto `export`
+        // stesso non è tracciato (SPEC-025 §2, nessuna verifica di
+        // visibilità), ma la dichiarazione avvolta deve comunque essere
+        // estratta esattamente come se non fosse esportata, altrimenti
+        // `export function computeTotal` sparirebbe del tutto
+        // dall'estrazione — regressione reale su SPEC-024, non
+        // ipotetica, scoperta estendendo il fixture per SPEC-025 §3.
+        let child = if child.kind() == "export_statement" {
+            child.child_by_field_name("declaration").unwrap_or(child)
+        } else {
+            child
+        };
         match child.kind() {
             "class_declaration" => {
                 let Some(name_node) = child.child_by_field_name("name") else {
@@ -358,9 +391,11 @@ fn parse_js_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelat
         }
     }
 
+    let mut unresolved = Vec::new();
     for (caller_id, body) in callable_bodies {
         let mut call_counts: HashMap<String, u32> = HashMap::new();
-        collect_calls_js(body, source, &name_to_id, &mut call_counts);
+        let mut unresolved_counts: HashMap<String, u32> = HashMap::new();
+        collect_calls_js(body, source, &name_to_id, &mut call_counts, &mut unresolved_counts);
         for (callee_id, weight) in call_counts {
             relations.push(CodeRelation {
                 domain: "code".to_string(),
@@ -370,9 +405,16 @@ fn parse_js_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelat
                 weight: Some(weight),
             });
         }
+        for (callee_name, weight) in unresolved_counts {
+            unresolved.push(resolve::UnresolvedCall {
+                caller_id: caller_id.clone(),
+                callee_name,
+                weight,
+            });
+        }
     }
 
-    (nodes, relations)
+    (nodes, relations, unresolved)
 }
 
 /// Cammina ricorsivamente il corpo di una funzione/metodo JS cercando
@@ -385,11 +427,19 @@ fn parse_js_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelat
 /// `new X(...)` produce un nodo `new_expression`, non `call_expression`:
 /// non entra in questo percorso per costruzione, non per un filtro
 /// esplicito (verificato empiricamente, SPEC-024 §10).
+///
+/// Un nome non risolto localmente (`name_to_id` non lo contiene) non
+/// viene più scartato in silenzio (a differenza della variante Go/§T1.1
+/// originale): finisce in `unresolved_counts`, consumato da
+/// [`resolve::resolve_cross_file_calls`] per la risoluzione cross-file
+/// (SPEC-025 §2) — stesso meccanismo di attraversamento, riusato per
+/// entrambi gli scopi in un solo passaggio.
 fn collect_calls_js(
     node: Node,
     source: &str,
     name_to_id: &HashMap<String, String>,
     call_counts: &mut HashMap<String, u32>,
+    unresolved_counts: &mut HashMap<String, u32>,
 ) {
     if node.kind() == "call_expression" {
         if let Some(function_node) = node.child_by_field_name("function") {
@@ -400,14 +450,18 @@ fn collect_calls_js(
                     .map(|f| text(f, source)),
                 _ => None,
             };
-            if let Some(id) = callee_name.and_then(|name| name_to_id.get(&name)) {
-                *call_counts.entry(id.clone()).or_insert(0) += 1;
+            if let Some(name) = callee_name {
+                if let Some(id) = name_to_id.get(&name) {
+                    *call_counts.entry(id.clone()).or_insert(0) += 1;
+                } else {
+                    *unresolved_counts.entry(name).or_insert(0) += 1;
+                }
             }
         }
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_calls_js(child, source, name_to_id, call_counts);
+        collect_calls_js(child, source, name_to_id, call_counts, unresolved_counts);
     }
 }
 
