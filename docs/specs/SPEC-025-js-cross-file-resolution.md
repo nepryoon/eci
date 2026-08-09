@@ -1,5 +1,5 @@
 # SPEC-025 — Risoluzione cross-file JavaScript via import (T2.5, parte 2/3)
-Stato: implemented
+Stato: verified
 Task-tree: T2.5 (secondo dei tre sotto-task concordati — sostituisce "stack-graphs cablato per il solo JavaScript" con un resolver su misura, vedi ADR-0006) · Servizio: services/ingestion (Rust, nuovo modulo, estende SPEC-024) · ADD: Modulo 1 §1.4 (nome resolution), ma con deviazione dichiarata sulla tecnologia
 Contratti: nessuno sotto contracts/
 
