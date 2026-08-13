@@ -54,9 +54,11 @@ pub fn parse_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRela
     {
         Some("go") => "go",
         Some("js") => "javascript",
+        Some("ts") => "typescript",
         other => panic!(
             "parse_file({file_path:?}): estensione non supportata ({other:?}) — \
-             il dispatch per linguaggio è limitato a .go/.js (SPEC-024 §2)"
+             il dispatch per linguaggio è limitato a .go/.js/.ts (SPEC-024/026 §2). \
+             .tsx NON è .ts: cade qui, comportamento esplicitamente verificato da SPEC-026 §4."
         ),
     };
     let _span = tracing::info_span!("parse_file", file_path = file_path, language = language).entered();
@@ -64,6 +66,7 @@ pub fn parse_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRela
     match language {
         "go" => parse_go_file(file_path, source),
         "javascript" => parse_js_file(file_path, source),
+        "typescript" => parse_ts_file(file_path, source),
         _ => unreachable!("language già validato sopra"),
     }
 }
@@ -395,6 +398,314 @@ pub(crate) fn parse_js_file_full(
     for (caller_id, body) in callable_bodies {
         let mut call_counts: HashMap<String, u32> = HashMap::new();
         let mut unresolved_counts: HashMap<String, u32> = HashMap::new();
+        collect_calls_js(body, source, &name_to_id, &mut call_counts, &mut unresolved_counts);
+        for (callee_id, weight) in call_counts {
+            relations.push(CodeRelation {
+                domain: "code".to_string(),
+                rel_type: "CALLS".to_string(),
+                from_id: caller_id.clone(),
+                to_id: callee_id,
+                weight: Some(weight),
+            });
+        }
+        for (callee_name, weight) in unresolved_counts {
+            unresolved.push(resolve::UnresolvedCall {
+                caller_id: caller_id.clone(),
+                callee_name,
+                weight,
+            });
+        }
+    }
+
+    (nodes, relations, unresolved)
+}
+
+/// Parsa il sorgente TypeScript di un singolo file (SPEC-026 §2): stesso
+/// pattern di [`parse_js_file`], con due novità assolute rispetto a
+/// Go/JS — `Interface` (`interface_declaration`, con `Method` anche
+/// senza corpo per i suoi `method_signature`) e archi `IMPLEMENTS`/
+/// `EXTENDS` dalle clausole `implements`/`extends`, risolti SOLO
+/// intra-file (§2/§5). CALLS/CONTAINS di base riusano lo stesso
+/// meccanismo di `parse_js_file` (kind Tree-sitter verificati
+/// empiricamente coincidenti, SPEC-026 §10).
+fn parse_ts_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelation>) {
+    let (nodes, relations, _unresolved) = parse_ts_file_full(file_path, source);
+    (nodes, relations)
+}
+
+/// Variante "completa" di [`parse_ts_file`], stesso ruolo di
+/// [`parse_js_file_full`]: espone anche le chiamate rimaste irrisolte a
+/// livello intra-file, consumate da [`resolve::resolve_cross_file_calls`]
+/// (riusato invariato da SPEC-025, SPEC-026 §2/§10).
+pub(crate) fn parse_ts_file_full(
+    file_path: &str,
+    source: &str,
+) -> (Vec<CodeNode>, Vec<CodeRelation>, resolve::UnresolvedCalls) {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        .expect("grammatica tree-sitter-typescript valida");
+    let tree = parser.parse(source, None).expect("tree-sitter parse");
+    let root = tree.root_node();
+
+    let mut nodes = Vec::new();
+    let mut relations = Vec::new();
+
+    let file_id = make_id(file_path, file_path);
+    nodes.push(CodeNode {
+        id: file_id.clone(),
+        domain: "code".to_string(),
+        node_type: "File".to_string(),
+        name: file_path.to_string(),
+        ast_hash: hashing::merkle_hash(root, source.as_bytes()),
+        file_path: file_path.to_string(),
+    });
+
+    let mut name_to_id: HashMap<String, String> = HashMap::new();
+    let mut callable_bodies: Vec<(String, Node)> = Vec::new();
+    // (from_id, rel_type, nome_del_target): risolto contro name_to_id
+    // SOLO dopo che l'intero file è stato scansionato (stesso principio
+    // "due passaggi" già usato per CALLS in SPEC-013/SPEC-024 — un
+    // riferimento a un tipo dichiarato più avanti nel file deve comunque
+    // risolvere). Un nome non trovato resta semplicemente senza arco:
+    // SOLO intra-file per costruzione (SPEC-026 §2/§5), non un errore.
+    let mut heritage_refs: Vec<(String, &'static str, String)> = Vec::new();
+
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        // Stesso unwrap di `export_statement` di SPEC-025 §10 (verificato
+        // empiricamente identico anche per la grammatica TypeScript:
+        // `export function`/`export class`/`export interface` avvolgono
+        // tutte allo stesso modo, campo `declaration`).
+        let child = if child.kind() == "export_statement" {
+            child.child_by_field_name("declaration").unwrap_or(child)
+        } else {
+            child
+        };
+        match child.kind() {
+            "interface_declaration" => {
+                let Some(name_node) = child.child_by_field_name("name") else {
+                    continue;
+                };
+                let interface_name = text(name_node, source);
+                let interface_id = make_id(file_path, &interface_name);
+                nodes.push(CodeNode {
+                    id: interface_id.clone(),
+                    domain: "code".to_string(),
+                    node_type: "Interface".to_string(),
+                    name: interface_name.clone(),
+                    ast_hash: hashing::merkle_hash(child, source.as_bytes()),
+                    file_path: file_path.to_string(),
+                });
+                name_to_id.insert(interface_name.clone(), interface_id.clone());
+                relations.push(CodeRelation {
+                    domain: "code".to_string(),
+                    rel_type: "CONTAINS".to_string(),
+                    from_id: file_id.clone(),
+                    to_id: interface_id.clone(),
+                    weight: None,
+                });
+
+                // `interface X extends Y, Z {}` -> `extends_type_clause`
+                // figlio diretto, campo `type` RIPETUTO (uno per target) —
+                // verificato empiricamente (SPEC-026 §10).
+                let mut iface_cursor = child.walk();
+                if let Some(extends_clause) = child
+                    .children(&mut iface_cursor)
+                    .find(|c| c.kind() == "extends_type_clause")
+                {
+                    let mut type_cursor = extends_clause.walk();
+                    for target in extends_clause.children_by_field_name("type", &mut type_cursor) {
+                        heritage_refs.push((interface_id.clone(), "EXTENDS", text(target, source)));
+                    }
+                }
+
+                // `property_signature` (es. `readonly id: string;`) non è
+                // un Method: nessun nodo prodotto, nessun caso speciale
+                // scritto apposta — il filtro sotto lo esclude
+                // semplicemente non riconoscendolo (SPEC-026 §4 edge case).
+                if let Some(body) = child.child_by_field_name("body") {
+                    let mut member_cursor = body.walk();
+                    for member in body
+                        .children(&mut member_cursor)
+                        .filter(|m| m.kind() == "method_signature")
+                    {
+                        let Some(method_name_node) = member.child_by_field_name("name") else {
+                            continue;
+                        };
+                        let simple_name = text(method_name_node, source);
+                        let qualified_name = format!("{interface_name}.{simple_name}");
+                        let method_id = make_id(file_path, &qualified_name);
+                        nodes.push(CodeNode {
+                            id: method_id.clone(),
+                            domain: "code".to_string(),
+                            node_type: "Method".to_string(),
+                            name: simple_name.clone(),
+                            ast_hash: hashing::merkle_hash(member, source.as_bytes()),
+                            file_path: file_path.to_string(),
+                        });
+                        name_to_id.insert(simple_name, method_id.clone());
+                        relations.push(CodeRelation {
+                            domain: "code".to_string(),
+                            rel_type: "CONTAINS".to_string(),
+                            from_id: interface_id.clone(),
+                            to_id: method_id.clone(),
+                            weight: None,
+                        });
+                        // `method_signature` non ha MAI un campo `body`
+                        // (nessuna implementazione, §2): nessun
+                        // `callable_bodies` entry, nessun CALLS possibile
+                        // da una firma sola.
+                    }
+                }
+            }
+            "class_declaration" => {
+                let Some(name_node) = child.child_by_field_name("name") else {
+                    continue;
+                };
+                let class_name = text(name_node, source);
+                let class_id = make_id(file_path, &class_name);
+                nodes.push(CodeNode {
+                    id: class_id.clone(),
+                    domain: "code".to_string(),
+                    node_type: "Class".to_string(),
+                    name: class_name.clone(),
+                    ast_hash: hashing::merkle_hash(child, source.as_bytes()),
+                    file_path: file_path.to_string(),
+                });
+                name_to_id.insert(class_name.clone(), class_id.clone());
+                relations.push(CodeRelation {
+                    domain: "code".to_string(),
+                    rel_type: "CONTAINS".to_string(),
+                    from_id: file_id.clone(),
+                    to_id: class_id.clone(),
+                    weight: None,
+                });
+
+                // `class_heritage` figlio diretto (non un campo), a sua
+                // volta contenitore di `extends_clause` (campo `value`,
+                // kind `identifier` — non `type_identifier`: asimmetria
+                // reale rispetto a `implements_clause`, verificata
+                // empiricamente, SPEC-026 §10) e/o `implements_clause`
+                // (figli `type_identifier` ripetuti, senza field name).
+                let mut class_cursor = child.walk();
+                if let Some(heritage) = child
+                    .children(&mut class_cursor)
+                    .find(|c| c.kind() == "class_heritage")
+                {
+                    let mut heritage_cursor = heritage.walk();
+                    for clause in heritage.children(&mut heritage_cursor) {
+                        match clause.kind() {
+                            "extends_clause" => {
+                                if let Some(value) = clause.child_by_field_name("value") {
+                                    heritage_refs.push((class_id.clone(), "EXTENDS", text(value, source)));
+                                }
+                            }
+                            "implements_clause" => {
+                                let mut impl_cursor = clause.walk();
+                                for target in clause
+                                    .children(&mut impl_cursor)
+                                    .filter(|c| c.kind() == "type_identifier")
+                                {
+                                    heritage_refs.push((
+                                        class_id.clone(),
+                                        "IMPLEMENTS",
+                                        text(target, source),
+                                    ));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                if let Some(class_body) = child.child_by_field_name("body") {
+                    let mut member_cursor = class_body.walk();
+                    for member in class_body
+                        .children(&mut member_cursor)
+                        .filter(|m| m.kind() == "method_definition")
+                    {
+                        let Some(method_name_node) = member.child_by_field_name("name") else {
+                            continue;
+                        };
+                        let simple_name = text(method_name_node, source);
+                        let qualified_name = format!("{class_name}.{simple_name}");
+                        let method_id = make_id(file_path, &qualified_name);
+                        nodes.push(CodeNode {
+                            id: method_id.clone(),
+                            domain: "code".to_string(),
+                            node_type: "Method".to_string(),
+                            name: simple_name.clone(),
+                            ast_hash: hashing::merkle_hash(member, source.as_bytes()),
+                            file_path: file_path.to_string(),
+                        });
+                        name_to_id.insert(simple_name, method_id.clone());
+                        relations.push(CodeRelation {
+                            domain: "code".to_string(),
+                            rel_type: "CONTAINS".to_string(),
+                            from_id: class_id.clone(),
+                            to_id: method_id.clone(),
+                            weight: None,
+                        });
+                        if let Some(body) = member.child_by_field_name("body") {
+                            callable_bodies.push((method_id, body));
+                        }
+                    }
+                }
+            }
+            "function_declaration" => {
+                let Some(name_node) = child.child_by_field_name("name") else {
+                    continue;
+                };
+                let simple_name = text(name_node, source);
+                let id = make_id(file_path, &simple_name);
+                nodes.push(CodeNode {
+                    id: id.clone(),
+                    domain: "code".to_string(),
+                    node_type: "Function".to_string(),
+                    name: simple_name.clone(),
+                    ast_hash: hashing::merkle_hash(child, source.as_bytes()),
+                    file_path: file_path.to_string(),
+                });
+                name_to_id.insert(simple_name, id.clone());
+                relations.push(CodeRelation {
+                    domain: "code".to_string(),
+                    rel_type: "CONTAINS".to_string(),
+                    from_id: file_id.clone(),
+                    to_id: id.clone(),
+                    weight: None,
+                });
+                if let Some(body) = child.child_by_field_name("body") {
+                    callable_bodies.push((id, body));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (from_id, rel_type, target_name) in heritage_refs {
+        if let Some(to_id) = name_to_id.get(&target_name) {
+            relations.push(CodeRelation {
+                domain: "code".to_string(),
+                rel_type: rel_type.to_string(),
+                from_id,
+                to_id: to_id.clone(),
+                weight: None,
+            });
+        }
+        // else: non risolvibile intra-file -> nessun arco (SPEC-026 §2/§5,
+        // §4 edge case "referenzia un nome NON definito nello stesso file").
+    }
+
+    let mut unresolved = Vec::new();
+    for (caller_id, body) in callable_bodies {
+        let mut call_counts: HashMap<String, u32> = HashMap::new();
+        let mut unresolved_counts: HashMap<String, u32> = HashMap::new();
+        // Riuso diretto di `collect_calls_js` (SPEC-026 §2/§10): i kind
+        // Tree-sitter coinvolti (`call_expression`, `member_expression`,
+        // `identifier`, `property_identifier`) sono stati verificati
+        // empiricamente identici tra le due grammatiche prima di
+        // scrivere questa funzione — nessun codice nuovo necessario.
         collect_calls_js(body, source, &name_to_id, &mut call_counts, &mut unresolved_counts);
         for (callee_id, weight) in call_counts {
             relations.push(CodeRelation {
@@ -1051,6 +1362,211 @@ function alsoValid() {
         #[should_panic(expected = "estensione non supportata")]
         fn dispatch_panics_on_unsupported_extension() {
             let _ = parse_file("mystery.py", "print('hello')");
+        }
+    }
+
+    // ============================================================
+    // SPEC-026 §3/§4 — estrazione + risoluzione TypeScript (T2.5, parte
+    // 3/3), fixture in tests/fixtures/sample-repo-ts/.
+    // ============================================================
+    mod ts_tests {
+        use super::*;
+        use crate::imports::extract_imports;
+        use crate::resolve::resolve_cross_file_calls;
+        use std::path::PathBuf;
+
+        fn read_ts_fixture(name: &str) -> String {
+            let path = format!(
+                "{}/../../tests/fixtures/sample-repo-ts/{name}",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("lettura fixture {path}: {e}"))
+        }
+
+        fn parse_ts_tree(source: &str) -> tree_sitter::Tree {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+                .expect("grammatica tree-sitter-typescript valida");
+            parser.parse(source, None).expect("tree-sitter parse")
+        }
+
+        fn build_ts_file_entry(
+            path: &str,
+            source: &str,
+        ) -> (PathBuf, Vec<CodeNode>, Vec<crate::imports::ImportBinding>, crate::resolve::UnresolvedCalls) {
+            let tree = parse_ts_tree(source);
+            let imports = extract_imports(&tree, source.as_bytes());
+            let (nodes, _relations, unresolved) = parse_ts_file_full(path, source);
+            (PathBuf::from(path), nodes, imports, unresolved)
+        }
+
+        // --- SPEC-026 §3 scenario 1. ---
+        #[test]
+        fn scenario1_notifier_interface_and_class_distinct_method_ids() {
+            let source = read_ts_fixture("notifier.ts");
+            let (nodes, relations) = parse_file("notifier.ts", &source);
+
+            let types = node_types(&nodes);
+            assert!(types.contains(&("File", "notifier.ts")));
+            assert!(types.contains(&("Interface", "Notifier")));
+            assert!(types.contains(&("Class", "EmailNotifier")));
+            let notify_methods: Vec<_> = nodes.iter().filter(|n| n.name == "notify").collect();
+            assert_eq!(
+                notify_methods.len(),
+                2,
+                "due Method 'notify' distinti (Interface + Class): {nodes:?}"
+            );
+            assert_ne!(
+                notify_methods[0].id, notify_methods[1].id,
+                "stesso nome semplice ma qualified_name diverso (Notifier.notify vs EmailNotifier.notify) -> id diverso"
+            );
+            assert!(notify_methods.iter().all(|n| n.node_type == "Method"));
+
+            let interface_notify_id = find_id(&nodes, "Method", "notify");
+            let _ = interface_notify_id; // esistenza già verificata sopra
+
+            let contains: Vec<_> = relations.iter().filter(|r| r.rel_type == "CONTAINS").collect();
+            let interface_id = find_id(&nodes, "Interface", "Notifier");
+            let class_id = find_id(&nodes, "Class", "EmailNotifier");
+            assert!(
+                contains.iter().any(|r| r.from_id == interface_id),
+                "Interface->Method(notify) CONTAINS atteso: {contains:?}"
+            );
+            assert!(
+                contains.iter().any(|r| r.from_id == class_id),
+                "Class->Method(notify) CONTAINS atteso: {contains:?}"
+            );
+        }
+
+        // --- SPEC-026 §3 scenario 2. ---
+        #[test]
+        fn scenario2_email_notifier_implements_notifier() {
+            let source = read_ts_fixture("notifier.ts");
+            let (nodes, relations) = parse_file("notifier.ts", &source);
+
+            let class_id = find_id(&nodes, "Class", "EmailNotifier");
+            let interface_id = find_id(&nodes, "Interface", "Notifier");
+
+            let implements: Vec<_> = relations.iter().filter(|r| r.rel_type == "IMPLEMENTS").collect();
+            assert_eq!(implements.len(), 1, "ottenuti: {implements:?}");
+            assert_eq!(implements[0].from_id, class_id);
+            assert_eq!(implements[0].to_id, interface_id);
+        }
+
+        // --- SPEC-026 §3 scenario 3: cross-file CALLS, resolve_cross_file_calls
+        // riusata invariata da SPEC-025. ---
+        #[test]
+        fn scenario3_cross_file_calls_process_to_compute_total_via_reused_resolver() {
+            let order_service_src = read_ts_fixture("order_service.ts");
+            let util_src = read_ts_fixture("util.ts");
+
+            let order_service = build_ts_file_entry("order_service.ts", &order_service_src);
+            let util = build_ts_file_entry("util.ts", &util_src);
+            let order_service_nodes = order_service.1.clone();
+            let util_nodes = util.1.clone();
+
+            let relations = resolve_cross_file_calls(&[order_service, util]);
+
+            let process_id = find_id(&order_service_nodes, "Method", "process");
+            let compute_total_id = find_id(&util_nodes, "Function", "computeTotal");
+
+            let calls: Vec<_> = relations.iter().filter(|r| r.rel_type == "CALLS").collect();
+            assert_eq!(calls.len(), 1, "ottenuti: {calls:?}");
+            assert_eq!(calls[0].from_id, process_id);
+            assert_eq!(calls[0].to_id, compute_total_id);
+        }
+
+        // --- SPEC-026 §3 scenario 4. ---
+        #[test]
+        fn scenario4_process_calls_validate_intra_file() {
+            let source = read_ts_fixture("order_service.ts");
+            let (nodes, relations) = parse_file("order_service.ts", &source);
+
+            let process_id = find_id(&nodes, "Method", "process").to_string();
+            let validate_id = find_id(&nodes, "Method", "validate").to_string();
+
+            let calls: Vec<_> = relations.iter().filter(|r| r.rel_type == "CALLS").collect();
+            assert_eq!(
+                calls.len(),
+                1,
+                "atteso solo process->validate (process->computeTotal è cross-file, scenario 3): {calls:?}"
+            );
+            assert_eq!(calls[0].from_id, process_id);
+            assert_eq!(calls[0].to_id, validate_id);
+        }
+
+        // --- SPEC-026 §3 scenario 5: le annotazioni di tipo non
+        // contaminano l'estrazione del nome. ---
+        #[test]
+        fn scenario5_type_annotations_do_not_contaminate_names() {
+            let source = read_ts_fixture("order_service.ts");
+            let (nodes, _relations) = parse_file("order_service.ts", &source);
+
+            let types = node_types(&nodes);
+            assert!(types.contains(&("Class", "OrderService")), "{types:?}");
+            assert!(types.contains(&("Method", "process")), "{types:?}");
+            assert!(types.contains(&("Method", "validate")), "{types:?}");
+            assert!(types.contains(&("Method", "constructor")), "{types:?}");
+            // Nessun nome dovrebbe contenere frammenti di tipo (es.
+            // "number", "[]", ":") — verifica diretta, non solo assenza
+            // di crash.
+            for (_, name) in &types {
+                assert!(
+                    !name.contains("number") && !name.contains(':'),
+                    "il nome {name:?} sembra contaminato da un'annotazione di tipo"
+                );
+            }
+        }
+
+        // --- SPEC-026 §4 edge case: implements/extends verso un nome non
+        // definito nello stesso file -> nessun arco prodotto. ---
+        #[test]
+        fn edge_case_implements_extends_cross_file_reference_produces_no_edge() {
+            let source = r#"class EmailNotifier implements Notifier {
+  notify(message: string): void {}
+}
+"#;
+            let (nodes, relations) = parse_file("standalone.ts", source);
+            assert!(
+                !nodes.iter().any(|n| n.name == "Notifier"),
+                "Notifier non è definita in questo file: nessun CodeNode atteso"
+            );
+            assert!(
+                !relations.iter().any(|r| r.rel_type == "IMPLEMENTS"),
+                "nessun arco IMPLEMENTS: Notifier non è risolvibile intra-file: {relations:?}"
+            );
+        }
+
+        // --- SPEC-026 §4 edge case: property signature in un'interfaccia
+        // non estratta come Method. ---
+        #[test]
+        fn edge_case_interface_property_signature_not_extracted() {
+            let source = r#"interface Foo {
+  readonly id: string;
+  bar(): void;
+}
+"#;
+            let (nodes, _relations) = parse_file("foo.ts", source);
+            assert!(
+                !nodes.iter().any(|n| n.name == "id"),
+                "property_signature 'id' non deve produrre un CodeNode: {nodes:?}"
+            );
+            assert!(
+                nodes.iter().any(|n| n.node_type == "Method" && n.name == "bar"),
+                "method_signature 'bar' deve comunque essere estratto: {nodes:?}"
+            );
+        }
+
+        // --- SPEC-026 §4 edge case: file .tsx -> comportamento
+        // esplicitamente verificato, non lasciato implicito. .tsx non
+        // combacia con l'estensione .ts: cade nel ramo "estensione non
+        // supportata" già esistente da SPEC-024, stesso comportamento di
+        // qualunque altra estensione sconosciuta. ---
+        #[test]
+        #[should_panic(expected = "estensione non supportata")]
+        fn edge_case_tsx_file_falls_into_unsupported_extension_panic() {
+            let _ = parse_file("component.tsx", "const x: number = 1;");
         }
     }
 }
