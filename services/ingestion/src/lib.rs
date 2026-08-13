@@ -20,6 +20,7 @@ pub mod embedding;
 pub mod imports;
 pub mod resolve;
 pub mod hashing;
+pub mod lineage;
 pub mod persist;
 pub use persist::{persist_parsed_file, PersistError, PersistSummary};
 
