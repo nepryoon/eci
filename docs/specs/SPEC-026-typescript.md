@@ -1,5 +1,5 @@
 # SPEC-026 — TypeScript: estrazione + risoluzione (T2.5, parte 3/3)
-Stato: implemented
+Stato: verified
 Task-tree: T2.5 (terzo e ultimo dei tre sotto-task concordati — chiude T2.5 e Fase 2) · Servizio: services/ingestion (Rust, estende SPEC-024/025) · ADD: Modulo 1 §1.2-1.4, con deviazione dichiarata su resolution (ADR-0006, invariata — vale anche qui)
 Contratti: possibile estensione del vincolo `rel_type` su `code_relation` se IMPLEMENTS/EXTENDS non sono già valori ammessi — **da verificare durante l'implementazione**, non presunto; se serve, ADR dedicata (stesso principio di ADR-0006)
 
