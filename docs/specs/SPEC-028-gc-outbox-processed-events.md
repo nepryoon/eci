@@ -1,5 +1,5 @@
 # SPEC-028 — GC periodica di outbox/processed_events (T2.6, parte 2/2)
-Stato: implemented
+Stato: verified
 Task-tree: T2.6 (secondo dei due sotto-task concordati — chiude T2.6 e Fase 2) · Nuovo: tools/gc-postgres (Go, stesso pattern di tools/migrate-neo4j già esistente) · ADD: Modulo 1 §1.6.6, §2.2
 Contratti: nessuno sotto contracts/ (nessuna modifica di schema — solo `DELETE` su tabelle esistenti)
 
