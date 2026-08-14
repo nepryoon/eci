@@ -6,6 +6,7 @@
 
 use rust_decimal::Decimal;
 
+use crate::chunking::CodeChunk;
 use crate::{CodeNode, CodeRelation};
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -49,6 +50,7 @@ pub fn persist_parsed_file(
     client: &mut postgres::Client,
     nodes: Vec<CodeNode>,
     relations: Vec<CodeRelation>,
+    chunks: &[CodeChunk],
 ) -> Result<PersistSummary, PersistError> {
     let _span = tracing::info_span!("persist_parsed_file").entered();
     // Catturato UNA VOLTA dentro lo span di questa funzione (non per ogni
@@ -158,6 +160,44 @@ pub fn persist_parsed_file(
             "INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload, trace_id)
              VALUES ('CodeRelation', $1, 'UPSERT', $2, $3)",
             &[&relation_id, &payload, &trace_id],
+        )?;
+        outbox_rows_written += 1;
+    }
+
+    // Scope del DELETE: SOLO entity_id tra i nodi appena prodotti da questo
+    // file (SPEC-029 §2 — stesso pattern già stabilito per code_relation
+    // sopra, non un ON CONFLICT: il numero di chunk di un'entità può
+    // cambiare tra un parse e l'altro).
+    tx.execute(
+        "DELETE FROM code_chunk WHERE entity_id = ANY($1)",
+        &[&file_node_ids],
+    )?;
+
+    for chunk in chunks {
+        let row = tx.query_one(
+            "INSERT INTO code_chunk (entity_id, chunk_index, text, char_count)
+             VALUES ($1, $2, $3, $4)
+             RETURNING id::text",
+            &[
+                &chunk.entity_id,
+                &(chunk.chunk_index as i32),
+                &chunk.text,
+                &(chunk.char_count as i32),
+            ],
+        )?;
+        let chunk_id: String = row.get(0);
+
+        let payload = serde_json::json!({
+            "id": chunk_id,
+            "entity_id": chunk.entity_id,
+            "chunk_index": chunk.chunk_index,
+            "text": chunk.text,
+            "char_count": chunk.char_count,
+        });
+        tx.execute(
+            "INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload, trace_id)
+             VALUES ('CodeChunk', $1, 'UPSERT', $2, $3)",
+            &[&chunk_id, &payload, &trace_id],
         )?;
         outbox_rows_written += 1;
     }

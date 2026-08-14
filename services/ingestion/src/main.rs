@@ -21,11 +21,12 @@ fn main() {
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("lettura di {path}: {e}"));
 
-    let (nodes, relations) = ingestion::parse_file(&path, &source);
+    let (nodes, relations, chunks) = ingestion::parse_file_full(&path, &source);
     println!(
-        "parse_file({path:?}): {} CodeNode, {} CodeRelation",
+        "parse_file_full({path:?}): {} CodeNode, {} CodeRelation, {} CodeChunk",
         nodes.len(),
-        relations.len()
+        relations.len(),
+        chunks.len()
     );
 
     let dsn = eci_common::config::env_or_default(
@@ -35,7 +36,7 @@ fn main() {
     let mut client = postgres::Client::connect(&dsn, postgres::NoTls)
         .unwrap_or_else(|e| panic!("connessione a Postgres ({dsn}): {e}"));
 
-    let summary = ingestion::persist_parsed_file(&mut client, nodes, relations)
+    let summary = ingestion::persist_parsed_file(&mut client, nodes, relations, &chunks)
         .unwrap_or_else(|e| panic!("persist_parsed_file({path:?}): {e}"));
     println!(
         "persist_parsed_file({path:?}): {} nodi upsert, {} relazioni sostituite, {} righe outbox",

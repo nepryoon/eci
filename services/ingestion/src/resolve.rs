@@ -161,7 +161,7 @@ mod tests {
     ) -> (PathBuf, Vec<CodeNode>, Vec<ImportBinding>, UnresolvedCalls) {
         let tree = parse_tree(source);
         let imports = extract_imports(&tree, source.as_bytes());
-        let (nodes, _relations, unresolved) = parse_js_file_full(path, source);
+        let (nodes, _relations, unresolved, _chunks) = parse_js_file_full(path, source);
         (PathBuf::from(path), nodes, imports, unresolved)
     }
 
