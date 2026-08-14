@@ -147,7 +147,12 @@ func TestPostgresDDLMigration(t *testing.T) {
 	})
 
 	// Scenario 2: applico `down` -> tutte le tabelle rimosse senza errori.
-	runMigrateCLI(t, migrationsDir, dsn, "down", "1")
+	// `down` senza contatore (non `down 1`, SPEC-027 §10 deviazione: `down
+	// 1` annullava correttamente TUTTO finché esisteva una sola migration;
+	// da quando 0002_lineage esiste, `down 1` annulla solo l'ultima e
+	// lascia le tabelle di questa migration — `down` senza contatore
+	// resta corretto indipendentemente da quante migration si accumulano).
+	runMigrateCLI(t, migrationsDir, dsn, "down", "-all")
 	assertTablesAbsent(t, db, "code_node", "code_relation", "outbox", "processed_events")
 }
 
