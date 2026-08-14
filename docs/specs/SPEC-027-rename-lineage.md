@@ -1,5 +1,5 @@
 # SPEC-027 — Rename/move detection + lineage (T2.6, parte 1/2)
-Stato: implemented
+Stato: verified
 Task-tree: T2.6 (primo dei due sotto-task concordati — GC di outbox/processed_events è la parte 2/2, separata) · Servizio: services/ingestion (Rust, nuovo modulo + nuova migrazione) · ADD: Modulo 1 §1.6.4-1.6.6
 Contratti: nuova migrazione `contracts/sql/migrations/000N_lineage.up.sql` (nuova tabella, additiva — nessun ADR richiesto per un'aggiunta, stesso principio già confermato in SPEC-026 §10 per `rel_type`)
 
