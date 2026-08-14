@@ -1,5 +1,5 @@
 # SPEC-029 — Chunking cablato nella persistenza (pre-T3.1, 1/3)
-Stato: implemented
+Stato: verified
 Task-tree: prerequisito non nominato esplicitamente da Fase 3 (concordato in chat) — primo dei tre pezzi prima di T3.1 · Servizio: services/ingestion (Rust, estende T1.2/T2.2) · ADD: Modulo 1 §2.1 (chunk come payload derivato del CPG)
 Contratti: nuova migrazione `contracts/sql/migrations/0003_code_chunk.up.sql` (nuova tabella, additiva — nessun ADR, stesso principio già confermato per `lineage`/SPEC-027)
 
