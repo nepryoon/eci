@@ -1,5 +1,5 @@
 # SPEC-032 — Propagare provenance attraverso CodeChunk/CodeEmbedding
-Stato: implemented
+Stato: verified
 Task-tree: correzione a SPEC-029/030, prerequisito per T3.1 (scoperta e concordata in chat) · Servizi: services/ingestion + services/embedding-worker (Go+Rust) · ADD: Modulo 1 §1.6.3 (payload Qdrant: node_id, domain, provenance)
 
 ## 1. Obiettivo
