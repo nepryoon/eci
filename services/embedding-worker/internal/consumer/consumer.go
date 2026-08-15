@@ -60,10 +60,13 @@ const (
 // chunk_id (code_chunk.id) — nessuno struct condiviso in libs/go/eci/models
 // per CodeChunk al momento di questa SPEC, quindi definito qui, locale a
 // questo consumer (stesso principio di codeRelationPayload in sink-graph,
-// SPEC-015 §10).
+// SPEC-015 §10). `EntityID` (SPEC-031 §2): già presente nel messaggio in
+// ingresso, propagato nel payload outbox di CodeEmbedding — nessuna nuova
+// query, solo lettura di un campo già deserializzato.
 type codeChunkPayload struct {
-	ID   string `json:"id"`
-	Text string `json:"text"`
+	ID       string `json:"id"`
+	EntityID string `json:"entity_id"`
+	Text     string `json:"text"`
 }
 
 // ProcessMessage elabora UN messaggio Kafka già fetchato (SPEC-030 §2/§3):
@@ -116,7 +119,7 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 
 	traceID, _ := kafkatrace.TraceIDFromHeaders(headers)
 
-	stored, err := storeEmbedding(ctx, deps, eventID, chunk.ID, vector, traceID)
+	stored, err := storeEmbedding(ctx, deps, eventID, chunk.ID, chunk.EntityID, vector, traceID)
 	if err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("store embedding chunk_id=%s: %w", chunk.ID, err)
 	}
@@ -146,7 +149,7 @@ func eventIDFromHeaders(headers []kafka.Header) (string, bool) {
 // pattern letterale di sink-graph — vedi commento su ProcessMessage sopra).
 // stored=false quando l'INSERT di dedup non ha inserito nulla (event_id già
 // presente): la transazione va comunque in ROLLBACK, nessuna scrittura.
-func storeEmbedding(ctx context.Context, deps Deps, eventID, chunkID string, vector []float32, traceID string) (stored bool, err error) {
+func storeEmbedding(ctx context.Context, deps Deps, eventID, chunkID, entityID string, vector []float32, traceID string) (stored bool, err error) {
 	tx, err := deps.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -187,6 +190,7 @@ func storeEmbedding(ctx context.Context, deps Deps, eventID, chunkID string, vec
 	payload, err := json.Marshal(map[string]any{
 		"id":            embeddingID,
 		"chunk_id":      chunkID,
+		"entity_id":     entityID,
 		"vector":        vector,
 		"model_id":      deps.ModelID,
 		"embedding_dim": len(vector),
