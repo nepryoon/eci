@@ -1,5 +1,5 @@
 # SPEC-031 — CodeEmbedding: aggiungere entity_id al payload (fix a SPEC-030)
-Stato: implemented
+Stato: verified
 Task-tree: correzione a SPEC-030, prerequisito per T3.1 (scoperta e concordata in chat) · Servizio: services/embedding-worker (Go, modifica minima) · ADD: Modulo 1 §1.6.3 (payload Qdrant: node_id, domain, provenance)
 
 ## 1. Obiettivo
