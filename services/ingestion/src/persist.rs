@@ -4,6 +4,8 @@
 //! sostituzione (delete+insert) delle relazioni emananti da questo file, e
 //! una riga `outbox` per ciascuna entità toccata (SPEC-014 §2).
 
+use std::collections::HashMap;
+
 use rust_decimal::Decimal;
 
 use crate::chunking::CodeChunk;
@@ -173,6 +175,13 @@ pub fn persist_parsed_file(
         &[&file_node_ids],
     )?;
 
+    // Lookup in memoria file_path per id (SPEC-032 §2): nessuna nuova
+    // query, `nodes` è già ricevuto nella STESSA chiamata di `chunks`.
+    let file_path_by_node_id: HashMap<&str, &str> = nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n.file_path.as_str()))
+        .collect();
+
     for chunk in chunks {
         let row = tx.query_one(
             "INSERT INTO code_chunk (entity_id, chunk_index, text, char_count)
@@ -187,13 +196,20 @@ pub fn persist_parsed_file(
         )?;
         let chunk_id: String = row.get(0);
 
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "id": chunk_id,
             "entity_id": chunk.entity_id,
             "chunk_index": chunk.chunk_index,
             "text": chunk.text,
             "char_count": chunk.char_count,
         });
+        // SPEC-032 §2/§4: se il CodeNode dell'entità non è nel batch
+        // corrente (non dovrebbe accadere per costruzione), `provenance`
+        // resta semplicemente omesso dal payload — mai un panic, mai un
+        // valore fabbricato.
+        if let Some(file_path) = file_path_by_node_id.get(chunk.entity_id.as_str()) {
+            payload["provenance"] = serde_json::json!({ "path": file_path });
+        }
         tx.execute(
             "INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload, trace_id)
              VALUES ('CodeChunk', $1, 'UPSERT', $2, $3)",

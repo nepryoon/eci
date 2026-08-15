@@ -183,8 +183,9 @@ func scenario3OutboxRowWithVectorIncluded(t *testing.T, ctx context.Context, st 
 	eventID := uniqueUUID(t)
 	traceID := "0123456789abcdef0123456789abcdef"
 	entityID := "entity-3"
+	wantProvenance := map[string]any{"path": "order_service.go"}
 
-	produce(t, ctx, brokers, consumer.TopicCodeChunk, chunkID, codeChunkPayload(chunkID, entityID, 0, text), eventID, traceID)
+	produce(t, ctx, brokers, consumer.TopicCodeChunk, chunkID, codeChunkPayloadWithProvenance(chunkID, entityID, 0, text, wantProvenance), eventID, traceID)
 
 	outcome := fetchAndProcessOnce(t, ctx, brokers, deps)
 	if outcome != consumer.OutcomeStored {
@@ -224,6 +225,17 @@ func scenario3OutboxRowWithVectorIncluded(t *testing.T, ctx context.Context, st 
 	// provenance) richiesto dall'ADD, senza dover interrogare Postgres.
 	if payload["entity_id"] != entityID {
 		t.Errorf("payload['entity_id'] = %v, want %q", payload["entity_id"], entityID)
+	}
+	// SPEC-032 §3 scenario 2: provenance del messaggio CodeChunk in ingresso
+	// deve propagare invariato nel payload outbox di CodeEmbedding — ultimo
+	// pezzo mancante del payload Qdrant (node_id, domain, provenance)
+	// richiesto dall'ADD.
+	gotProvenance, ok := payload["provenance"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload['provenance'] non è un oggetto: %v", payload["provenance"])
+	}
+	if gotProvenance["path"] != wantProvenance["path"] {
+		t.Errorf("payload['provenance']['path'] = %v, want %q", gotProvenance["path"], wantProvenance["path"])
 	}
 }
 
@@ -665,6 +677,22 @@ func codeChunkPayload(chunkID, entityID string, chunkIndex int, text string) []b
 		"chunk_index": chunkIndex,
 		"text":        text,
 		"char_count":  len(text),
+	}
+	out, _ := json.Marshal(payload)
+	return out
+}
+
+// codeChunkPayloadWithProvenance — stessa forma di codeChunkPayload, con in
+// più il campo provenance (SPEC-032 §2/§3 scenario 2), usato solo dove
+// serve verificarne la propagazione senza toccare gli altri scenari.
+func codeChunkPayloadWithProvenance(chunkID, entityID string, chunkIndex int, text string, provenance map[string]any) []byte {
+	payload := map[string]any{
+		"id":          chunkID,
+		"entity_id":   entityID,
+		"chunk_index": chunkIndex,
+		"text":        text,
+		"char_count":  len(text),
+		"provenance":  provenance,
 	}
 	out, _ := json.Marshal(payload)
 	return out
