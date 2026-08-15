@@ -182,8 +182,9 @@ func scenario3OutboxRowWithVectorIncluded(t *testing.T, ctx context.Context, st 
 	chunkID := insertCodeChunkFixture(t, ctx, st.db, text)
 	eventID := uniqueUUID(t)
 	traceID := "0123456789abcdef0123456789abcdef"
+	entityID := "entity-3"
 
-	produce(t, ctx, brokers, consumer.TopicCodeChunk, chunkID, codeChunkPayload(chunkID, "entity-3", 0, text), eventID, traceID)
+	produce(t, ctx, brokers, consumer.TopicCodeChunk, chunkID, codeChunkPayload(chunkID, entityID, 0, text), eventID, traceID)
 
 	outcome := fetchAndProcessOnce(t, ctx, brokers, deps)
 	if outcome != consumer.OutcomeStored {
@@ -216,6 +217,13 @@ func scenario3OutboxRowWithVectorIncluded(t *testing.T, ctx context.Context, st 
 	}
 	if !gotTraceID.Valid || gotTraceID.String != traceID {
 		t.Errorf("trace_id outbox = %v, want %q", gotTraceID, traceID)
+	}
+	// SPEC-031 §3 scenario 1: entity_id del messaggio CodeChunk in ingresso
+	// deve propagare invariato nel payload outbox di CodeEmbedding —
+	// necessario a Qdrant (T3.1) per il payload (node_id, domain,
+	// provenance) richiesto dall'ADD, senza dover interrogare Postgres.
+	if payload["entity_id"] != entityID {
+		t.Errorf("payload['entity_id'] = %v, want %q", payload["entity_id"], entityID)
 	}
 }
 
