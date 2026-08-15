@@ -1,5 +1,5 @@
 # SPEC-030 — Worker asincrono di embedding (pre-T3.1, 2/3)
-Stato: implemented
+Stato: verified
 Task-tree: prerequisito non nominato esplicitamente da Fase 3 (concordato in chat) — secondo dei tre pezzi prima di T3.1 · Nuovo servizio: services/embedding-worker (Go) · ADD: Modulo 1 §1.6.3/§2.1 (embedding come payload derivato, cache-aware)
 Contratti: nuova migrazione `contracts/sql/migrations/0004_code_embedding.up.sql` (nuova tabella, additiva — nessun ADR)
 
