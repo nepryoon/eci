@@ -186,6 +186,22 @@ fn chunk_persist_scenarios_1_2_4_validate_single_chunk_and_outbox() {
         "scenario 4: tutte le righe outbox CodeChunk devono condividere il trace_id della transazione: {chunk_outbox_rows:?}"
     );
 
+    // --- SPEC-032 §3 scenario 1: il payload outbox del CodeChunk di
+    // Validate include provenance:{"path": "order_service.go"}, coerente
+    // col provenance del CodeNode di Validate stesso. ---
+    let validate_chunk_payload: serde_json::Value = client
+        .query_one(
+            "SELECT payload FROM outbox WHERE aggregate_type = 'CodeChunk' AND payload->>'entity_id' = $1",
+            &[&validate_id],
+        )
+        .expect("query outbox CodeChunk per il chunk di Validate")
+        .get(0);
+    assert_eq!(
+        validate_chunk_payload.get("provenance"),
+        Some(&serde_json::json!({ "path": "order_service.go" })),
+        "SPEC-032 scenario 1: provenance del CodeChunk di Validate deve combaciare col path del suo CodeNode: {validate_chunk_payload:?}"
+    );
+
     // --- Scenario 2: ri-parso e ri-persisto SENZA modifiche -> il conteggio resta lo stesso. ---
     let (nodes2, relations2, chunks2) = parse_file_full("order_service.go", &source);
     let _summary2 = persist_parsed_file(&mut client, nodes2, relations2, &chunks2)

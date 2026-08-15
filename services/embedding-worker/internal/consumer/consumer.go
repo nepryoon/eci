@@ -60,13 +60,22 @@ const (
 // chunk_id (code_chunk.id) — nessuno struct condiviso in libs/go/eci/models
 // per CodeChunk al momento di questa SPEC, quindi definito qui, locale a
 // questo consumer (stesso principio di codeRelationPayload in sink-graph,
-// SPEC-015 §10). `EntityID` (SPEC-031 §2): già presente nel messaggio in
-// ingresso, propagato nel payload outbox di CodeEmbedding — nessuna nuova
-// query, solo lettura di un campo già deserializzato.
+// SPEC-015 §10). `EntityID` (SPEC-031 §2) e `Provenance` (SPEC-032 §2): già
+// presenti nel messaggio in ingresso, propagati invariati nel payload
+// outbox di CodeEmbedding — nessuna nuova query, solo lettura di campi già
+// deserializzati. `Provenance` è `json.RawMessage` (non uno struct dedicato
+// `{Path string}`, scelta lasciata aperta da SPEC-032 §2): stesso principio
+// già usato per `OutboxEvent.Payload` in libs/go/eci/models/outbox.go — un
+// blob JSON opaco che questo consumer non deve interpretare, solo
+// ritrasmettere byte-per-byte. Zero value (`nil`) quando il messaggio in
+// ingresso non ha la chiave `provenance` (SPEC-032 §4 edge case, lato Rust):
+// nessun default fabbricato, la chiave resta semplicemente omessa anche nel
+// payload in uscita (vedi storeEmbedding).
 type codeChunkPayload struct {
-	ID       string `json:"id"`
-	EntityID string `json:"entity_id"`
-	Text     string `json:"text"`
+	ID         string          `json:"id"`
+	EntityID   string          `json:"entity_id"`
+	Text       string          `json:"text"`
+	Provenance json.RawMessage `json:"provenance"`
 }
 
 // ProcessMessage elabora UN messaggio Kafka già fetchato (SPEC-030 §2/§3):
@@ -119,7 +128,7 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 
 	traceID, _ := kafkatrace.TraceIDFromHeaders(headers)
 
-	stored, err := storeEmbedding(ctx, deps, eventID, chunk.ID, chunk.EntityID, vector, traceID)
+	stored, err := storeEmbedding(ctx, deps, eventID, chunk.ID, chunk.EntityID, chunk.Provenance, vector, traceID)
 	if err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("store embedding chunk_id=%s: %w", chunk.ID, err)
 	}
@@ -149,7 +158,7 @@ func eventIDFromHeaders(headers []kafka.Header) (string, bool) {
 // pattern letterale di sink-graph — vedi commento su ProcessMessage sopra).
 // stored=false quando l'INSERT di dedup non ha inserito nulla (event_id già
 // presente): la transazione va comunque in ROLLBACK, nessuna scrittura.
-func storeEmbedding(ctx context.Context, deps Deps, eventID, chunkID, entityID string, vector []float32, traceID string) (stored bool, err error) {
+func storeEmbedding(ctx context.Context, deps Deps, eventID, chunkID, entityID string, provenance json.RawMessage, vector []float32, traceID string) (stored bool, err error) {
 	tx, err := deps.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -187,14 +196,21 @@ func storeEmbedding(ctx context.Context, deps Deps, eventID, chunkID, entityID s
 		return false, err
 	}
 
-	payload, err := json.Marshal(map[string]any{
+	payloadFields := map[string]any{
 		"id":            embeddingID,
 		"chunk_id":      chunkID,
 		"entity_id":     entityID,
 		"vector":        vector,
 		"model_id":      deps.ModelID,
 		"embedding_dim": len(vector),
-	})
+	}
+	// SPEC-032 §2/§4: se il messaggio in ingresso non aveva provenance
+	// (len(provenance) == 0, campo assente), la chiave resta omessa dal
+	// payload in uscita — mai un valore fabbricato.
+	if len(provenance) > 0 {
+		payloadFields["provenance"] = provenance
+	}
+	payload, err := json.Marshal(payloadFields)
 	if err != nil {
 		return false, err
 	}
