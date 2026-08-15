@@ -72,6 +72,41 @@ pub fn parse_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRela
     }
 }
 
+/// Variante "completa" di [`parse_file`] (SPEC-029 §2): stesso dispatch
+/// per estensione, in più espone i `CodeChunk` prodotti dal cablaggio del
+/// chunking cAST (SPEC-021/T2.2) dentro ciascuna variante `_full` per
+/// linguaggio — il "futuro chiamante" a cui T2.2 §10 rimandava. Scarta
+/// `unresolved` (SPEC-025/026, non pertinente qui) esattamente come
+/// [`parse_js_file`]/[`parse_ts_file`] già fanno.
+pub fn parse_file_full(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelation>, Vec<chunking::CodeChunk>) {
+    let language = match std::path::Path::new(file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+    {
+        Some("go") => "go",
+        Some("js") => "javascript",
+        Some("ts") => "typescript",
+        other => panic!(
+            "parse_file_full({file_path:?}): estensione non supportata ({other:?}) — \
+             il dispatch per linguaggio è limitato a .go/.js/.ts (SPEC-024/026 §2)."
+        ),
+    };
+    let _span = tracing::info_span!("parse_file_full", file_path = file_path, language = language).entered();
+
+    match language {
+        "go" => parse_go_file_full(file_path, source),
+        "javascript" => {
+            let (nodes, relations, _unresolved, chunks) = parse_js_file_full(file_path, source);
+            (nodes, relations, chunks)
+        }
+        "typescript" => {
+            let (nodes, relations, _unresolved, chunks) = parse_ts_file_full(file_path, source);
+            (nodes, relations, chunks)
+        }
+        _ => unreachable!("language già validato sopra"),
+    }
+}
+
 /// Parsa il sorgente Go di un singolo file e produce i `CodeNode`/
 /// `CodeRelation` corrispondenti (SPEC-013 §2): un `CodeNode` `File`,
 /// un `CodeNode` per ogni `Class`/`Interface`/`Method`/`Function` di
@@ -81,6 +116,28 @@ pub fn parse_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRela
 /// SPEC-024 stessa introduce solo l'estrazione JS, la risoluzione
 /// cross-file resta un sotto-task successivo, parte 2/3).
 fn parse_go_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelation>) {
+    let (nodes, relations, _chunks) = parse_go_file_full(file_path, source);
+    (nodes, relations)
+}
+
+/// Variante "completa" di [`parse_go_file`] (SPEC-029 §2, nuova — non
+/// esisteva prima): stesso identico algoritmo di estrazione, in più
+/// accumula i `CodeChunk` prodotti da [`chunking::chunk_entity`] per
+/// ciascuna entità, chiamato nello stesso punto in cui il suo nodo
+/// Tree-sitter e il suo id sono già in mano. A differenza di
+/// `parse_js_file_full`/`parse_ts_file_full` non esiste un concetto di
+/// chiamate "unresolved" per Go (SPEC-013/§2 — risoluzione CALLS
+/// interamente intra-file, nessun resolver cross-file per questo
+/// linguaggio): il terzo elemento è direttamente `Vec<CodeChunk>`, non un
+/// quarto dopo un `UnresolvedCalls` che qui non avrebbe alcun consumatore
+/// (deviazione dichiarata da SPEC-029 §2, vedi nota a fondo SPEC).
+pub(crate) fn parse_go_file_full(
+    file_path: &str,
+    source: &str,
+) -> (Vec<CodeNode>, Vec<CodeRelation>, Vec<chunking::CodeChunk>) {
+    let budget = chunking::chunk_budget_chars("go");
+    let mut chunks: Vec<chunking::CodeChunk> = Vec::new();
+
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&tree_sitter_go::LANGUAGE.into())
@@ -117,6 +174,7 @@ fn parse_go_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelat
         ast_hash: hashing::merkle_hash(root, source.as_bytes()),
         file_path: file_path.to_string(),
     });
+    push_entity_chunks(root, source, &file_id, budget, &mut chunks);
 
     // Mappa nome-semplice -> id, per-file (SPEC-013 §2): usata per
     // risolvere CALLS. Una collisione tra due receiver diversi con lo
@@ -159,6 +217,7 @@ fn parse_go_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelat
                         ast_hash: hashing::merkle_hash(spec, source.as_bytes()),
                         file_path: file_path.to_string(),
                     });
+                    push_entity_chunks(spec, source, &id, budget, &mut chunks);
                     name_to_id.insert(name, id.clone());
                     relations.push(CodeRelation {
                         domain: "code".to_string(),
@@ -192,6 +251,7 @@ fn parse_go_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelat
                     ast_hash: hashing::merkle_hash(child, source.as_bytes()),
                     file_path: file_path.to_string(),
                 });
+                push_entity_chunks(child, source, &id, budget, &mut chunks);
                 name_to_id.insert(simple_name, id.clone());
                 relations.push(CodeRelation {
                     domain: "code".to_string(),
@@ -222,7 +282,7 @@ fn parse_go_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelat
         }
     }
 
-    (nodes, relations)
+    (nodes, relations, chunks)
 }
 
 /// Parsa il sorgente JavaScript di un singolo file (SPEC-024 §2): stesso
@@ -233,7 +293,7 @@ fn parse_go_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelat
 /// cross-file (§5), nessuna estrazione di function expression/arrow
 /// function assegnate a variabile (§2, Non-goal dichiarato).
 fn parse_js_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelation>) {
-    let (nodes, relations, _unresolved) = parse_js_file_full(file_path, source);
+    let (nodes, relations, _unresolved, _chunks) = parse_js_file_full(file_path, source);
     (nodes, relations)
 }
 
@@ -242,14 +302,19 @@ fn parse_js_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelat
 /// meccanismo già esistente in SPEC-013/SPEC-024... qui riusato, non
 /// duplicato") — stesso identico algoritmo, in più raccoglie
 /// (caller_id, nome_chiamato, weight) per ogni `call_expression` il cui
-/// nome non risolve localmente, invece di scartarlo silenziosamente.
-/// `parse_js_file` resta il contratto pubblico invariato di SPEC-024 (ne
-/// scarta il terzo elemento). `pub(crate)`: consumata da [`resolve`] per
-/// costruire l'input di `resolve_cross_file_calls`.
+/// nome non risolve localmente, invece di scartarlo silenziosamente. In
+/// più (SPEC-029 §2) accumula i `CodeChunk` per ciascuna entità, come
+/// quarto elemento. `parse_js_file` resta il contratto pubblico invariato
+/// di SPEC-024 (ne scarta terzo e quarto elemento). `pub(crate)`:
+/// consumata da [`resolve`] per costruire l'input di
+/// `resolve_cross_file_calls`.
 pub(crate) fn parse_js_file_full(
     file_path: &str,
     source: &str,
-) -> (Vec<CodeNode>, Vec<CodeRelation>, resolve::UnresolvedCalls) {
+) -> (Vec<CodeNode>, Vec<CodeRelation>, resolve::UnresolvedCalls, Vec<chunking::CodeChunk>) {
+    let budget = chunking::chunk_budget_chars("javascript");
+    let mut chunks: Vec<chunking::CodeChunk> = Vec::new();
+
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&tree_sitter_javascript::LANGUAGE.into())
@@ -277,6 +342,7 @@ pub(crate) fn parse_js_file_full(
         ast_hash: hashing::merkle_hash(root, source.as_bytes()),
         file_path: file_path.to_string(),
     });
+    push_entity_chunks(root, source, &file_id, budget, &mut chunks);
 
     let mut name_to_id: HashMap<String, String> = HashMap::new();
     let mut callable_bodies: Vec<(String, Node)> = Vec::new();
@@ -319,6 +385,7 @@ pub(crate) fn parse_js_file_full(
                     ast_hash: hashing::merkle_hash(child, source.as_bytes()),
                     file_path: file_path.to_string(),
                 });
+                push_entity_chunks(child, source, &class_id, budget, &mut chunks);
                 name_to_id.insert(class_name.clone(), class_id.clone());
                 relations.push(CodeRelation {
                     domain: "code".to_string(),
@@ -348,6 +415,7 @@ pub(crate) fn parse_js_file_full(
                             ast_hash: hashing::merkle_hash(member, source.as_bytes()),
                             file_path: file_path.to_string(),
                         });
+                        push_entity_chunks(member, source, &method_id, budget, &mut chunks);
                         name_to_id.insert(simple_name, method_id.clone());
                         // Class->Method: derivabile direttamente
                         // dall'albero (SPEC-024 §2), non un escamotage
@@ -379,6 +447,7 @@ pub(crate) fn parse_js_file_full(
                     ast_hash: hashing::merkle_hash(child, source.as_bytes()),
                     file_path: file_path.to_string(),
                 });
+                push_entity_chunks(child, source, &id, budget, &mut chunks);
                 name_to_id.insert(simple_name, id.clone());
                 relations.push(CodeRelation {
                     domain: "code".to_string(),
@@ -418,7 +487,7 @@ pub(crate) fn parse_js_file_full(
         }
     }
 
-    (nodes, relations, unresolved)
+    (nodes, relations, unresolved, chunks)
 }
 
 /// Parsa il sorgente TypeScript di un singolo file (SPEC-026 §2): stesso
@@ -430,18 +499,22 @@ pub(crate) fn parse_js_file_full(
 /// meccanismo di `parse_js_file` (kind Tree-sitter verificati
 /// empiricamente coincidenti, SPEC-026 §10).
 fn parse_ts_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelation>) {
-    let (nodes, relations, _unresolved) = parse_ts_file_full(file_path, source);
+    let (nodes, relations, _unresolved, _chunks) = parse_ts_file_full(file_path, source);
     (nodes, relations)
 }
 
 /// Variante "completa" di [`parse_ts_file`], stesso ruolo di
 /// [`parse_js_file_full`]: espone anche le chiamate rimaste irrisolte a
 /// livello intra-file, consumate da [`resolve::resolve_cross_file_calls`]
-/// (riusato invariato da SPEC-025, SPEC-026 §2/§10).
+/// (riusato invariato da SPEC-025, SPEC-026 §2/§10), più (SPEC-029 §2) i
+/// `CodeChunk` per ciascuna entità come quarto elemento.
 pub(crate) fn parse_ts_file_full(
     file_path: &str,
     source: &str,
-) -> (Vec<CodeNode>, Vec<CodeRelation>, resolve::UnresolvedCalls) {
+) -> (Vec<CodeNode>, Vec<CodeRelation>, resolve::UnresolvedCalls, Vec<chunking::CodeChunk>) {
+    let budget = chunking::chunk_budget_chars("typescript");
+    let mut chunks: Vec<chunking::CodeChunk> = Vec::new();
+
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
@@ -461,6 +534,7 @@ pub(crate) fn parse_ts_file_full(
         ast_hash: hashing::merkle_hash(root, source.as_bytes()),
         file_path: file_path.to_string(),
     });
+    push_entity_chunks(root, source, &file_id, budget, &mut chunks);
 
     let mut name_to_id: HashMap<String, String> = HashMap::new();
     let mut callable_bodies: Vec<(String, Node)> = Vec::new();
@@ -498,6 +572,7 @@ pub(crate) fn parse_ts_file_full(
                     ast_hash: hashing::merkle_hash(child, source.as_bytes()),
                     file_path: file_path.to_string(),
                 });
+                push_entity_chunks(child, source, &interface_id, budget, &mut chunks);
                 name_to_id.insert(interface_name.clone(), interface_id.clone());
                 relations.push(CodeRelation {
                     domain: "code".to_string(),
@@ -545,6 +620,7 @@ pub(crate) fn parse_ts_file_full(
                             ast_hash: hashing::merkle_hash(member, source.as_bytes()),
                             file_path: file_path.to_string(),
                         });
+                        push_entity_chunks(member, source, &method_id, budget, &mut chunks);
                         name_to_id.insert(simple_name, method_id.clone());
                         relations.push(CodeRelation {
                             domain: "code".to_string(),
@@ -574,6 +650,7 @@ pub(crate) fn parse_ts_file_full(
                     ast_hash: hashing::merkle_hash(child, source.as_bytes()),
                     file_path: file_path.to_string(),
                 });
+                push_entity_chunks(child, source, &class_id, budget, &mut chunks);
                 name_to_id.insert(class_name.clone(), class_id.clone());
                 relations.push(CodeRelation {
                     domain: "code".to_string(),
@@ -640,6 +717,7 @@ pub(crate) fn parse_ts_file_full(
                             ast_hash: hashing::merkle_hash(member, source.as_bytes()),
                             file_path: file_path.to_string(),
                         });
+                        push_entity_chunks(member, source, &method_id, budget, &mut chunks);
                         name_to_id.insert(simple_name, method_id.clone());
                         relations.push(CodeRelation {
                             domain: "code".to_string(),
@@ -668,6 +746,7 @@ pub(crate) fn parse_ts_file_full(
                     ast_hash: hashing::merkle_hash(child, source.as_bytes()),
                     file_path: file_path.to_string(),
                 });
+                push_entity_chunks(child, source, &id, budget, &mut chunks);
                 name_to_id.insert(simple_name, id.clone());
                 relations.push(CodeRelation {
                     domain: "code".to_string(),
@@ -726,7 +805,7 @@ pub(crate) fn parse_ts_file_full(
         }
     }
 
-    (nodes, relations, unresolved)
+    (nodes, relations, unresolved, chunks)
 }
 
 /// Cammina ricorsivamente il corpo di una funzione/metodo JS cercando
@@ -833,6 +912,24 @@ fn collect_calls(
 
 fn text(node: Node, source: &str) -> String {
     node.utf8_text(source.as_bytes()).unwrap_or("").to_string()
+}
+
+/// Cablaggio comune (SPEC-029 §2) usato da tutte e tre le varianti
+/// `parse_*_file_full`: chunka `node` (il nodo Tree-sitter dell'entità
+/// appena costruita) e accumula il risultato in `chunks`, popolando
+/// `entity_id` con l'id reale — lasciato vuoto da `chunk_entity` stessa
+/// (T2.2 §10, "da un futuro chiamante": questo lo è).
+fn push_entity_chunks(
+    node: Node,
+    source: &str,
+    entity_id: &str,
+    budget: usize,
+    chunks: &mut Vec<chunking::CodeChunk>,
+) {
+    for mut chunk in chunking::chunk_entity(node, source.as_bytes(), budget) {
+        chunk.entity_id = entity_id.to_string();
+        chunks.push(chunk);
+    }
 }
 
 /// Id deterministico: SHA-256 esadecimale di `"{file_path}:{qualified_name}"`
@@ -1398,7 +1495,7 @@ function alsoValid() {
         ) -> (PathBuf, Vec<CodeNode>, Vec<crate::imports::ImportBinding>, crate::resolve::UnresolvedCalls) {
             let tree = parse_ts_tree(source);
             let imports = extract_imports(&tree, source.as_bytes());
-            let (nodes, _relations, unresolved) = parse_ts_file_full(path, source);
+            let (nodes, _relations, unresolved, _chunks) = parse_ts_file_full(path, source);
             (PathBuf::from(path), nodes, imports, unresolved)
         }
 

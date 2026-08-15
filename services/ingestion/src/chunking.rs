@@ -102,12 +102,16 @@ fn non_ws_char_count(text: &str) -> usize {
     text.chars().filter(|c| !c.is_whitespace()).count()
 }
 
-/// Legge `CHUNK_BUDGET_CHARS_GO` (default `1500`, SPEC-021 §2) e lo
-/// interpreta come budget in caratteri non-whitespace. Fail-fast (panic
-/// esplicito) su valore non parsabile o su `0` — mai un fallback silenzioso
-/// diverso dal default dichiarato (SPEC-021 §4).
-pub fn chunk_budget_chars_go() -> usize {
-    parse_budget_chars("CHUNK_BUDGET_CHARS_GO", "1500")
+/// Legge `CHUNK_BUDGET_CHARS_{LINGUAGGIO}` (maiuscolo, default `1500`,
+/// SPEC-021 §2 esteso a più linguaggi da SPEC-029 §2) e lo interpreta come
+/// budget in caratteri non-whitespace. Fail-fast (panic esplicito) su
+/// valore non parsabile o su `0` — mai un fallback silenzioso diverso dal
+/// default dichiarato (SPEC-021 §4). Un solo punto invece delle tre
+/// funzioni quasi identiche che una variante `_go`/`_javascript`/
+/// `_typescript` avrebbe richiesto (SPEC-029 §2).
+pub fn chunk_budget_chars(language: &str) -> usize {
+    let key = format!("CHUNK_BUDGET_CHARS_{}", language.to_uppercase());
+    parse_budget_chars(&key, "1500")
 }
 
 fn parse_budget_chars(key: &str, default: &str) -> usize {
@@ -333,5 +337,16 @@ func F() string {
             1500,
             "senza override, deve valere il default dichiarato (1500)"
         );
+    }
+
+    // --- SPEC-029 §2: chunk_budget_chars generalizzato per linguaggio,
+    // costruisce la chiave env in maiuscolo a partire dal nome passato. ---
+    #[test]
+    fn spec029_chunk_budget_chars_reads_uppercase_language_key() {
+        let key = "CHUNK_BUDGET_CHARS_ECITESTLANG";
+        std::env::set_var(key, "42");
+        let value = chunk_budget_chars("ecitestlang");
+        std::env::remove_var(key);
+        assert_eq!(value, 42, "il nome del linguaggio deve essere maiuscolizzato per formare la chiave env");
     }
 }

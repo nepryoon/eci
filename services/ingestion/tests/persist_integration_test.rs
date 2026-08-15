@@ -173,7 +173,7 @@ fn persist_parsed_file_scenarios_1_2_3_5() {
         "precondizione: 4 CodeRelation da parse_file (3 CONTAINS + 1 CALLS, SPEC-013 §3 scenari 1/2 — vedi nota in testa a questo file su SPEC-014 §3 scenario 1)"
     );
 
-    let summary = persist_parsed_file(&mut client, nodes.clone(), relations.clone())
+    let summary = persist_parsed_file(&mut client, nodes.clone(), relations.clone(), &[])
         .expect("persist_parsed_file scenario 1");
 
     assert_eq!(
@@ -210,7 +210,7 @@ fn persist_parsed_file_scenarios_1_2_3_5() {
     let rows_after_first = relation_rows(&mut client);
 
     // --- Scenario 2: stesso file, ripersistito senza modifiche. ---
-    let summary2 = persist_parsed_file(&mut client, nodes.clone(), relations.clone())
+    let summary2 = persist_parsed_file(&mut client, nodes.clone(), relations.clone(), &[])
         .expect("persist_parsed_file scenario 2");
     assert_eq!(
         summary2,
@@ -277,7 +277,7 @@ fn persist_parsed_file_scenarios_1_2_3_5() {
         relations3.iter().all(|r| r.rel_type != "CALLS"),
         "precondizione del parsing: nessun arco CALLS atteso dalla nuova versione del sorgente"
     );
-    let summary3 = persist_parsed_file(&mut client, nodes3, relations3)
+    let summary3 = persist_parsed_file(&mut client, nodes3, relations3, &[])
         .expect("persist_parsed_file scenario 3");
     assert_eq!(
         summary3.relations_replaced, 3,
@@ -324,7 +324,7 @@ fn persist_parsed_file_scenario4_rollback_on_forced_mid_transaction_failure() {
         weight: Some(1),
     }];
 
-    let result = persist_parsed_file(&mut client, nodes, broken_relations);
+    let result = persist_parsed_file(&mut client, nodes, broken_relations, &[]);
     assert!(
         result.is_err(),
         "scenario 4: persist_parsed_file deve fallire per violazione FK su to_id"
