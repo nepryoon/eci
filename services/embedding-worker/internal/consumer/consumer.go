@@ -1,0 +1,215 @@
+// Package consumer implementa il consumer Kafka -> embedding di
+// embedding-worker (SPEC-030 §2): legge da outbox.event.CodeChunk, dedup
+// via processed_events (stesso meccanismo generico di sink-graph,
+// SPEC-015), chiama il client di embedding per il testo del chunk e scrive
+// il vettore risultante in code_embedding più una riga outbox
+// (aggregate_type='CodeEmbedding').
+package consumer
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+
+	"github.com/lib/pq"
+	kafka "github.com/segmentio/kafka-go"
+
+	"github.com/eci-project/eci/libs/go/eci/kafkatrace"
+	"github.com/eci-project/eci/services/embedding-worker/internal/embedclient"
+)
+
+// ConsumerName identifica questo consumer in processed_events.consumer_name
+// (SPEC-030 §2) e come GroupID del consumer group Kafka.
+const ConsumerName = "embedding-worker"
+
+// TopicCodeChunk è il topic instradato dall'EventRouter Debezium per
+// aggregate_type='CodeChunk' (SPEC-029, verificato end-to-end in quella
+// SPEC: outbox.event.<aggregate_type>).
+const TopicCodeChunk = "outbox.event.CodeChunk"
+
+// eventIDHeaderKey — stesso header promosso dal connector Debezium già
+// consumato da sink-graph (SPEC-015 §2).
+const eventIDHeaderKey = "event_id"
+
+// Deps sono le dipendenze di ProcessMessage — iniettate esplicitamente
+// (nessuno stato globale), stesso principio di sink-graph (SPEC-015 §2).
+type Deps struct {
+	DB *sql.DB
+	// Embed è un client REALE (mai un mock) verso l'endpoint /embed nativo
+	// TEI — embedder-fake in sviluppo/test, vero TEI quando disponibile
+	// (SPEC-030 §2).
+	Embed *embedclient.Client
+	// ModelID identifica il modello usato per calcolare il vettore,
+	// registrato per riga in code_embedding (SPEC-030 §2/§6).
+	ModelID string
+	Logf    func(format string, args ...any)
+}
+
+// Outcome distingue gli esiti di ProcessMessage per il chiamante.
+type Outcome int
+
+const (
+	OutcomeStored Outcome = iota
+	OutcomeDuplicate
+	OutcomeInvalidSkipped
+)
+
+// codeChunkPayload rispecchia la forma prodotta da persist.rs per CodeChunk
+// (SPEC-029 §2: {id, entity_id, chunk_index, text, char_count}). `id` è il
+// chunk_id (code_chunk.id) — nessuno struct condiviso in libs/go/eci/models
+// per CodeChunk al momento di questa SPEC, quindi definito qui, locale a
+// questo consumer (stesso principio di codeRelationPayload in sink-graph,
+// SPEC-015 §10).
+type codeChunkPayload struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
+}
+
+// ProcessMessage elabora UN messaggio Kafka già fetchato (SPEC-030 §2/§3):
+//  1. estrae event_id dagli header;
+//  2. chiama il client di embedding per il testo del chunk — un errore qui
+//     (servizio irraggiungibile) propaga SENZA toccare il database, cosicché
+//     nessuno stato venga marcato "processato" per un lavoro mai
+//     completato (§2/§4: "l'offset Kafka NON viene confermato" — un
+//     redelivery successivo deve poter ritentare l'INTERO lavoro, dedup
+//     incluso);
+//  3. dedup atomico + scrittura di code_embedding + riga outbox, TUTTI
+//     nella STESSA transazione Postgres (deviazione dichiarata da SPEC-030
+//     §2, vedi nota a fondo SPEC: possibile perché, a differenza di
+//     sink-graph/Neo4j, qui ogni scrittura ha come destinazione la STESSA
+//     Postgres — un'unica transazione evita che un evento venga marcato
+//     processato senza che la riga corrispondente sia mai stata scritta).
+//
+// Un errore ritornato (non-nil) significa "infrastruttura irraggiungibile,
+// NON committare l'offset" (SPEC-030 §2/§4). Un payload malformato o senza
+// id non è un errore ritornato: viene loggato esplicitamente e la funzione
+// ritorna (OutcomeInvalidSkipped, nil) — il chiamante committa comunque
+// l'offset, stesso principio di sink-graph (SPEC-015 §3 scenario 5).
+func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, headers []kafka.Header) (Outcome, error) {
+	eventID, ok := eventIDFromHeaders(headers)
+	if !ok {
+		deps.Logf("embedding-worker: messaggio su %s senza header %q valido, scartato (offset committato)", topic, eventIDHeaderKey)
+		return OutcomeInvalidSkipped, nil
+	}
+
+	if topic != TopicCodeChunk {
+		deps.Logf("embedding-worker: topic sconosciuto %q (event_id=%s), scartato", topic, eventID)
+		return OutcomeInvalidSkipped, nil
+	}
+
+	var chunk codeChunkPayload
+	if err := json.Unmarshal(value, &chunk); err != nil {
+		deps.Logf("embedding-worker: payload CodeChunk non decodificabile (event_id=%s): %v", eventID, err)
+		return OutcomeInvalidSkipped, nil
+	}
+	if chunk.ID == "" {
+		deps.Logf("embedding-worker: payload CodeChunk senza id (event_id=%s)", eventID)
+		return OutcomeInvalidSkipped, nil
+	}
+
+	vector, err := deps.Embed.Embed(ctx, chunk.Text)
+	if err != nil {
+		deps.Logf("embedding-worker: chiamata di embedding fallita (event_id=%s, chunk_id=%s): %v", eventID, chunk.ID, err)
+		return OutcomeInvalidSkipped, fmt.Errorf("embed chunk_id=%s: %w", chunk.ID, err)
+	}
+
+	traceID, _ := kafkatrace.TraceIDFromHeaders(headers)
+
+	stored, err := storeEmbedding(ctx, deps, eventID, chunk.ID, vector, traceID)
+	if err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("store embedding chunk_id=%s: %w", chunk.ID, err)
+	}
+	if !stored {
+		deps.Logf("embedding-worker: event_id=%s già in processed_events, skip (redelivery)", eventID)
+		return OutcomeDuplicate, nil
+	}
+	return OutcomeStored, nil
+}
+
+// eventIDFromHeaders — stessa logica di sink-graph (SPEC-015 §2 punto 1).
+func eventIDFromHeaders(headers []kafka.Header) (string, bool) {
+	for _, h := range headers {
+		if h.Key != eventIDHeaderKey {
+			continue
+		}
+		if len(h.Value) == 0 {
+			return "", false
+		}
+		return string(h.Value), true
+	}
+	return "", false
+}
+
+// storeEmbedding esegue dedup + INSERT code_embedding + INSERT outbox in
+// un'UNICA transazione ACID (SPEC-030 §2, deviazione dichiarata rispetto al
+// pattern letterale di sink-graph — vedi commento su ProcessMessage sopra).
+// stored=false quando l'INSERT di dedup non ha inserito nulla (event_id già
+// presente): la transazione va comunque in ROLLBACK, nessuna scrittura.
+func storeEmbedding(ctx context.Context, deps Deps, eventID, chunkID string, vector []float32, traceID string) (stored bool, err error) {
+	tx, err := deps.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }() // no-op se già committata
+
+	var returnedEventID string
+	err = tx.QueryRowContext(ctx,
+		`INSERT INTO processed_events (event_id, consumer_name)
+		 VALUES ($1, $2)
+		 ON CONFLICT (event_id) DO NOTHING
+		 RETURNING event_id`,
+		eventID, ConsumerName,
+	).Scan(&returnedEventID)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	vector64 := make(pq.Float64Array, len(vector))
+	for i, v := range vector {
+		vector64[i] = float64(v)
+	}
+
+	var embeddingID string
+	err = tx.QueryRowContext(ctx,
+		`INSERT INTO code_embedding (chunk_id, vector, model_id, embedding_dim)
+		 VALUES ($1, $2, $3, $4)
+		 RETURNING id::text`,
+		chunkID, vector64, deps.ModelID, len(vector),
+	).Scan(&embeddingID)
+	if err != nil {
+		return false, err
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"id":            embeddingID,
+		"chunk_id":      chunkID,
+		"vector":        vector,
+		"model_id":      deps.ModelID,
+		"embedding_dim": len(vector),
+	})
+	if err != nil {
+		return false, err
+	}
+
+	var traceIDParam any
+	if traceID != "" {
+		traceIDParam = traceID
+	}
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload, trace_id)
+		 VALUES ('CodeEmbedding', $1, 'UPSERT', $2, $3)`,
+		embeddingID, payload, traceIDParam,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
