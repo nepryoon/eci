@@ -9,22 +9,29 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/eci-project/eci/libs/go/eci/kafkatrace"
+	"github.com/eci-project/eci/libs/go/eci/resilience"
 )
 
 var tracer = otel.Tracer("embedding-worker")
 
 // FetchAndProcess esegue un ciclo fetch->process->commit (SPEC-030 §2/§4):
-// un errore di ProcessMessage (chiamata di embedding fallita o
-// infrastruttura irraggiungibile) NON committa l'offset — il messaggio
-// verrà riconsegnato al prossimo poll, gestito correttamente da
-// processed_events (§3 scenario 4). Apre uno span per messaggio processato
-// (§8), collegato via span link al trace del produttore quando l'header
-// trace_id è presente e valido — stesso pattern di sink-graph (SPEC-011/
-// SPEC-015).
-func FetchAndProcess(ctx context.Context, reader *kafka.Reader, deps Deps) (Outcome, error) {
+// un errore di `process` (chiamata di embedding fallita o infrastruttura
+// irraggiungibile) NON committa l'offset — il messaggio verrà riconsegnato
+// al prossimo poll, gestito correttamente da processed_events (§3
+// scenario 4). Apre uno span per messaggio processato (§8), collegato via
+// span link al trace del produttore quando l'header trace_id è presente e
+// valido — stesso pattern di sink-graph (SPEC-011/SPEC-015).
+//
+// `process` (SPEC-035 §2, T3.3 parte 1/2): iniettato dal chiamante
+// (main.go) — tipicamente ProcessMessage avvolta con Deps catturato per
+// closure e passata attraverso resilience.WithRetryAndDLQ. FetchAndProcess
+// stessa non conosce né Deps né la logica di retry/DLQ, resta un puro
+// orchestratore fetch/span/commit — nessuna modifica alla logica
+// applicativa di ProcessMessage stessa (SPEC-035 §2).
+func FetchAndProcess(ctx context.Context, reader *kafka.Reader, process resilience.ProcessFunc) (resilience.Outcome, error) {
 	msg, err := reader.FetchMessage(ctx)
 	if err != nil {
-		return OutcomeInvalidSkipped, fmt.Errorf("fetch message: %w", err)
+		return 0, fmt.Errorf("fetch message: %w", err)
 	}
 
 	var spanOpts []trace.SpanStartOption
@@ -36,9 +43,8 @@ func FetchAndProcess(ctx context.Context, reader *kafka.Reader, deps Deps) (Outc
 	spanCtx, span := tracer.Start(ctx, "embedding-worker.process_message", spanOpts...)
 	defer span.End()
 
-	outcome, err := ProcessMessage(spanCtx, deps, msg.Topic, msg.Value, msg.Headers)
+	outcome, err := process(spanCtx, msg.Topic, msg.Value, msg.Headers)
 	if err != nil {
-		deps.Logf("embedding-worker: elaborazione fallita (topic=%s), offset NON committato: %v", msg.Topic, err)
 		return outcome, err
 	}
 

@@ -32,6 +32,7 @@ import (
 	tcneo4j "github.com/testcontainers/testcontainers-go/modules/neo4j"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
+	"github.com/eci-project/eci/libs/go/eci/resilience"
 	"github.com/eci-project/eci/services/sink-graph/internal/consumer"
 )
 
@@ -74,6 +75,122 @@ func TestSinkGraphConsumer(t *testing.T) {
 	t.Run("Scenario5_InvalidEnumDiscardedNoNeo4jWrite", func(t *testing.T) {
 		scenario5InvalidEnumDiscardedNoNeo4jWrite(t, ctx, st)
 	})
+}
+
+// ============================================================
+// SPEC-035 §3 scenario 5 (T3.3 parte 1/2) — sink RAPPRESENTATIVO scelto
+// per il test di integrazione del wrapping resilience.WithRetryAndDLQ
+// (motivazione riportata nel report di consegna e in SPEC-035 §10):
+// sink-graph è il PRIMO sink costruito in questo progetto (SPEC-015,
+// T1.3) e il modello esplicito che gli altri tre dichiarano di replicare
+// ("stesso scheletro di sink-graph", commenti in embedding-worker/
+// sink-vector/sink-search) — la scelta più naturale per rappresentare il
+// pattern comune ai quattro. La libreria condivisa è già testata
+// esaustivamente in libs/go/eci/resilience (SPEC-035 §7, tutti gli
+// scenari 1-4 + edge case); qui si verifica SOLO che il wiring in
+// main.go/FetchAndProcess sia GENUINAMENTE attivo nel consume-loop REALE
+// di questo servizio — non presunto dal solo fatto che compili (§3
+// scenario 5).
+//
+// Deps.DB punta DELIBERATAMENTE a un indirizzo Postgres irraggiungibile:
+// nessun container Postgres/Neo4j in questo test — non servono. Il dedup
+// via processed_events è il PRIMO passo di ProcessMessage per costruzione
+// (vedi consumer.go), quindi fallisce già lì per QUALUNQUE messaggio,
+// prima di toccare Neo4j — Deps.Neo4j resta nil, mai dereferenziato.
+// Questo rende ProcessMessage un fallimento deterministico e sempre
+// riproducibile, che esercita DAVVERO il percorso retry->DLQ del wrapper
+// reale (resilience.WithRetryAndDLQ) attraverso il consume-loop reale di
+// sink-graph (consumer.FetchAndProcess, non una sua reimplementazione).
+func TestSinkGraphResilienceWrappingGenuinelyWired(t *testing.T) {
+	ctx := context.Background()
+	brokers := startKafka(t, ctx)
+
+	topic := consumer.TopicCodeNode
+	ensureTopics(t, ctx, brokers, topic+".DLQ")
+
+	unreachableDB, err := sql.Open("postgres", "postgres://eci:x@127.0.0.1:1/eci?sslmode=disable")
+	if err != nil {
+		t.Fatalf("sql.Open (DSN irraggiungibile): %v", err)
+	}
+	defer unreachableDB.Close()
+
+	deps := consumer.Deps{
+		DB:    unreachableDB,
+		Neo4j: nil,
+		Repo:  repoPlaceholder,
+		Logf:  t.Logf,
+	}
+
+	retryProducer := &kafka.Writer{
+		Addr:                   kafka.TCP(brokers...),
+		AllowAutoTopicCreation: true,
+		BatchTimeout:           10 * time.Millisecond,
+	}
+	defer retryProducer.Close()
+
+	cfg := resilience.Config{MaxRetries: 1, BackoffBase: 100 * time.Millisecond}
+	process := resilience.WithRetryAndDLQ(cfg, retryProducer, func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (resilience.Outcome, error) {
+		_, err := consumer.ProcessMessage(ctx, deps, topic, value, headers)
+		return resilience.OutcomeProcessed, err
+	})
+
+	eventID := uniqueEventID(t)
+	nodeID := uniqueID(t, "resilience-wiring")
+	payload := codeNodePayload(nodeID, "Whatever", "Method", "go", "x.go")
+	produce(t, ctx, brokers, topic, nodeID, payload, eventID, "")
+
+	groupID := "sink-graph-resilience-wiring-" + eventID
+	reader := newReaderWithGroup(brokers, groupID)
+	defer reader.Close()
+
+	// Primo tentativo (retryCount=0 < MaxRetries=1): il dedup fallisce
+	// (Postgres irraggiungibile) -> il wrapper deve ripubblicare sullo
+	// STESSO topic con retry-count=1 e ritornare nil (offset originale
+	// committato dal consume-loop reale).
+	fetchCtx1, cancel1 := context.WithTimeout(ctx, 30*time.Second)
+	outcome1, err := consumer.FetchAndProcess(fetchCtx1, reader, process)
+	cancel1()
+	if err != nil {
+		t.Fatalf("FetchAndProcess (primo tentativo): %v — atteso nil (il wrapper deve gestire l'errore internamente, non propagarlo)", err)
+	}
+	if outcome1 != resilience.OutcomeRetried {
+		t.Fatalf("outcome primo tentativo = %v, want OutcomeRetried — il wrapping NON risulta genuinamente attivo nel consume-loop di sink-graph", outcome1)
+	}
+
+	// Secondo tentativo: retryCount=1 == MaxRetries=1 -> DLQ.
+	fetchCtx2, cancel2 := context.WithTimeout(ctx, 30*time.Second)
+	outcome2, err := consumer.FetchAndProcess(fetchCtx2, reader, process)
+	cancel2()
+	if err != nil {
+		t.Fatalf("FetchAndProcess (secondo tentativo): %v", err)
+	}
+	if outcome2 != resilience.OutcomeDeadLettered {
+		t.Fatalf("outcome secondo tentativo = %v, want OutcomeDeadLettered", outcome2)
+	}
+
+	// Verifica diretta e conclusiva: il messaggio DEVE comparire sul topic
+	// DLQ reale, prodotto dal codice reale di sink-graph attraverso il suo
+	// consume-loop reale — prova che il wiring è genuinamente attivo, non
+	// presunto dal solo fatto che compili (SPEC-035 §3 scenario 5).
+	dlqReader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:        brokers,
+		GroupID:        "sink-graph-resilience-wiring-dlq-" + eventID,
+		GroupTopics:    []string{topic + ".DLQ"},
+		CommitInterval: 0,
+	})
+	defer dlqReader.Close()
+	dlqFetchCtx, dlqCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer dlqCancel()
+	dlqMsg, err := dlqReader.FetchMessage(dlqFetchCtx)
+	if err != nil {
+		t.Fatalf("FetchMessage su %s.DLQ: %v", topic, err)
+	}
+	if got := resilience.RetryCount(dlqMsg.Headers); got != cfg.MaxRetries {
+		t.Fatalf("retry-count del messaggio in DLQ = %d, want %d (valore massimo)", got, cfg.MaxRetries)
+	}
+	if string(dlqMsg.Value) != string(payload) {
+		t.Fatalf("payload del messaggio in DLQ non combacia con quello originale prodotto da sink-graph")
+	}
 }
 
 // ============================================================
@@ -513,16 +630,34 @@ func fetchAndProcessOnce(t *testing.T, ctx context.Context, brokers []string, de
 // scenario (es. scenario 3): un group nuovo per ciascun fetch
 // rileggerebbe da FirstOffset anche i messaggi già consumati in
 // precedenza dallo stesso scenario (SPEC-015 §10).
+//
+// SPEC-035: FetchAndProcess accetta ora un resilience.ProcessFunc iniettato
+// (nessuna modifica alla logica applicativa di ProcessMessage stessa) e
+// ritorna il suo Outcome generico (Processed/Retried/DeadLettered), non
+// più il consumer.Outcome specifico del servizio (Merged/Duplicate/
+// InvalidSkipped) su cui questi test si basano da SPEC-015. L'adapter qui
+// sotto chiama ProcessMessage DIRETTAMENTE (senza passare da
+// resilience.WithRetryAndDLQ: questi scenari testano la logica applicativa
+// del sink, non il retry/DLQ, già coperto esaustivamente dal test di
+// libs/go/eci/resilience, SPEC-035 §7) e cattura il suo Outcome reale
+// tramite una variabile catturata per closure, restituita al chiamante
+// invece del valore generico di FetchAndProcess.
 func fetchAndProcessWithReader(t *testing.T, ctx context.Context, reader *kafka.Reader, deps consumer.Deps) consumer.Outcome {
 	t.Helper()
 	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	outcome, err := consumer.FetchAndProcess(fetchCtx, reader, deps)
-	if err != nil {
+	var innerOutcome consumer.Outcome
+	process := func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (resilience.Outcome, error) {
+		var err error
+		innerOutcome, err = consumer.ProcessMessage(ctx, deps, topic, value, headers)
+		return 0, err
+	}
+
+	if _, err := consumer.FetchAndProcess(fetchCtx, reader, process); err != nil {
 		t.Fatalf("FetchAndProcess: %v", err)
 	}
-	return outcome
+	return innerOutcome
 }
 
 func newReaderWithGroup(brokers []string, groupID string) *kafka.Reader {
