@@ -34,6 +34,7 @@ import (
 	tckafka "github.com/testcontainers/testcontainers-go/modules/kafka"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
+	"github.com/eci-project/eci/libs/go/eci/resilience"
 	"github.com/eci-project/eci/services/embedding-worker/internal/consumer"
 	"github.com/eci-project/eci/services/embedding-worker/internal/embedclient"
 )
@@ -263,7 +264,7 @@ func scenario4UnreachableEmbedderOffsetNotCommittedThenRecovers(t *testing.T, ct
 
 	reader1 := newReaderWithGroup(brokers, groupID)
 	fetchCtx1, cancel1 := context.WithTimeout(ctx, 30*time.Second)
-	outcome, err := consumer.FetchAndProcess(fetchCtx1, reader1, brokenDeps)
+	outcome, err := fetchAndProcessDirect(fetchCtx1, reader1, brokenDeps)
 	cancel1()
 	if err == nil {
 		t.Fatal("atteso errore dal FetchAndProcess con embedder irraggiungibile")
@@ -292,7 +293,7 @@ func scenario4UnreachableEmbedderOffsetNotCommittedThenRecovers(t *testing.T, ct
 	defer reader2.Close()
 	workingDeps := newDeps(st)
 	fetchCtx2, cancel2 := context.WithTimeout(ctx, 30*time.Second)
-	outcome2, err := consumer.FetchAndProcess(fetchCtx2, reader2, workingDeps)
+	outcome2, err := fetchAndProcessDirect(fetchCtx2, reader2, workingDeps)
 	cancel2()
 	if err != nil {
 		t.Fatalf("FetchAndProcess dopo il ripristino: %v", err)
@@ -618,11 +619,32 @@ func fetchAndProcessWithReader(t *testing.T, ctx context.Context, reader *kafka.
 	t.Helper()
 	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	outcome, err := consumer.FetchAndProcess(fetchCtx, reader, deps)
+	outcome, err := fetchAndProcessDirect(fetchCtx, reader, deps)
 	if err != nil {
 		t.Fatalf("FetchAndProcess: %v", err)
 	}
 	return outcome
+}
+
+// fetchAndProcessDirect adatta Deps a un resilience.ProcessFunc (SPEC-035:
+// FetchAndProcess ora accetta un ProcessFunc iniettato, nessuna modifica
+// alla logica applicativa di ProcessMessage stessa) che chiama
+// ProcessMessage DIRETTAMENTE — nessun resilience.WithRetryAndDLQ qui:
+// questi scenari testano la logica applicativa del sink (embedding,
+// dedup...), non retry/DLQ, già coperto esaustivamente dal test di
+// libs/go/eci/resilience (SPEC-035 §7). Cattura il consumer.Outcome reale
+// tramite una variabile catturata per closure, dato che il
+// resilience.Outcome generico ritornato da FetchAndProcess non porta più
+// questa granularità.
+func fetchAndProcessDirect(ctx context.Context, reader *kafka.Reader, deps consumer.Deps) (consumer.Outcome, error) {
+	var innerOutcome consumer.Outcome
+	process := func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (resilience.Outcome, error) {
+		var err error
+		innerOutcome, err = consumer.ProcessMessage(ctx, deps, topic, value, headers)
+		return 0, err
+	}
+	_, err := consumer.FetchAndProcess(ctx, reader, process)
+	return innerOutcome, err
 }
 
 func newReaderWithGroup(brokers []string, groupID string) *kafka.Reader {

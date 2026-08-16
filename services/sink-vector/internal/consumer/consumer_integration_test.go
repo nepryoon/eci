@@ -27,6 +27,7 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	tcqdrant "github.com/testcontainers/testcontainers-go/modules/qdrant"
 
+	"github.com/eci-project/eci/libs/go/eci/resilience"
 	"github.com/eci-project/eci/services/sink-vector/internal/consumer"
 )
 
@@ -462,17 +463,31 @@ func produce(t *testing.T, ctx context.Context, brokers []string, topic, key str
 	}
 }
 
+// SPEC-035: FetchAndProcess accetta ora un resilience.ProcessFunc iniettato
+// (nessuna modifica alla logica applicativa di ProcessMessage stessa) e
+// ritorna il suo Outcome generico, non più il consumer.Outcome specifico
+// del servizio. L'adapter chiama ProcessMessage DIRETTAMENTE (nessun
+// resilience.WithRetryAndDLQ: questi scenari testano la logica applicativa
+// del sink, non retry/DLQ, già coperto esaustivamente dal test di
+// libs/go/eci/resilience, SPEC-035 §7) e cattura il suo Outcome reale
+// tramite una variabile catturata per closure.
 func fetchAndProcessOnce(t *testing.T, ctx context.Context, brokers []string, deps consumer.Deps) consumer.Outcome {
 	t.Helper()
 	reader := newReaderWithGroup(brokers, "sink-vector-test-"+uuid.NewString())
 	defer reader.Close()
 	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	outcome, err := consumer.FetchAndProcess(fetchCtx, reader, deps)
-	if err != nil {
+
+	var innerOutcome consumer.Outcome
+	process := func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (resilience.Outcome, error) {
+		var err error
+		innerOutcome, err = consumer.ProcessMessage(ctx, deps, topic, value, headers)
+		return 0, err
+	}
+	if _, err := consumer.FetchAndProcess(fetchCtx, reader, process); err != nil {
 		t.Fatalf("FetchAndProcess: %v", err)
 	}
-	return outcome
+	return innerOutcome
 }
 
 func newReaderWithGroup(brokers []string, groupID string) *kafka.Reader {

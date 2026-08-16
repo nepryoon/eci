@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"log"
 	"strings"
+	"time"
 
 	_ "github.com/lib/pq"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/eci-project/eci/libs/go/eci/config"
 	"github.com/eci-project/eci/libs/go/eci/observability"
+	"github.com/eci-project/eci/libs/go/eci/resilience"
 	"github.com/eci-project/eci/services/sink-graph/internal/consumer"
 )
 
@@ -70,12 +72,31 @@ func main() {
 		Logf:  log.Printf,
 	}
 
+	// SPEC-035 §2 (T3.3 parte 1/2): retry con backoff esponenziale + DLQ,
+	// avvolge ProcessMessage senza modificarne la logica applicativa.
+	// Topic del producer VOLUTAMENTE non impostato — ogni messaggio
+	// ripubblicato/instradato in DLQ specifica il proprio Topic (§2:
+	// stesso topic originale per i retry, "{topic}.DLQ" per la coda
+	// morta). BatchTimeout basso: il default di kafka-go (1s) altrimenti
+	// si somma silenziosamente al backoff configurato, scoperto scrivendo
+	// il test di integrazione di libs/go/eci/resilience (SPEC-035 §7).
+	retryProducer := &kafka.Writer{
+		Addr:                   kafka.TCP(brokers...),
+		AllowAutoTopicCreation: true,
+		BatchTimeout:           10 * time.Millisecond,
+	}
+	defer retryProducer.Close()
+	process := resilience.WithRetryAndDLQ(resilience.Config{}, retryProducer, func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (resilience.Outcome, error) {
+		_, err := consumer.ProcessMessage(ctx, deps, topic, value, headers)
+		return resilience.OutcomeProcessed, err
+	})
+
 	log.Printf("sink-graph: avviato, brokers=%v topics=[%s %s] group=%s",
 		brokers, consumer.TopicCodeNode, consumer.TopicCodeRelation, consumer.ConsumerName)
 
 	for {
-		if _, err := consumer.FetchAndProcess(ctx, reader, deps); err != nil {
-			log.Printf("sink-graph: %v", err)
+		if _, err := consumer.FetchAndProcess(ctx, reader, process); err != nil {
+			log.Printf("sink-graph: elaborazione fallita, offset NON committato: %v", err)
 		}
 	}
 }

@@ -10,12 +10,14 @@ import (
 	"database/sql"
 	"log"
 	"strings"
+	"time"
 
 	_ "github.com/lib/pq"
 	kafka "github.com/segmentio/kafka-go"
 
 	"github.com/eci-project/eci/libs/go/eci/config"
 	"github.com/eci-project/eci/libs/go/eci/observability"
+	"github.com/eci-project/eci/libs/go/eci/resilience"
 	"github.com/eci-project/eci/services/embedding-worker/internal/consumer"
 	"github.com/eci-project/eci/services/embedding-worker/internal/embedclient"
 )
@@ -64,12 +66,26 @@ func main() {
 		Logf:    log.Printf,
 	}
 
+	// SPEC-035 §2 (T3.3 parte 1/2): retry con backoff esponenziale + DLQ,
+	// stesso principio di sink-graph — vedi commento lì per il dettaglio
+	// su Topic/BatchTimeout del producer.
+	retryProducer := &kafka.Writer{
+		Addr:                   kafka.TCP(brokers...),
+		AllowAutoTopicCreation: true,
+		BatchTimeout:           10 * time.Millisecond,
+	}
+	defer retryProducer.Close()
+	process := resilience.WithRetryAndDLQ(resilience.Config{}, retryProducer, func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (resilience.Outcome, error) {
+		_, err := consumer.ProcessMessage(ctx, deps, topic, value, headers)
+		return resilience.OutcomeProcessed, err
+	})
+
 	log.Printf("embedding-worker: avviato, brokers=%v topic=%s group=%s embedding_service_url=%s model_id=%s",
 		brokers, consumer.TopicCodeChunk, consumer.ConsumerName, embeddingServiceURL, modelID)
 
 	for {
-		if _, err := consumer.FetchAndProcess(ctx, reader, deps); err != nil {
-			log.Printf("embedding-worker: %v", err)
+		if _, err := consumer.FetchAndProcess(ctx, reader, process); err != nil {
+			log.Printf("embedding-worker: elaborazione fallita, offset NON committato: %v", err)
 		}
 	}
 }
