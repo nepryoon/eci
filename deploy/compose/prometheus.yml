@@ -1,0 +1,43 @@
+# SPEC-036 §2/§6 — scrape config per i quattro sink Kafka del progetto.
+#
+# DEVIAZIONE dichiarata rispetto al testo letterale di SPEC-036 §2 ("i
+# quattro sink per nome del servizio compose... stesso principio di
+# risoluzione DNS interna alla rete compose già usato ovunque in questo
+# stack"): verificato (non presunto) che i quattro sink NON sono servizi
+# Docker Compose — nessun Dockerfile esiste per loro, non sono mai stati
+# aggiunti a docker-compose.yml, girano come processi HOST che si
+# connettono a localhost:{porta} per ciascun datastore, esattamente come
+# ogni main.go dei quattro servizi conferma (POSTGRES_DSN/KAFKA_BROKERS/
+# ecc. di default puntano tutti a "localhost"). Il nome del servizio
+# compose non è quindi applicabile: Prometheus (che gira DENTRO la rete
+# Docker) raggiunge i sink (che girano FUORI, sull'host) via
+# host.docker.internal — richiede l'entry extra_hosts sul servizio
+# prometheus in docker-compose.yml, verificato con un avvio reale
+# (SPEC-036 §3 scenario 6).
+#
+# Porte distinte per sink (9101-9104), non l'unica porta 9090 dichiarata
+# da §2: dato che i quattro sink condividono lo STESSO namespace di rete
+# (l'host), farli girare tutti insieme con lo stesso METRICS_PORT di
+# default causerebbe una collisione di bind reale — ciascun servizio
+# dichiara comunque METRICS_PORT come nome della variabile d'ambiente per
+# l'override (SPEC-036 §2), solo con un valore di default diverso per
+# servizio.
+
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: eci-sinks
+    static_configs:
+      - targets: ["host.docker.internal:9101"]
+        labels:
+          sink: sink-graph
+      - targets: ["host.docker.internal:9102"]
+        labels:
+          sink: embedding-worker
+      - targets: ["host.docker.internal:9103"]
+        labels:
+          sink: sink-vector
+      - targets: ["host.docker.internal:9104"]
+        labels:
+          sink: sink-search

@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -19,10 +20,20 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 
 	"github.com/eci-project/eci/libs/go/eci/config"
+	"github.com/eci-project/eci/libs/go/eci/metrics"
 	"github.com/eci-project/eci/libs/go/eci/observability"
 	"github.com/eci-project/eci/libs/go/eci/resilience"
 	"github.com/eci-project/eci/services/sink-search/internal/consumer"
 )
+
+// sinkName identifica questo servizio nelle metriche Prometheus (SPEC-036
+// §2, label "sink").
+const sinkName = "sink-search"
+
+// defaultMetricsPort — vedi commento in services/sink-graph/main.go
+// (stessa deviazione dichiarata rispetto al valore letterale ":9090" di
+// SPEC-036 §2).
+const defaultMetricsPort = "9104"
 
 func main() {
 	ctx := context.Background()
@@ -89,9 +100,19 @@ func main() {
 		_, err := consumer.ProcessMessage(ctx, deps, topic, value, headers)
 		return resilience.OutcomeProcessed, err
 	})
+	process = metrics.WithPrometheus(sinkName, process)
 
-	log.Printf("sink-search: avviato, brokers=%v topic=%s group=%s opensearch=%s index=%s",
-		brokers, consumer.TopicCodeChunk, consumer.ConsumerName, openSearchURL, consumer.IndexName)
+	metricsAddr := ":" + config.EnvOrDefault("METRICS_PORT", defaultMetricsPort)
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", metrics.Handler())
+		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
+			log.Printf("sink-search: server HTTP metriche (%s) non avviato: %v (consume-loop non impattato)", metricsAddr, err)
+		}
+	}()
+
+	log.Printf("sink-search: avviato, brokers=%v topic=%s group=%s opensearch=%s index=%s metrics_addr=%s",
+		brokers, consumer.TopicCodeChunk, consumer.ConsumerName, openSearchURL, consumer.IndexName, metricsAddr)
 
 	for {
 		if _, err := consumer.FetchAndProcess(ctx, reader, process); err != nil {

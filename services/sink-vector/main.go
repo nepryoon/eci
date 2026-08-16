@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"log"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -18,10 +19,20 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 
 	"github.com/eci-project/eci/libs/go/eci/config"
+	"github.com/eci-project/eci/libs/go/eci/metrics"
 	"github.com/eci-project/eci/libs/go/eci/observability"
 	"github.com/eci-project/eci/libs/go/eci/resilience"
 	"github.com/eci-project/eci/services/sink-vector/internal/consumer"
 )
+
+// sinkName identifica questo servizio nelle metriche Prometheus (SPEC-036
+// §2, label "sink").
+const sinkName = "sink-vector"
+
+// defaultMetricsPort — vedi commento in services/sink-graph/main.go
+// (stessa deviazione dichiarata rispetto al valore letterale ":9090" di
+// SPEC-036 §2).
+const defaultMetricsPort = "9103"
 
 func main() {
 	ctx := context.Background()
@@ -92,9 +103,19 @@ func main() {
 		_, err := consumer.ProcessMessage(ctx, deps, topic, value, headers)
 		return resilience.OutcomeProcessed, err
 	})
+	process = metrics.WithPrometheus(sinkName, process)
 
-	log.Printf("sink-vector: avviato, brokers=%v topic=%s group=%s qdrant=%s:%d collection=%s",
-		brokers, consumer.TopicCodeEmbedding, consumer.ConsumerName, qdrantHost, qdrantPortNum, consumer.CollectionName)
+	metricsAddr := ":" + config.EnvOrDefault("METRICS_PORT", defaultMetricsPort)
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", metrics.Handler())
+		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
+			log.Printf("sink-vector: server HTTP metriche (%s) non avviato: %v (consume-loop non impattato)", metricsAddr, err)
+		}
+	}()
+
+	log.Printf("sink-vector: avviato, brokers=%v topic=%s group=%s qdrant=%s:%d collection=%s metrics_addr=%s",
+		brokers, consumer.TopicCodeEmbedding, consumer.ConsumerName, qdrantHost, qdrantPortNum, consumer.CollectionName, metricsAddr)
 
 	for {
 		if _, err := consumer.FetchAndProcess(ctx, reader, process); err != nil {
