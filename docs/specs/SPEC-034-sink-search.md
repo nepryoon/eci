@@ -1,5 +1,5 @@
 # SPEC-034 — sink-search: CodeChunk → OpenSearch (T3.2)
-Stato: implemented
+Stato: verified
 Task-tree: T3.2 (secondo task di Fase 3, dip. T0.6 — non T2.4, nessuna catena di prerequisiti come T3.1) · Nuovo servizio: services/sink-search (Go, scaffold vuoto da SPEC-001) · ADD: Modulo 1 (hybrid storage — full-text, terza gamba oltre grafo/vettore)
 
 ## 1. Obiettivo
