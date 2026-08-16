@@ -1,5 +1,5 @@
 # SPEC-033 — sink-vector: CodeEmbedding → Qdrant (T3.1)
-Stato: implemented
+Stato: verified
 Task-tree: T3.1 (primo task di Fase 3, ora con tutti i prerequisiti chiusi — SPEC-029/030/031/032) · Nuovo servizio: services/sink-vector (Go, scaffold vuoto da SPEC-001) · ADD: Modulo 1 §1.6.3 (payload Qdrant)
 Contratti: nessuno sotto contracts/ (nessun proto/schema nuovo — Qdrant non è descritto da un JSON Schema/proto in questo progetto)
 
