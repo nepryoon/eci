@@ -1,5 +1,5 @@
 # SPEC-035 — Retry/backoff + DLQ (T3.3, parte 1/2)
-Stato: implemented
+Stato: verified
 Task-tree: T3.3 (primo dei due sotto-task concordati — metriche Prometheus è la parte 2/2, separata) · Nuovo: libs/go/eci/resilience (Go) + integrazione in 4 servizi esistenti · ADD: nessuna sezione specifica — resilienza operativa standard per consumer Kafka at-least-once
 
 ## 1. Obiettivo
