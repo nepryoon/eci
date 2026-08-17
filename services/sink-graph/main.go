@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -17,10 +18,31 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 
 	"github.com/eci-project/eci/libs/go/eci/config"
+	"github.com/eci-project/eci/libs/go/eci/metrics"
 	"github.com/eci-project/eci/libs/go/eci/observability"
 	"github.com/eci-project/eci/libs/go/eci/resilience"
 	"github.com/eci-project/eci/services/sink-graph/internal/consumer"
 )
+
+// sinkName identifica questo servizio nelle metriche Prometheus
+// (SPEC-036 §2, label "sink") — stessa stringa di consumer.ConsumerName,
+// duplicata qui volutamente: consumer.ConsumerName è un dettaglio del
+// dedup Kafka (SPEC-015), sinkName un dettaglio dell'osservabilità
+// (SPEC-036), coincidono per leggibilità ma non sono la stessa cosa per
+// costruzione (potrebbero divergere in futuro senza impatto sull'altro).
+const sinkName = "sink-graph"
+
+// defaultMetricsPort — DEVIAZIONE dal valore letterale ":9090" dichiarato
+// da SPEC-036 §2: verificato (non presunto) che i quattro sink NON sono
+// servizi Docker Compose isolati in propri namespace di rete — girano
+// come processi HOST che condividono lo STESSO namespace di rete
+// (l'host), quindi un default IDENTICO per tutti e quattro causerebbe una
+// collisione di bind reale se eseguiti insieme. Ogni sink riceve una
+// porta di default DISTINTA (9101 qui), sempre sotto lo stesso nome di
+// env var METRICS_PORT (override possibile invariato, §2). Vedi
+// deploy/compose/prometheus.yml per il dettaglio completo della
+// motivazione e delle quattro porte assegnate.
+const defaultMetricsPort = "9101"
 
 func main() {
 	ctx := context.Background()
@@ -90,9 +112,25 @@ func main() {
 		_, err := consumer.ProcessMessage(ctx, deps, topic, value, headers)
 		return resilience.OutcomeProcessed, err
 	})
+	// SPEC-036 §2 (T3.3 parte 2/2): metriche come strato PIÙ ESTERNO della
+	// composizione — vede l'outcome FINALE, dopo che retry/DLQ ha già agito.
+	process = metrics.WithPrometheus(sinkName, process)
 
-	log.Printf("sink-graph: avviato, brokers=%v topics=[%s %s] group=%s",
-		brokers, consumer.TopicCodeNode, consumer.TopicCodeRelation, consumer.ConsumerName)
+	// Server HTTP delle metriche in una goroutine separata (§2): un
+	// fallimento all'avvio (es. porta già occupata, §4 edge case) è
+	// osservabilità accessoria, non deve impedire l'avvio del consume-loop
+	// principale — loggato esplicitamente, mai un os.Exit/panic qui.
+	metricsAddr := ":" + config.EnvOrDefault("METRICS_PORT", defaultMetricsPort)
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", metrics.Handler())
+		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
+			log.Printf("sink-graph: server HTTP metriche (%s) non avviato: %v (consume-loop non impattato)", metricsAddr, err)
+		}
+	}()
+
+	log.Printf("sink-graph: avviato, brokers=%v topics=[%s %s] group=%s metrics_addr=%s",
+		brokers, consumer.TopicCodeNode, consumer.TopicCodeRelation, consumer.ConsumerName, metricsAddr)
 
 	for {
 		if _, err := consumer.FetchAndProcess(ctx, reader, process); err != nil {

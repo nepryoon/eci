@@ -16,6 +16,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +35,7 @@ import (
 	tcneo4j "github.com/testcontainers/testcontainers-go/modules/neo4j"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
+	"github.com/eci-project/eci/libs/go/eci/metrics"
 	"github.com/eci-project/eci/libs/go/eci/resilience"
 	"github.com/eci-project/eci/services/sink-graph/internal/consumer"
 )
@@ -190,6 +194,118 @@ func TestSinkGraphResilienceWrappingGenuinelyWired(t *testing.T) {
 	}
 	if string(dlqMsg.Value) != string(payload) {
 		t.Fatalf("payload del messaggio in DLQ non combacia con quello originale prodotto da sink-graph")
+	}
+}
+
+// ============================================================
+// SPEC-036 §3 scenario 5 (T3.3 parte 2/2) — sink RAPPRESENTATIVO scelto
+// per il test di integrazione di libs/go/eci/metrics: sink-graph, stesso
+// principio (e stesso motivo) già usato per SPEC-035 §3 scenario 5 —
+// esplicitamente riproposto anche dal testo di SPEC-036 §3 scenario 5
+// stessa ("stesso principio di SPEC-035, sink-graph"). Riusa lo stesso
+// harness leggero della funzione precedente (Postgres irraggiungibile,
+// nessun container Postgres/Neo4j necessario — il dedup fallisce già al
+// primo passo di ProcessMessage, producendo un esito deterministico
+// (OutcomeRetried) sufficiente a dimostrare la composizione reale
+// main.go: metrics.WithPrometheus(resilience.WithRetryAndDLQ(...))),
+// aggiungendovi un server HTTP REALE (non httptest.Recorder, già usato
+// nel test unitario della libreria stessa) — verifica diretta via
+// richiesta di rete reale che /metrics esponga testo Prometheus valido
+// coi nomi di metrica dichiarati (§3 scenario 5: "non solo ispezione del
+// registry in-process").
+func TestSinkGraphMetricsExposedViaRealHTTP(t *testing.T) {
+	ctx := context.Background()
+	brokers := startKafka(t, ctx)
+
+	unreachableDB, err := sql.Open("postgres", "postgres://eci:x@127.0.0.1:1/eci?sslmode=disable")
+	if err != nil {
+		t.Fatalf("sql.Open (DSN irraggiungibile): %v", err)
+	}
+	defer unreachableDB.Close()
+
+	deps := consumer.Deps{DB: unreachableDB, Neo4j: nil, Repo: repoPlaceholder, Logf: t.Logf}
+
+	retryProducer := &kafka.Writer{
+		Addr:                   kafka.TCP(brokers...),
+		AllowAutoTopicCreation: true,
+		BatchTimeout:           10 * time.Millisecond,
+	}
+	defer retryProducer.Close()
+
+	// sinkName UNICO per questo test: metrics.WithPrometheus registra le
+	// serie sul registry GLOBALE di default di prometheus/client_golang
+	// (stesso registry servito da Handler() in produzione, SPEC-036 §2) —
+	// un'etichetta "sink" univoca evita che questo test legga contatori
+	// eventualmente incrementati da altri test/processi che condividono
+	// lo stesso registry in-process.
+	sinkName := "sink-graph-metrics-http-test-" + uniqueEventID(t)
+
+	cfg := resilience.Config{MaxRetries: 5, BackoffBase: 200 * time.Millisecond}
+	process := resilience.WithRetryAndDLQ(cfg, retryProducer, func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (resilience.Outcome, error) {
+		_, err := consumer.ProcessMessage(ctx, deps, topic, value, headers)
+		return resilience.OutcomeProcessed, err
+	})
+	// Stessa identica composizione di main.go (SPEC-036 §2): metriche come
+	// strato PIÙ ESTERNO.
+	process = metrics.WithPrometheus(sinkName, process)
+
+	// Server HTTP REALE su una porta libera, stessa identica forma di
+	// main.go (mux + metrics.Handler() su "/metrics").
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("bind porta libera: %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", metrics.Handler())
+	server := &http.Server{Handler: mux}
+	go func() { _ = server.Serve(listener) }()
+	defer server.Close()
+
+	eventID := uniqueEventID(t)
+	nodeID := uniqueID(t, "metrics-http")
+	payload := codeNodePayload(nodeID, "MetricsHTTPTest", "Method", "go", "x.go")
+	produce(t, ctx, brokers, consumer.TopicCodeNode, nodeID, payload, eventID, "")
+
+	reader := newReaderWithGroup(brokers, "sink-graph-metrics-http-"+eventID)
+	defer reader.Close()
+
+	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	outcome, err := consumer.FetchAndProcess(fetchCtx, reader, process)
+	cancel()
+	if err != nil {
+		t.Fatalf("FetchAndProcess: %v", err)
+	}
+	if outcome != resilience.OutcomeRetried {
+		t.Fatalf("outcome = %v, want OutcomeRetried (precondizione: Postgres irraggiungibile)", outcome)
+	}
+
+	// Richiesta HTTP REALE (net/http.Get su una connessione di rete vera,
+	// non un ResponseRecorder in-process) verso l'endpoint /metrics.
+	resp, err := http.Get(fmt.Sprintf("http://%s/metrics", listener.Addr().String()))
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status /metrics = %d, want 200", resp.StatusCode)
+	}
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("lettura corpo /metrics: %v", err)
+	}
+	body := string(bodyBytes)
+
+	for _, name := range []string{"eci_messages_processed_total", "eci_last_processed_timestamp_seconds"} {
+		if !strings.Contains(body, name) {
+			t.Fatalf("/metrics non contiene la metrica dichiarata %q:\n%s", name, body)
+		}
+	}
+	wantSeries := fmt.Sprintf(`eci_messages_processed_total{outcome="retried",sink=%q} 1`, sinkName)
+	if !strings.Contains(body, wantSeries) {
+		t.Fatalf("/metrics non contiene la serie attesa %q:\n%s", wantSeries, body)
+	}
+	if !strings.Contains(body, fmt.Sprintf(`eci_last_processed_timestamp_seconds{sink=%q}`, sinkName)) {
+		t.Fatalf("/metrics non contiene eci_last_processed_timestamp_seconds per sink=%q:\n%s", sinkName, body)
 	}
 }
 

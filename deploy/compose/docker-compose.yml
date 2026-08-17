@@ -227,6 +227,32 @@ services:
       retries: 15
       start_period: 10s
 
+  prometheus:
+    # SPEC-036 §2 (T3.3 parte 2/2) — scrape delle metriche di salute dei
+    # quattro sink Kafka (eci_messages_processed_total/
+    # eci_last_processed_timestamp_seconds, libs/go/eci/metrics). I quattro
+    # sink NON sono servizi Docker Compose (verificato, non presunto —
+    # vedi nota in deploy/compose/prometheus.yml): girano come processi
+    # host, raggiunti da questo container via host.docker.internal, che
+    # richiede esplicitamente extra_hosts su Linux (Docker Desktop lo
+    # risolve nativamente anche senza, ma l'entry è innocua e necessaria
+    # per portabilità verso un Docker Engine nativo non-Desktop).
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - eci-dev
+    healthcheck:
+      test: ["CMD-SHELL", "wget -O /dev/null -q http://localhost:9090/-/healthy || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
   tei-embedding:
     # SPEC-023 §2 — Text Embeddings Inference, variante GPU ufficiale, per
     # il vero jina-code-embeddings-1.5b (1536 dim di default) quando una
