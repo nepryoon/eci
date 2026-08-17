@@ -1,5 +1,5 @@
 # SPEC-036 — Metriche Prometheus di salute per i sink (T3.3, parte 2/2)
-Stato: implemented
+Stato: verified
 Task-tree: T3.3 (secondo dei due sotto-task concordati — chiude T3.3) · Nuovo: libs/go/eci/metrics (Go) + integrazione in 4 servizi + Prometheus in docker-compose.yml · ADD: nessuna sezione specifica
 
 ## 0. Deviazione dal termine letterale "lag" (discussa e concordata con l'utente prima di questa SPEC)
