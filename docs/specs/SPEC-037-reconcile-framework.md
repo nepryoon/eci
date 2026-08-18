@@ -1,5 +1,5 @@
 # SPEC-037 — Framework di riconciliazione (T3.4, parte 1/4)
-Stato: implemented
+Stato: verified
 Task-tree: T3.4 (primo dei quattro sotto-task concordati — i tre plugin per vista sono le parti 2/4, 3/4, 4/4) · Nuovo: tools/reconcile (Go, stesso pattern di tools/gc-postgres/migrate-neo4j) · ADD: Modulo 1 §2.2 (riconciliazione periodica)
 
 ## 1. Obiettivo
