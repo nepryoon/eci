@@ -1,5 +1,5 @@
 # SPEC-038 — Plugin Neo4j per la riconciliazione (T3.4, parte 2/4)
-Stato: implemented
+Stato: verified
 Task-tree: T3.4 (secondo dei quattro sotto-task concordati — Qdrant/OpenSearch sono le parti 3/4-4/4) · Nuovo: tools/reconcile/internal/neo4jtarget (Go) · ADD: Modulo 1 §2.2
 
 ## 1. Obiettivo
