@@ -1,5 +1,5 @@
 # SPEC-041 — HybridSearch completo: port Go di D5 (T4.1)
-Stato: implemented
+Stato: verified
 Task-tree: T4.1 (primo task di Fase 4, dip. T3.1 già chiuso) · Servizio: services/retrieval-engine (Go, estende T1.4/SPEC-016) · ADD: Modulo 2, Deliverable D5
 
 ## 1. Obiettivo
