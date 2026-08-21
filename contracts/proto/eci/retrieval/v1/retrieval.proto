@@ -130,6 +130,14 @@ message HybridSearchRequest {
   uint32 top_k = 8;               // default server: 25
   bool include_source_text = 9;   // sorgente integrale per i top-k
   bool include_summaries = 10;
+  // Estensione additiva T4.1 (SPEC-041, port di D5 hybrid_graph_vector_search):
+  // punto di ancoraggio per la traversata grafo tipizzata. Obbligatorio per
+  // usare la ricerca ibrida grafo+vettoriale completa (RRF k=60 + boost di
+  // prossimità topologica); un client che non lo imposta (stringa vuota)
+  // continua a ricevere il comportamento T1.4 esistente (sola gamba grafo
+  // full-text) — nessuna regressione sui client esistenti.
+  string entry_node_id = 11;
+  int32 max_depth = 12;           // bound della traversata grafo (D5); >= 1
 }
 
 message HybridSearchResponse {

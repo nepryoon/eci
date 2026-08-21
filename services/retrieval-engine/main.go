@@ -9,16 +9,19 @@ import (
 	"context"
 	"log"
 	"net"
+	"strconv"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+	"github.com/qdrant/go-client/qdrant"
 
 	"github.com/eci-project/eci/libs/go/eci/config"
 	"github.com/eci-project/eci/libs/go/eci/observability"
 	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
 	"github.com/eci-project/eci/libs/go/eci/secctx"
+	"github.com/eci-project/eci/services/retrieval-engine/internal/embedclient"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/server"
 )
 
@@ -44,6 +47,25 @@ func main() {
 	}
 	defer driver.Close(ctx)
 
+	// Qdrant/Embedder (SPEC-041, T4.1): stessi nomi env var già usati da
+	// sink-vector (QDRANT_HOST/QDRANT_GRPC_PORT, SPEC-033) ed
+	// embedding-worker (EMBEDDING_SERVICE_URL, SPEC-030) — stessa
+	// convenzione di naming, non introdotta ex novo.
+	qdrantHost := config.EnvOrDefault("QDRANT_HOST", "localhost")
+	qdrantPort := config.EnvOrDefault("QDRANT_GRPC_PORT", "6334")
+	qdrantPortNum, err := strconv.Atoi(qdrantPort)
+	if err != nil {
+		log.Fatalf("retrieval-engine: QDRANT_GRPC_PORT non valido (%q): %v", qdrantPort, err)
+	}
+	qdrantClient, err := qdrant.NewClient(&qdrant.Config{Host: qdrantHost, Port: qdrantPortNum})
+	if err != nil {
+		log.Fatalf("retrieval-engine: creazione client Qdrant (host=%s port=%d): %v", qdrantHost, qdrantPortNum, err)
+	}
+	defer qdrantClient.Close()
+
+	embeddingServiceURL := config.EnvOrDefault("EMBEDDING_SERVICE_URL", "http://localhost:8002")
+	embedder := embedclient.New(embeddingServiceURL)
+
 	addr := config.EnvOrDefault("RETRIEVAL_ENGINE_ADDR", ":50053")
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -54,9 +76,13 @@ func main() {
 		grpc.UnaryInterceptor(secctx.UnaryServerInterceptor()),
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 	)
-	retrievalv1.RegisterRetrievalEngineServer(srv, &server.Server{Driver: driver})
+	retrievalv1.RegisterRetrievalEngineServer(srv, &server.Server{
+		Driver:   driver,
+		Qdrant:   qdrantClient,
+		Embedder: embedder,
+	})
 
-	log.Printf("retrieval-engine: in ascolto su %s (neo4j=%s)", addr, neo4jURI)
+	log.Printf("retrieval-engine: in ascolto su %s (neo4j=%s, qdrant=%s:%d, embedder=%s)", addr, neo4jURI, qdrantHost, qdrantPortNum, embeddingServiceURL)
 	if err := srv.Serve(lis); err != nil {
 		log.Fatalf("retrieval-engine: srv.Serve: %v", err)
 	}

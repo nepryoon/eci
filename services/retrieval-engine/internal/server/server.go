@@ -8,14 +8,17 @@ package server
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/dbtype"
+	"github.com/qdrant/go-client/qdrant"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
+	"github.com/eci-project/eci/services/retrieval-engine/internal/hybridsearch"
 )
 
 const (
@@ -37,9 +40,17 @@ var edgeTypeOrder = []string{
 // Server implementa retrievalv1.RetrievalEngineServer. UnimplementedRetrievalEngineServer
 // embedded by value (non puntatore, per compatibilità forward-only del
 // codice generato) copre ImpactAnalysis con codes.Unimplemented.
+//
+// Qdrant/Embedder (SPEC-041, T4.1) sono opzionali: restano nil per un
+// Server usato SOLO per GetNode/ExpandNeighbors/Health o per HybridSearch
+// senza entry_node_id (comportamento T1.4 invariato, nessuna regressione).
+// Servono solo quando HybridSearch riceve un entry_node_id (nuovo percorso
+// grafo+vettoriale completo).
 type Server struct {
 	retrievalv1.UnimplementedRetrievalEngineServer
-	Driver neo4j.DriverWithContext
+	Driver   neo4j.DriverWithContext
+	Qdrant   *qdrant.Client
+	Embedder hybridsearch.Embedder
 }
 
 // GetNode — SPEC-016 §2/§3 scenari 1/2: MATCH (n:CodeNode {id: $node_id})
@@ -168,13 +179,29 @@ LIMIT $limit`,
 	}, nil
 }
 
-// HybridSearch — SPEC-016 §2/§3 scenari 4/5: sola gamba grafo, full-text
-// nativo Neo4j (code_fulltext, SPEC-004) — copre di fatto solo `name` dato
-// che signature/source_text non sono ancora popolati (limite dichiarato,
-// non un bug, verificato esplicitamente dallo scenario 5).
-// vector_candidates sempre 0, vector_leg_degraded sempre true: la gamba
-// vettoriale non esiste in questa SPEC, non un errore.
+// HybridSearch — dispatcher additivo (SPEC-041 §2/§9: "estensione additiva
+// ... nessuna regressione sui client esistenti"). Un client che imposta
+// entry_node_id usa il nuovo percorso grafo+vettoriale completo (T4.1,
+// hybridGraphVectorSearch sotto); un client che non lo imposta (stringa
+// vuota, comportamento di QUALUNQUE client scritto prima di questa SPEC)
+// riceve ESATTAMENTE il comportamento T1.4 invariato
+// (hybridSearchFullTextOnly, sola gamba grafo full-text).
 func (s *Server) HybridSearch(ctx context.Context, req *retrievalv1.HybridSearchRequest) (*retrievalv1.HybridSearchResponse, error) {
+	if req.GetEntryNodeId() != "" {
+		return s.hybridSearchGraphVector(ctx, req)
+	}
+	return s.hybridSearchFullTextOnly(ctx, req)
+}
+
+// hybridSearchFullTextOnly — SPEC-016 §2/§3 scenari 4/5: sola gamba grafo,
+// full-text nativo Neo4j (code_fulltext, SPEC-004) — copre di fatto solo
+// `name` dato che signature/source_text non sono ancora popolati (limite
+// dichiarato, non un bug, verificato esplicitamente dallo scenario 5).
+// vector_candidates sempre 0, vector_leg_degraded sempre true: la gamba
+// vettoriale non esiste in questo percorso, non un errore. INVARIATO
+// rispetto a SPEC-016 — nessuna riga toccata nella logica, solo rinominata
+// da HybridSearch (SPEC-041 §9: "nessuna regressione sui test di T1.4").
+func (s *Server) hybridSearchFullTextOnly(ctx context.Context, req *retrievalv1.HybridSearchRequest) (*retrievalv1.HybridSearchResponse, error) {
 	graphLimit := req.GetGraphLimit()
 	if graphLimit == 0 {
 		graphLimit = defaultGraphLimit
@@ -235,6 +262,73 @@ func (s *Server) HybridSearch(ctx context.Context, req *retrievalv1.HybridSearch
 		GraphCandidates:   uint32(len(records)),
 		VectorCandidates:  0,
 		VectorLegDegraded: true,
+	}, nil
+}
+
+// hybridSearchGraphVector — SPEC-041 §2/§3, T4.1: percorso completo
+// grafo+vettoriale (hybridsearch.HybridGraphVectorSearch, port 1:1 di D5).
+// query_text/entry_node_id obbligatori (§4 edge case, validati dentro
+// hybridsearch); max_depth <=0 -> errore esplicito (idem, validato dentro
+// GraphTraversal). Diagnostica GraphCandidates/VectorCandidates/
+// VectorLegDegraded derivata dal risultato finale (fuso, dopo troncamento
+// top_k) — non un conteggio grezzo pre-fusione: la firma di
+// HybridGraphVectorSearch (SPEC-041 §2, esplicita nell'interfaccia) ritorna
+// solo ([]RetrievedNode, error), nessun conteggio separato, scelta
+// dichiarata a fondo SPEC.
+func (s *Server) hybridSearchGraphVector(ctx context.Context, req *retrievalv1.HybridSearchRequest) (*retrievalv1.HybridSearchResponse, error) {
+	if s.Qdrant == nil || s.Embedder == nil {
+		return nil, status.Error(codes.FailedPrecondition, "hybrid search grafo+vettoriale non disponibile: Qdrant/Embedder non configurati su questo server")
+	}
+	if req.GetQueryText() == "" {
+		return nil, status.Error(codes.InvalidArgument, "query_text obbligatorio quando entry_node_id è impostato")
+	}
+
+	deps := hybridsearch.Deps{
+		Driver:   s.Driver,
+		Qdrant:   s.Qdrant,
+		Embedder: s.Embedder,
+		Logf:     func(format string, args ...any) { log.Printf(format, args...) },
+	}
+
+	var opts []hybridsearch.Option
+	if d, ok := domainToString[req.GetDomain()]; ok {
+		opts = append(opts, hybridsearch.WithDomain(d))
+	}
+	if repos := req.GetRepos(); len(repos) > 0 {
+		opts = append(opts, hybridsearch.WithRepo(repos[0]))
+	}
+	if req.GetVectorLimit() > 0 {
+		opts = append(opts, hybridsearch.WithVectorLimit(int(req.GetVectorLimit())))
+	}
+	if req.GetGraphLimit() > 0 {
+		opts = append(opts, hybridsearch.WithGraphLimit(int(req.GetGraphLimit())))
+	}
+	if req.GetTopK() > 0 {
+		opts = append(opts, hybridsearch.WithTopK(int(req.GetTopK())))
+	}
+
+	ranked, err := hybridsearch.HybridGraphVectorSearch(ctx, deps, req.GetQueryText(), req.GetEntryNodeId(), int(req.GetMaxDepth()), opts...)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "hybrid search grafo+vettoriale: %v", err)
+	}
+
+	nodes := make([]*retrievalv1.RetrievedNode, 0, len(ranked))
+	var graphCandidates, vectorCandidates uint32
+	for _, n := range ranked {
+		nodes = append(nodes, retrievedNodeFromHybridSearch(n))
+		if n.GraphRank != nil {
+			graphCandidates++
+		}
+		if n.VectorRank != nil {
+			vectorCandidates++
+		}
+	}
+
+	return &retrievalv1.HybridSearchResponse{
+		Nodes:             nodes,
+		GraphCandidates:   graphCandidates,
+		VectorCandidates:  vectorCandidates,
+		VectorLegDegraded: vectorCandidates == 0,
 	}, nil
 }
 
