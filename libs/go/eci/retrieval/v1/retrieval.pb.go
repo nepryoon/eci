@@ -743,8 +743,16 @@ type HybridSearchRequest struct {
 	TopK              uint32   `protobuf:"varint,8,opt,name=top_k,json=topK,proto3" json:"top_k,omitempty"`                                          // default server: 25
 	IncludeSourceText bool     `protobuf:"varint,9,opt,name=include_source_text,json=includeSourceText,proto3" json:"include_source_text,omitempty"` // sorgente integrale per i top-k
 	IncludeSummaries  bool     `protobuf:"varint,10,opt,name=include_summaries,json=includeSummaries,proto3" json:"include_summaries,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Estensione additiva T4.1 (SPEC-041, port di D5 hybrid_graph_vector_search):
+	// punto di ancoraggio per la traversata grafo tipizzata. Obbligatorio per
+	// usare la ricerca ibrida grafo+vettoriale completa (RRF k=60 + boost di
+	// prossimità topologica); un client che non lo imposta (stringa vuota)
+	// continua a ricevere il comportamento T1.4 esistente (sola gamba grafo
+	// full-text) — nessuna regressione sui client esistenti.
+	EntryNodeId   string `protobuf:"bytes,11,opt,name=entry_node_id,json=entryNodeId,proto3" json:"entry_node_id,omitempty"`
+	MaxDepth      int32  `protobuf:"varint,12,opt,name=max_depth,json=maxDepth,proto3" json:"max_depth,omitempty"` // bound della traversata grafo (D5); >= 1
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HybridSearchRequest) Reset() {
@@ -845,6 +853,20 @@ func (x *HybridSearchRequest) GetIncludeSummaries() bool {
 		return x.IncludeSummaries
 	}
 	return false
+}
+
+func (x *HybridSearchRequest) GetEntryNodeId() string {
+	if x != nil {
+		return x.EntryNodeId
+	}
+	return ""
+}
+
+func (x *HybridSearchRequest) GetMaxDepth() int32 {
+	if x != nil {
+		return x.MaxDepth
+	}
+	return 0
 }
 
 type HybridSearchResponse struct {
@@ -1641,7 +1663,7 @@ const file_eci_retrieval_v1_retrieval_proto_rawDesc = "" +
 	"provenance\x124\n" +
 	"\x06scores\x18\t \x01(\v2\x1c.eci.retrieval.v1.NodeScoresR\x06scores\x12\x19\n" +
 	"\bast_hash\x18\n" +
-	" \x01(\tR\aastHash\"\xb7\x03\n" +
+	" \x01(\tR\aastHash\"\xf8\x03\n" +
 	"\x13HybridSearchRequest\x12L\n" +
 	"\x10security_context\x18\x01 \x01(\v2!.eci.retrieval.v1.SecurityContextR\x0fsecurityContext\x12\x1d\n" +
 	"\n" +
@@ -1655,7 +1677,9 @@ const file_eci_retrieval_v1_retrieval_proto_rawDesc = "" +
 	"\x05top_k\x18\b \x01(\rR\x04topK\x12.\n" +
 	"\x13include_source_text\x18\t \x01(\bR\x11includeSourceText\x12+\n" +
 	"\x11include_summaries\x18\n" +
-	" \x01(\bR\x10includeSummaries\"\xd5\x01\n" +
+	" \x01(\bR\x10includeSummaries\x12\"\n" +
+	"\rentry_node_id\x18\v \x01(\tR\ventryNodeId\x12\x1b\n" +
+	"\tmax_depth\x18\f \x01(\x05R\bmaxDepth\"\xd5\x01\n" +
 	"\x14HybridSearchResponse\x125\n" +
 	"\x05nodes\x18\x01 \x03(\v2\x1f.eci.retrieval.v1.RetrievedNodeR\x05nodes\x12)\n" +
 	"\x10graph_candidates\x18\x02 \x01(\rR\x0fgraphCandidates\x12+\n" +

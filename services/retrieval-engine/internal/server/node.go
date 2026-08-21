@@ -4,6 +4,7 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/dbtype"
 
 	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
+	"github.com/eci-project/eci/services/retrieval-engine/internal/hybridsearch"
 )
 
 // retrievedNodeFromDBNode proietta un dbtype.Node Neo4j su RetrievedNode
@@ -26,6 +27,40 @@ func retrievedNodeFromDBNode(n dbtype.Node) *retrievalv1.RetrievedNode {
 			Path: stringProp(n.Props, "path"),
 		},
 	}
+}
+
+// retrievedNodeFromHybridSearch proietta un hybridsearch.RetrievedNode
+// (SPEC-041, T4.1) su RetrievedNode proto. NodeType/Name/AstHash restano
+// zero-value: la query Cypher di GraphTraversal è la STESSA di D5 (SPEC-041
+// §2 "stessa query Cypher, stessa struttura", porto fedele non una
+// reinterpretazione) e D5 non le proietta — nessun campo aggiunto
+// indipendentemente dal riferimento, stesso principio già stabilito in
+// SPEC-016 per retrievedNodeFromDBNode.
+func retrievedNodeFromHybridSearch(n hybridsearch.RetrievedNode) *retrievalv1.RetrievedNode {
+	out := &retrievalv1.RetrievedNode{
+		NodeId: n.NodeID,
+		Domain: domainFromProperty(n.Domain),
+		Scores: &retrievalv1.NodeScores{
+			RrfScore:   n.RRFScore,
+			FinalScore: n.CombinedScore,
+		},
+	}
+	if n.VectorScore != nil {
+		out.Scores.VectorScore = *n.VectorScore
+	}
+	if n.HopDistance != nil && *n.HopDistance >= 0 {
+		out.Scores.HopDistance = uint32(*n.HopDistance)
+	}
+	if n.Provenance != nil {
+		out.Provenance = &retrievalv1.Provenance{
+			Repo:      n.Provenance.Repo,
+			Path:      n.Provenance.Path,
+			StartLine: uint32(n.Provenance.StartLine),
+			EndLine:   uint32(n.Provenance.EndLine),
+			CommitSha: n.Provenance.Commit,
+		}
+	}
+	return out
 }
 
 // stringProp legge una property Neo4j come stringa. Assente o di tipo

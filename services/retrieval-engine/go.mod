@@ -5,7 +5,9 @@ go 1.25.0
 require (
 	github.com/eci-project/eci/libs/go v0.0.0-00010101000000-000000000000
 	github.com/neo4j/neo4j-go-driver/v5 v5.28.4
+	github.com/qdrant/go-client v1.19.0
 	github.com/testcontainers/testcontainers-go/modules/neo4j v0.43.0
+	github.com/testcontainers/testcontainers-go/modules/qdrant v0.43.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.69.0
 	google.golang.org/grpc v1.83.0
 	google.golang.org/protobuf v1.36.11
