@@ -7,9 +7,9 @@
 //
 // SPEC-037 costruiva solo l'orchestrazione condivisa, con `targets` vuota
 // (§2/§5). SPEC-038 (T3.4 parte 2/4) ha aggiunto qui la prima voce reale,
-// "neo4j"; SPEC-039 (T3.4 parte 3/4) aggiunge "qdrant" allo stesso modo,
-// senza toccare il framework — il plugin restante (OpenSearch, parte 4/4)
-// aggiungerà la propria allo stesso modo.
+// "neo4j"; SPEC-039 (T3.4 parte 3/4) ha aggiunto "qdrant"; SPEC-040
+// (T3.4 parte 4/4, ultima) aggiunge "opensearch" allo stesso modo, senza
+// toccare il framework — con questa, T3.4 e Fase 3 sono complete.
 //
 // Uso: reconcile --dsn <postgres-dsn> --target <nome>
 package main
@@ -23,11 +23,14 @@ import (
 
 	_ "github.com/lib/pq"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+	"github.com/opensearch-project/opensearch-go/v4"
+	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 	"github.com/qdrant/go-client/qdrant"
 
 	"github.com/eci-project/eci/libs/go/eci/config"
 	"github.com/eci-project/eci/tools/reconcile/internal/framework"
 	"github.com/eci-project/eci/tools/reconcile/internal/neo4jtarget"
+	"github.com/eci-project/eci/tools/reconcile/internal/opensearchtarget"
 	"github.com/eci-project/eci/tools/reconcile/internal/qdranttarget"
 )
 
@@ -66,16 +69,27 @@ func main() {
 	}
 	defer qdrantClient.Close()
 
-	// db=nil per entrambi i target: sia neo4jtarget.New sia
-	// qdranttarget.New accettano *sql.DB per l'interfaccia dichiarata da
-	// SPEC-038/SPEC-039 §2 ma non lo referenziano mai (SourceRows/Republish
-	// operano sulla *sql.DB/*sql.Tx che il framework stesso apre da
-	// cfg.DSN dentro OpenAndRun, sotto — vedi commento su neo4jtarget.New/
-	// qdranttarget.New). Aprire qui una SECONDA connessione Postgres solo
-	// per riempire questo parametro sarebbe una risorsa spesa per niente.
+	openSearchURL := config.EnvOrDefault("OPENSEARCH_URL", "http://localhost:9200")
+	openSearchClient, err := opensearchapi.NewClient(opensearchapi.Config{
+		Client: opensearch.Config{Addresses: []string{openSearchURL}},
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERRORE: creazione client OpenSearch:", err)
+		os.Exit(1)
+	}
+
+	// db=nil per tutti e tre i target: neo4jtarget.New/qdranttarget.New/
+	// opensearchtarget.New accettano *sql.DB per l'interfaccia dichiarata
+	// da SPEC-038/039/040 §2 ma non lo referenziano mai (SourceRows/
+	// Republish operano sulla *sql.DB/*sql.Tx che il framework stesso apre
+	// da cfg.DSN dentro OpenAndRun, sotto — vedi commento su
+	// neo4jtarget.New/qdranttarget.New/opensearchtarget.New). Aprire qui
+	// una SECONDA connessione Postgres solo per riempire questo parametro
+	// sarebbe una risorsa spesa per niente.
 	targets := map[string]framework.Target{
-		"neo4j":  neo4jtarget.New(neo4jDriver, nil),
-		"qdrant": qdranttarget.New(qdrantClient, nil),
+		"neo4j":      neo4jtarget.New(neo4jDriver, nil),
+		"qdrant":     qdranttarget.New(qdrantClient, nil),
+		"opensearch": opensearchtarget.New(openSearchClient, nil),
 	}
 
 	report, err := framework.OpenAndRun(ctx, cfg, targets, logger.Printf)
