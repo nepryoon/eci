@@ -948,8 +948,15 @@ type ImpactAnalysisRequest struct {
 	FanoutCapPerHop   uint32                 `protobuf:"varint,6,opt,name=fanout_cap_per_hop,json=fanoutCapPerHop,proto3" json:"fanout_cap_per_hop,omitempty"`                 // cap super-nodi; 0 = default server
 	MinImpactScore    float64                `protobuf:"fixed64,7,opt,name=min_impact_score,json=minImpactScore,proto3" json:"min_impact_score,omitempty"`                     // soglia di pruning
 	IncludeSourceText bool                   `protobuf:"varint,8,opt,name=include_source_text,json=includeSourceText,proto3" json:"include_source_text,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Estensione additiva T4.2 (SPEC-042, ADR-0008): cap sul numero TOTALE di
+	// nodi esplorati sull'INTERA traversata (concetto diverso da
+	// fanout_cap_per_hop, che resta non implementato da T4.2). <= 0 -> errore
+	// esplicito, nessun default silenzioso (SPEC-042 §3 scenario 6).
+	MaxNodes      int32    `protobuf:"varint,9,opt,name=max_nodes,json=maxNodes,proto3" json:"max_nodes,omitempty"`
+	Domain        Domain   `protobuf:"varint,10,opt,name=domain,proto3,enum=eci.retrieval.v1.Domain" json:"domain,omitempty"` // filtro dominio; UNSPECIFIED = nessun filtro
+	Repos         []string `protobuf:"bytes,11,rep,name=repos,proto3" json:"repos,omitempty"`                                 // filtro repo (T4.2 usa solo il primo, se presente)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ImpactAnalysisRequest) Reset() {
@@ -1036,6 +1043,27 @@ func (x *ImpactAnalysisRequest) GetIncludeSourceText() bool {
 		return x.IncludeSourceText
 	}
 	return false
+}
+
+func (x *ImpactAnalysisRequest) GetMaxNodes() int32 {
+	if x != nil {
+		return x.MaxNodes
+	}
+	return 0
+}
+
+func (x *ImpactAnalysisRequest) GetDomain() Domain {
+	if x != nil {
+		return x.Domain
+	}
+	return Domain_DOMAIN_UNSPECIFIED
+}
+
+func (x *ImpactAnalysisRequest) GetRepos() []string {
+	if x != nil {
+		return x.Repos
+	}
+	return nil
 }
 
 // Nodo impattato emesso in streaming man mano che la traversata procede.
@@ -1684,7 +1712,7 @@ const file_eci_retrieval_v1_retrieval_proto_rawDesc = "" +
 	"\x05nodes\x18\x01 \x03(\v2\x1f.eci.retrieval.v1.RetrievedNodeR\x05nodes\x12)\n" +
 	"\x10graph_candidates\x18\x02 \x01(\rR\x0fgraphCandidates\x12+\n" +
 	"\x11vector_candidates\x18\x03 \x01(\rR\x10vectorCandidates\x12.\n" +
-	"\x13vector_leg_degraded\x18\x04 \x01(\bR\x11vectorLegDegraded\"\xac\x03\n" +
+	"\x13vector_leg_degraded\x18\x04 \x01(\bR\x11vectorLegDegraded\"\x91\x04\n" +
 	"\x15ImpactAnalysisRequest\x12L\n" +
 	"\x10security_context\x18\x01 \x01(\v2!.eci.retrieval.v1.SecurityContextR\x0fsecurityContext\x12\"\n" +
 	"\rentry_node_id\x18\x02 \x01(\tR\ventryNodeId\x12\x1b\n" +
@@ -1694,7 +1722,11 @@ const file_eci_retrieval_v1_retrieval_proto_rawDesc = "" +
 	"\tdirection\x18\x05 \x01(\x0e2$.eci.retrieval.v1.TraversalDirectionR\tdirection\x12+\n" +
 	"\x12fanout_cap_per_hop\x18\x06 \x01(\rR\x0ffanoutCapPerHop\x12(\n" +
 	"\x10min_impact_score\x18\a \x01(\x01R\x0eminImpactScore\x12.\n" +
-	"\x13include_source_text\x18\b \x01(\bR\x11includeSourceText\"\xdc\x01\n" +
+	"\x13include_source_text\x18\b \x01(\bR\x11includeSourceText\x12\x1b\n" +
+	"\tmax_nodes\x18\t \x01(\x05R\bmaxNodes\x120\n" +
+	"\x06domain\x18\n" +
+	" \x01(\x0e2\x18.eci.retrieval.v1.DomainR\x06domain\x12\x14\n" +
+	"\x05repos\x18\v \x03(\tR\x05repos\"\xdc\x01\n" +
 	"\fImpactedNode\x123\n" +
 	"\x04node\x18\x01 \x01(\v2\x1f.eci.retrieval.v1.RetrievedNodeR\x04node\x12=\n" +
 	"\vimpact_kind\x18\x02 \x01(\x0e2\x1c.eci.retrieval.v1.ImpactKindR\n" +
@@ -1834,34 +1866,35 @@ var file_eci_retrieval_v1_retrieval_proto_depIdxs = []int32{
 	6,  // 7: eci.retrieval.v1.ImpactAnalysisRequest.security_context:type_name -> eci.retrieval.v1.SecurityContext
 	2,  // 8: eci.retrieval.v1.ImpactAnalysisRequest.edge_types:type_name -> eci.retrieval.v1.EdgeType
 	4,  // 9: eci.retrieval.v1.ImpactAnalysisRequest.direction:type_name -> eci.retrieval.v1.TraversalDirection
-	9,  // 10: eci.retrieval.v1.ImpactedNode.node:type_name -> eci.retrieval.v1.RetrievedNode
-	3,  // 11: eci.retrieval.v1.ImpactedNode.impact_kind:type_name -> eci.retrieval.v1.ImpactKind
-	2,  // 12: eci.retrieval.v1.ImpactedNode.path_edge_types:type_name -> eci.retrieval.v1.EdgeType
-	13, // 13: eci.retrieval.v1.ImpactAnalysisEvent.node:type_name -> eci.retrieval.v1.ImpactedNode
-	14, // 14: eci.retrieval.v1.ImpactAnalysisEvent.progress:type_name -> eci.retrieval.v1.ImpactProgress
-	6,  // 15: eci.retrieval.v1.GetNodeRequest.security_context:type_name -> eci.retrieval.v1.SecurityContext
-	9,  // 16: eci.retrieval.v1.GetNodeResponse.node:type_name -> eci.retrieval.v1.RetrievedNode
-	6,  // 17: eci.retrieval.v1.ExpandNeighborsRequest.security_context:type_name -> eci.retrieval.v1.SecurityContext
-	2,  // 18: eci.retrieval.v1.ExpandNeighborsRequest.edge_types:type_name -> eci.retrieval.v1.EdgeType
-	4,  // 19: eci.retrieval.v1.ExpandNeighborsRequest.direction:type_name -> eci.retrieval.v1.TraversalDirection
-	9,  // 20: eci.retrieval.v1.ExpandNeighborsResponse.neighbors:type_name -> eci.retrieval.v1.RetrievedNode
-	2,  // 21: eci.retrieval.v1.ExpandNeighborsResponse.traversed_edge_types:type_name -> eci.retrieval.v1.EdgeType
-	5,  // 22: eci.retrieval.v1.HealthCheckResponse.status:type_name -> eci.retrieval.v1.HealthCheckResponse.ServingStatus
-	10, // 23: eci.retrieval.v1.RetrievalEngine.HybridSearch:input_type -> eci.retrieval.v1.HybridSearchRequest
-	12, // 24: eci.retrieval.v1.RetrievalEngine.ImpactAnalysis:input_type -> eci.retrieval.v1.ImpactAnalysisRequest
-	16, // 25: eci.retrieval.v1.RetrievalEngine.GetNode:input_type -> eci.retrieval.v1.GetNodeRequest
-	18, // 26: eci.retrieval.v1.RetrievalEngine.ExpandNeighbors:input_type -> eci.retrieval.v1.ExpandNeighborsRequest
-	20, // 27: eci.retrieval.v1.RetrievalEngine.Health:input_type -> eci.retrieval.v1.HealthCheckRequest
-	11, // 28: eci.retrieval.v1.RetrievalEngine.HybridSearch:output_type -> eci.retrieval.v1.HybridSearchResponse
-	15, // 29: eci.retrieval.v1.RetrievalEngine.ImpactAnalysis:output_type -> eci.retrieval.v1.ImpactAnalysisEvent
-	17, // 30: eci.retrieval.v1.RetrievalEngine.GetNode:output_type -> eci.retrieval.v1.GetNodeResponse
-	19, // 31: eci.retrieval.v1.RetrievalEngine.ExpandNeighbors:output_type -> eci.retrieval.v1.ExpandNeighborsResponse
-	21, // 32: eci.retrieval.v1.RetrievalEngine.Health:output_type -> eci.retrieval.v1.HealthCheckResponse
-	28, // [28:33] is the sub-list for method output_type
-	23, // [23:28] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	0,  // 10: eci.retrieval.v1.ImpactAnalysisRequest.domain:type_name -> eci.retrieval.v1.Domain
+	9,  // 11: eci.retrieval.v1.ImpactedNode.node:type_name -> eci.retrieval.v1.RetrievedNode
+	3,  // 12: eci.retrieval.v1.ImpactedNode.impact_kind:type_name -> eci.retrieval.v1.ImpactKind
+	2,  // 13: eci.retrieval.v1.ImpactedNode.path_edge_types:type_name -> eci.retrieval.v1.EdgeType
+	13, // 14: eci.retrieval.v1.ImpactAnalysisEvent.node:type_name -> eci.retrieval.v1.ImpactedNode
+	14, // 15: eci.retrieval.v1.ImpactAnalysisEvent.progress:type_name -> eci.retrieval.v1.ImpactProgress
+	6,  // 16: eci.retrieval.v1.GetNodeRequest.security_context:type_name -> eci.retrieval.v1.SecurityContext
+	9,  // 17: eci.retrieval.v1.GetNodeResponse.node:type_name -> eci.retrieval.v1.RetrievedNode
+	6,  // 18: eci.retrieval.v1.ExpandNeighborsRequest.security_context:type_name -> eci.retrieval.v1.SecurityContext
+	2,  // 19: eci.retrieval.v1.ExpandNeighborsRequest.edge_types:type_name -> eci.retrieval.v1.EdgeType
+	4,  // 20: eci.retrieval.v1.ExpandNeighborsRequest.direction:type_name -> eci.retrieval.v1.TraversalDirection
+	9,  // 21: eci.retrieval.v1.ExpandNeighborsResponse.neighbors:type_name -> eci.retrieval.v1.RetrievedNode
+	2,  // 22: eci.retrieval.v1.ExpandNeighborsResponse.traversed_edge_types:type_name -> eci.retrieval.v1.EdgeType
+	5,  // 23: eci.retrieval.v1.HealthCheckResponse.status:type_name -> eci.retrieval.v1.HealthCheckResponse.ServingStatus
+	10, // 24: eci.retrieval.v1.RetrievalEngine.HybridSearch:input_type -> eci.retrieval.v1.HybridSearchRequest
+	12, // 25: eci.retrieval.v1.RetrievalEngine.ImpactAnalysis:input_type -> eci.retrieval.v1.ImpactAnalysisRequest
+	16, // 26: eci.retrieval.v1.RetrievalEngine.GetNode:input_type -> eci.retrieval.v1.GetNodeRequest
+	18, // 27: eci.retrieval.v1.RetrievalEngine.ExpandNeighbors:input_type -> eci.retrieval.v1.ExpandNeighborsRequest
+	20, // 28: eci.retrieval.v1.RetrievalEngine.Health:input_type -> eci.retrieval.v1.HealthCheckRequest
+	11, // 29: eci.retrieval.v1.RetrievalEngine.HybridSearch:output_type -> eci.retrieval.v1.HybridSearchResponse
+	15, // 30: eci.retrieval.v1.RetrievalEngine.ImpactAnalysis:output_type -> eci.retrieval.v1.ImpactAnalysisEvent
+	17, // 31: eci.retrieval.v1.RetrievalEngine.GetNode:output_type -> eci.retrieval.v1.GetNodeResponse
+	19, // 32: eci.retrieval.v1.RetrievalEngine.ExpandNeighbors:output_type -> eci.retrieval.v1.ExpandNeighborsResponse
+	21, // 33: eci.retrieval.v1.RetrievalEngine.Health:output_type -> eci.retrieval.v1.HealthCheckResponse
+	29, // [29:34] is the sub-list for method output_type
+	24, // [24:29] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_eci_retrieval_v1_retrieval_proto_init() }
