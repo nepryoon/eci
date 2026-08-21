@@ -1,5 +1,5 @@
 # SPEC-042 — ImpactAnalysis streaming (T4.2)
-Stato: implemented
+Stato: verified
 Task-tree: T4.2 (dip. T4.1, già chiuso) · Servizio: services/retrieval-engine (Go, estende T4.1/SPEC-041) · ADD: Modulo 2, Deliverable D4 (loop agentico, contesto — non un algoritmo eseguibile come D5)
 
 ## 1. Obiettivo
