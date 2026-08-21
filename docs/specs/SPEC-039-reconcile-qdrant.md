@@ -1,5 +1,5 @@
 # SPEC-039 — Plugin Qdrant per la riconciliazione (T3.4, parte 3/4)
-Stato: implemented
+Stato: verified
 Task-tree: T3.4 (terzo dei quattro sotto-task concordati — OpenSearch è la parte 4/4) · Nuovo: tools/reconcile/internal/qdranttarget (Go) · ADD: Modulo 1 §2.2
 
 ## 1. Obiettivo
