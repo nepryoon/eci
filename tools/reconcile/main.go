@@ -6,9 +6,10 @@
 // long-running (stesso principio di tools/gc-postgres, SPEC-028, §5).
 //
 // SPEC-037 costruiva solo l'orchestrazione condivisa, con `targets` vuota
-// (§2/§5). SPEC-038 (T3.4 parte 2/4) aggiunge qui la prima voce reale,
-// "neo4j", senza toccare il framework — i due plugin restanti (Qdrant/
-// OpenSearch, parti 3/4-4/4) aggiungeranno la propria allo stesso modo.
+// (§2/§5). SPEC-038 (T3.4 parte 2/4) ha aggiunto qui la prima voce reale,
+// "neo4j"; SPEC-039 (T3.4 parte 3/4) aggiunge "qdrant" allo stesso modo,
+// senza toccare il framework — il plugin restante (OpenSearch, parte 4/4)
+// aggiungerà la propria allo stesso modo.
 //
 // Uso: reconcile --dsn <postgres-dsn> --target <nome>
 package main
@@ -18,13 +19,16 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 
 	_ "github.com/lib/pq"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+	"github.com/qdrant/go-client/qdrant"
 
 	"github.com/eci-project/eci/libs/go/eci/config"
 	"github.com/eci-project/eci/tools/reconcile/internal/framework"
 	"github.com/eci-project/eci/tools/reconcile/internal/neo4jtarget"
+	"github.com/eci-project/eci/tools/reconcile/internal/qdranttarget"
 )
 
 func main() {
@@ -48,14 +52,30 @@ func main() {
 	}
 	defer neo4jDriver.Close(ctx)
 
-	// db=nil: neo4jtarget.New lo accetta per l'interfaccia dichiarata da
-	// SPEC-038 §2 ma non lo referenzia mai (SourceRows/Republish operano
-	// sulla *sql.DB/*sql.Tx che il framework stesso apre da cfg.DSN dentro
-	// OpenAndRun, sotto — vedi commento su neo4jtarget.New). Aprire qui una
-	// SECONDA connessione Postgres solo per riempire questo parametro
-	// sarebbe una risorsa spesa per niente.
+	qdrantHost := config.EnvOrDefault("QDRANT_HOST", "localhost")
+	qdrantPort := config.EnvOrDefault("QDRANT_GRPC_PORT", "6334")
+	qdrantPortNum, err := strconv.Atoi(qdrantPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERRORE: QDRANT_GRPC_PORT non valido (%q): %v\n", qdrantPort, err)
+		os.Exit(1)
+	}
+	qdrantClient, err := qdrant.NewClient(&qdrant.Config{Host: qdrantHost, Port: qdrantPortNum})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERRORE: creazione client Qdrant:", err)
+		os.Exit(1)
+	}
+	defer qdrantClient.Close()
+
+	// db=nil per entrambi i target: sia neo4jtarget.New sia
+	// qdranttarget.New accettano *sql.DB per l'interfaccia dichiarata da
+	// SPEC-038/SPEC-039 §2 ma non lo referenziano mai (SourceRows/Republish
+	// operano sulla *sql.DB/*sql.Tx che il framework stesso apre da
+	// cfg.DSN dentro OpenAndRun, sotto — vedi commento su neo4jtarget.New/
+	// qdranttarget.New). Aprire qui una SECONDA connessione Postgres solo
+	// per riempire questo parametro sarebbe una risorsa spesa per niente.
 	targets := map[string]framework.Target{
-		"neo4j": neo4jtarget.New(neo4jDriver, nil),
+		"neo4j":  neo4jtarget.New(neo4jDriver, nil),
+		"qdrant": qdranttarget.New(qdrantClient, nil),
 	}
 
 	report, err := framework.OpenAndRun(ctx, cfg, targets, logger.Printf)
