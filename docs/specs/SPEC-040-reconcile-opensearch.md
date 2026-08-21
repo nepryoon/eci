@@ -1,5 +1,5 @@
 # SPEC-040 — Plugin OpenSearch per la riconciliazione (T3.4, parte 4/4)
-Stato: implemented
+Stato: verified
 Task-tree: T3.4 (ultimo dei quattro sotto-task concordati — chiude T3.4 e Fase 3) · Nuovo: tools/reconcile/internal/opensearchtarget (Go) · ADD: Modulo 1 §2.2
 
 ## 1. Obiettivo
