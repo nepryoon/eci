@@ -138,6 +138,16 @@ message HybridSearchRequest {
   // full-text) — nessuna regressione sui client esistenti.
   string entry_node_id = 11;
   int32 max_depth = 12;           // bound della traversata grafo (D5); >= 1
+  // Estensione additiva T4.4 (SPEC-044, ADR-0009): applica il reranker
+  // cross-encoder (bge-reranker-v2-m3 via TEI) ai risultati fusi RRF di
+  // T4.1, riordinati per final_score = rerank_score + beta*proximity_boost
+  // (hop_distance + impact_score di T4.3). Richiede lo STESSO entry_node_id
+  // già usato per la gamba grafo (nessun parametro indipendente). Default
+  // false: comportamento T4.1 invariato, nessuna chiamata al servizio di
+  // reranking — nessuna regressione sui client esistenti. Se true e il
+  // servizio di reranking è irraggiungibile, l'intera RPC fallisce
+  // esplicitamente (richiesto esplicitamente dal client, non degrada).
+  bool enable_rerank = 13;
 }
 
 message HybridSearchResponse {

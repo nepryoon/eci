@@ -1,0 +1,23 @@
+[project]
+name = "reranker-fake"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    # Richiesto da starlette.testclient (FastAPI TestClient) per i test
+    # HTTP diretti (SPEC-044 §7) — dipendenza diretta, non "extra", stesso
+    # principio già applicato in fakes/embedder-fake/pyproject.toml
+    # (SPEC-023) e fakes/vllm-fake/pyproject.toml (SPEC-017).
+    "httpx>=0.27",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["reranker_fake*"]
+
+[tool.ruff]
+extend-exclude = [".venv"]

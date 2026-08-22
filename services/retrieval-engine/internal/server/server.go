@@ -19,6 +19,8 @@ import (
 
 	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/hybridsearch"
+	"github.com/eci-project/eci/services/retrieval-engine/internal/rerank"
+	"github.com/eci-project/eci/services/retrieval-engine/internal/rerankclient"
 )
 
 const (
@@ -26,6 +28,16 @@ const (
 	defaultExpandLimit = 100
 	defaultGraphLimit  = 200
 	defaultTopK        = 25
+
+	// Pesi di default del reranking (SPEC-044 §2, T4.4): w_hop/w_impact
+	// dichiarati esplicitamente dalla SPEC; beta riusa lo stesso simbolo/
+	// valore già stabilito da ApplyTopologicalProximity (T4.1, SPEC-041) —
+	// stesso ruolo architetturale (rerank_score + beta*proximity_boost, già
+	// nel commento preesistente di NodeScores.final_score nel proto D7),
+	// nessun valore diverso dichiarato altrove per questo simbolo.
+	defaultRerankBeta    = 0.15
+	defaultRerankWHop    = 0.5
+	defaultRerankWImpact = 0.5
 )
 
 // edgeTypeOrder fissa un ordine deterministico (quello dei tag proto) per
@@ -51,6 +63,10 @@ type Server struct {
 	Driver   neo4j.DriverWithContext
 	Qdrant   *qdrant.Client
 	Embedder hybridsearch.Embedder
+	// Reranker (SPEC-044, T4.4) è opzionale come Qdrant/Embedder: resta
+	// nil per un Server usato senza reranking. Serve solo quando
+	// HybridSearch riceve enable_rerank=true.
+	Reranker *rerankclient.Client
 }
 
 // GetNode — SPEC-016 §2/§3 scenari 1/2: MATCH (n:CodeNode {id: $node_id})
@@ -312,15 +328,42 @@ func (s *Server) hybridSearchGraphVector(ctx context.Context, req *retrievalv1.H
 		return nil, status.Errorf(codes.Internal, "hybrid search grafo+vettoriale: %v", err)
 	}
 
-	nodes := make([]*retrievalv1.RetrievedNode, 0, len(ranked))
 	var graphCandidates, vectorCandidates uint32
 	for _, n := range ranked {
-		nodes = append(nodes, retrievedNodeFromHybridSearch(n))
 		if n.GraphRank != nil {
 			graphCandidates++
 		}
 		if n.VectorRank != nil {
 			vectorCandidates++
+		}
+	}
+
+	var nodes []*retrievalv1.RetrievedNode
+	if req.GetEnableRerank() {
+		// SPEC-044 §3 scenario 5: enable_rerank=true richiesto
+		// esplicitamente dal client — un fallimento del reranking (servizio
+		// irraggiungibile incluso) fa fallire l'INTERA RPC, non degrada
+		// come la gamba vettoriale di T4.1 (che qui è già stata applicata
+		// sopra, invariata).
+		if s.Reranker == nil {
+			return nil, status.Error(codes.FailedPrecondition, "reranking richiesto (enable_rerank=true) ma il Reranker non è configurato su questo server")
+		}
+		topK := req.GetTopK()
+		if topK == 0 {
+			topK = defaultTopK
+		}
+		rankedByReranker, err := rerank.Rerank(ctx, s.Reranker, s.Driver, req.GetQueryText(), ranked, int(topK), defaultRerankBeta, defaultRerankWHop, defaultRerankWImpact)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "reranking: %v", err)
+		}
+		nodes = make([]*retrievalv1.RetrievedNode, 0, len(rankedByReranker))
+		for _, rn := range rankedByReranker {
+			nodes = append(nodes, retrievedNodeFromRankedNode(rn))
+		}
+	} else {
+		nodes = make([]*retrievalv1.RetrievedNode, 0, len(ranked))
+		for _, n := range ranked {
+			nodes = append(nodes, retrievedNodeFromHybridSearch(n))
 		}
 	}
 

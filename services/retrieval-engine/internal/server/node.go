@@ -5,6 +5,7 @@ import (
 
 	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/hybridsearch"
+	"github.com/eci-project/eci/services/retrieval-engine/internal/rerank"
 )
 
 // retrievedNodeFromDBNode proietta un dbtype.Node Neo4j su RetrievedNode
@@ -60,6 +61,20 @@ func retrievedNodeFromHybridSearch(n hybridsearch.RetrievedNode) *retrievalv1.Re
 			CommitSha: n.Provenance.Commit,
 		}
 	}
+	return out
+}
+
+// retrievedNodeFromRankedNode proietta un rerank.RankedNode (SPEC-044,
+// T4.4) su RetrievedNode proto: stessa base di retrievedNodeFromHybridSearch
+// (node_id/domain/provenance/rrf_score/hop_distance, invariati — il
+// reranking non tocca questi campi), con RerankScore/FinalScore che
+// SOSTITUISCONO CombinedScore come final_score — il reranking, quando
+// attivato, è il segnale di ordinamento definitivo (SPEC-044 §1), non un
+// boost aggiuntivo su CombinedScore.
+func retrievedNodeFromRankedNode(rn rerank.RankedNode) *retrievalv1.RetrievedNode {
+	out := retrievedNodeFromHybridSearch(rn.Node)
+	out.Scores.RerankScore = rn.RerankScore
+	out.Scores.FinalScore = rn.FinalScore
 	return out
 }
 

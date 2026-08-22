@@ -22,6 +22,7 @@ import (
 	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
 	"github.com/eci-project/eci/libs/go/eci/secctx"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/embedclient"
+	"github.com/eci-project/eci/services/retrieval-engine/internal/rerankclient"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/server"
 )
 
@@ -66,6 +67,16 @@ func main() {
 	embeddingServiceURL := config.EnvOrDefault("EMBEDDING_SERVICE_URL", "http://localhost:8002")
 	embedder := embedclient.New(embeddingServiceURL)
 
+	// Reranker (SPEC-044, T4.4): stessa convenzione di naming URL-based
+	// delle altre dipendenze HTTP di questo servizio (EMBEDDING_SERVICE_URL
+	// sopra). Nessuna porta di default nota nel progetto per bge-reranker-
+	// v2-m3/TEI-rerank — riusa la stessa porta base di EMBEDDING_SERVICE_URL
+	// (8002) come default dichiarato: reranker-fake e embedder-fake sono
+	// processi TEI-compatibili distinti, tipicamente su porte diverse in
+	// dev (vedi reranker-fake, porta assegnata dinamicamente nei test).
+	rerankerServiceURL := config.EnvOrDefault("RERANKER_SERVICE_URL", "http://localhost:8003")
+	reranker := rerankclient.New(rerankerServiceURL)
+
 	addr := config.EnvOrDefault("RETRIEVAL_ENGINE_ADDR", ":50053")
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -80,9 +91,10 @@ func main() {
 		Driver:   driver,
 		Qdrant:   qdrantClient,
 		Embedder: embedder,
+		Reranker: reranker,
 	})
 
-	log.Printf("retrieval-engine: in ascolto su %s (neo4j=%s, qdrant=%s:%d, embedder=%s)", addr, neo4jURI, qdrantHost, qdrantPortNum, embeddingServiceURL)
+	log.Printf("retrieval-engine: in ascolto su %s (neo4j=%s, qdrant=%s:%d, embedder=%s, reranker=%s)", addr, neo4jURI, qdrantHost, qdrantPortNum, embeddingServiceURL, rerankerServiceURL)
 	if err := srv.Serve(lis); err != nil {
 		log.Fatalf("retrieval-engine: srv.Serve: %v", err)
 	}
