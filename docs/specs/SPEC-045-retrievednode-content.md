@@ -1,5 +1,5 @@
 # SPEC-045 — Idratazione contenuto di RetrievedNode (prerequisito per T4.5)
-Stato: implemented
+Stato: verified
 Task-tree: prerequisito non nominato esplicitamente da Fase 4 (concordato in chat) — colma un gap segnalato tre volte durante T4.1 (SPEC-041 §10) e T4.4 (SPEC-044 §10) · Servizio: services/retrieval-engine (Go, estende T4.1/SPEC-041) · ADD: nessuna sezione specifica (conseguenza pratica di §2.4, che presume testo disponibile da impacchettare)
 
 ## 1. Obiettivo
