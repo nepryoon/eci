@@ -749,8 +749,18 @@ type HybridSearchRequest struct {
 	// prossimità topologica); un client che non lo imposta (stringa vuota)
 	// continua a ricevere il comportamento T1.4 esistente (sola gamba grafo
 	// full-text) — nessuna regressione sui client esistenti.
-	EntryNodeId   string `protobuf:"bytes,11,opt,name=entry_node_id,json=entryNodeId,proto3" json:"entry_node_id,omitempty"`
-	MaxDepth      int32  `protobuf:"varint,12,opt,name=max_depth,json=maxDepth,proto3" json:"max_depth,omitempty"` // bound della traversata grafo (D5); >= 1
+	EntryNodeId string `protobuf:"bytes,11,opt,name=entry_node_id,json=entryNodeId,proto3" json:"entry_node_id,omitempty"`
+	MaxDepth    int32  `protobuf:"varint,12,opt,name=max_depth,json=maxDepth,proto3" json:"max_depth,omitempty"` // bound della traversata grafo (D5); >= 1
+	// Estensione additiva T4.4 (SPEC-044, ADR-0009): applica il reranker
+	// cross-encoder (bge-reranker-v2-m3 via TEI) ai risultati fusi RRF di
+	// T4.1, riordinati per final_score = rerank_score + beta*proximity_boost
+	// (hop_distance + impact_score di T4.3). Richiede lo STESSO entry_node_id
+	// già usato per la gamba grafo (nessun parametro indipendente). Default
+	// false: comportamento T4.1 invariato, nessuna chiamata al servizio di
+	// reranking — nessuna regressione sui client esistenti. Se true e il
+	// servizio di reranking è irraggiungibile, l'intera RPC fallisce
+	// esplicitamente (richiesto esplicitamente dal client, non degrada).
+	EnableRerank  bool `protobuf:"varint,13,opt,name=enable_rerank,json=enableRerank,proto3" json:"enable_rerank,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -867,6 +877,13 @@ func (x *HybridSearchRequest) GetMaxDepth() int32 {
 		return x.MaxDepth
 	}
 	return 0
+}
+
+func (x *HybridSearchRequest) GetEnableRerank() bool {
+	if x != nil {
+		return x.EnableRerank
+	}
+	return false
 }
 
 type HybridSearchResponse struct {
@@ -1691,7 +1708,7 @@ const file_eci_retrieval_v1_retrieval_proto_rawDesc = "" +
 	"provenance\x124\n" +
 	"\x06scores\x18\t \x01(\v2\x1c.eci.retrieval.v1.NodeScoresR\x06scores\x12\x19\n" +
 	"\bast_hash\x18\n" +
-	" \x01(\tR\aastHash\"\xf8\x03\n" +
+	" \x01(\tR\aastHash\"\x9d\x04\n" +
 	"\x13HybridSearchRequest\x12L\n" +
 	"\x10security_context\x18\x01 \x01(\v2!.eci.retrieval.v1.SecurityContextR\x0fsecurityContext\x12\x1d\n" +
 	"\n" +
@@ -1707,7 +1724,8 @@ const file_eci_retrieval_v1_retrieval_proto_rawDesc = "" +
 	"\x11include_summaries\x18\n" +
 	" \x01(\bR\x10includeSummaries\x12\"\n" +
 	"\rentry_node_id\x18\v \x01(\tR\ventryNodeId\x12\x1b\n" +
-	"\tmax_depth\x18\f \x01(\x05R\bmaxDepth\"\xd5\x01\n" +
+	"\tmax_depth\x18\f \x01(\x05R\bmaxDepth\x12#\n" +
+	"\renable_rerank\x18\r \x01(\bR\fenableRerank\"\xd5\x01\n" +
 	"\x14HybridSearchResponse\x125\n" +
 	"\x05nodes\x18\x01 \x03(\v2\x1f.eci.retrieval.v1.RetrievedNodeR\x05nodes\x12)\n" +
 	"\x10graph_candidates\x18\x02 \x01(\rR\x0fgraphCandidates\x12+\n" +
