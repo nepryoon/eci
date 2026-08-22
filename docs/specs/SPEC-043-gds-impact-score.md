@@ -1,5 +1,5 @@
 # SPEC-043 — GDS batch: impact_score (T4.3)
-Stato: implemented
+Stato: verified
 Task-tree: T4.3 (dip. T3.4, già chiuso) · Nuovo: tools/gds-impact (Go), estensione a deploy/compose/docker-compose.yml · ADD: Modulo 2 §1.4-1.5
 
 ## 1. Obiettivo
