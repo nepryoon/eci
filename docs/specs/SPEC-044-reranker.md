@@ -1,5 +1,5 @@
 # SPEC-044 — Reranker structure-aware (T4.4)
-Stato: implemented
+Stato: verified
 Task-tree: T4.4 (dip. dichiarata T4.1, dipendenza reale ANCHE da T4.3 — entrambi già chiusi) · Servizio: services/retrieval-engine (Go, estende T4.1/SPEC-041) · ADD: Modulo 2 §2.3
 
 ## 1. Obiettivo
