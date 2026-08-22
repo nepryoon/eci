@@ -70,6 +70,12 @@ services:
       # Neo4j Community Edition: vincolante per ADR-0004/ADR-0005
       # (SPEC-004) — mai Enterprise in questo stack.
       NEO4J_AUTH: neo4j/eci-dev-only
+      # SPEC-043 §2 (T4.3): Graph Data Science non è incluso di default
+      # nell'immagine neo4j:5-community — verificato (non presunto) con un
+      # avvio reale dello stack. PageRank/betweenness/Leiden sono tutti
+      # tier production (namespace gds. senza prefisso beta/alpha), nessuna
+      # licenza Enterprise richiesta.
+      NEO4J_PLUGINS: '["graph-data-science"]'
     ports:
       - "7474:7474"
       - "7687:7687"
