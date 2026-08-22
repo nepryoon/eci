@@ -15,6 +15,8 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+	"github.com/opensearch-project/opensearch-go/v4"
+	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 	"github.com/qdrant/go-client/qdrant"
 
 	"github.com/eci-project/eci/libs/go/eci/config"
@@ -77,6 +79,18 @@ func main() {
 	rerankerServiceURL := config.EnvOrDefault("RERANKER_SERVICE_URL", "http://localhost:8003")
 	reranker := rerankclient.New(rerankerServiceURL)
 
+	// OpenSearch (SPEC-045): stesso client/versione /v4 già stabilito in
+	// sink-search (SPEC-034) — prima connessione OpenSearch di
+	// retrieval-engine, stessa convenzione OPENSEARCH_URL già usata da
+	// tools/reconcile.
+	openSearchURL := config.EnvOrDefault("OPENSEARCH_URL", "http://localhost:9200")
+	openSearchClient, err := opensearchapi.NewClient(opensearchapi.Config{
+		Client: opensearch.Config{Addresses: []string{openSearchURL}},
+	})
+	if err != nil {
+		log.Fatalf("retrieval-engine: creazione client OpenSearch (url=%s): %v", openSearchURL, err)
+	}
+
 	addr := config.EnvOrDefault("RETRIEVAL_ENGINE_ADDR", ":50053")
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -88,13 +102,14 @@ func main() {
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 	)
 	retrievalv1.RegisterRetrievalEngineServer(srv, &server.Server{
-		Driver:   driver,
-		Qdrant:   qdrantClient,
-		Embedder: embedder,
-		Reranker: reranker,
+		Driver:     driver,
+		Qdrant:     qdrantClient,
+		Embedder:   embedder,
+		Reranker:   reranker,
+		OpenSearch: openSearchClient,
 	})
 
-	log.Printf("retrieval-engine: in ascolto su %s (neo4j=%s, qdrant=%s:%d, embedder=%s, reranker=%s)", addr, neo4jURI, qdrantHost, qdrantPortNum, embeddingServiceURL, rerankerServiceURL)
+	log.Printf("retrieval-engine: in ascolto su %s (neo4j=%s, qdrant=%s:%d, embedder=%s, reranker=%s, opensearch=%s)", addr, neo4jURI, qdrantHost, qdrantPortNum, embeddingServiceURL, rerankerServiceURL, openSearchURL)
 	if err := srv.Serve(lis); err != nil {
 		log.Fatalf("retrieval-engine: srv.Serve: %v", err)
 	}

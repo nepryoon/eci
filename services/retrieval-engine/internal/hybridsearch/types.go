@@ -17,12 +17,16 @@ type Provenance struct {
 	StartLine, EndLine int
 }
 
-// RetrievedNode — stessa forma di D5 RetrievedNode. Puntatori = Optional[T]
+// RetrievedNode — stessa forma di D5 RetrievedNode, estesa da SPEC-045 con
+// Name/SourceText (D5 non li porta — deviazione dichiarata, non
+// un'estensione di D5 stesso, vedi SPEC-045 §10). Puntatori = Optional[T]
 // di D5: nil significa assente, non zero-value (SPEC-041 §2).
 type RetrievedNode struct {
 	NodeID                   string
 	Domain                   string
 	Source                   string // "graph" | "vector" | "fused"
+	Name                     string // SPEC-045: da n.name (Neo4j), sempre popolato se il nodo esiste
+	SourceText               string // SPEC-045: da OpenSearch, solo se include_source_text=true
 	VectorScore, HopDistance *float64
 	GraphRank, VectorRank    *int
 	RRFScore, CombinedScore  float64

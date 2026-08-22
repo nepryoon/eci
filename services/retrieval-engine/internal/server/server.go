@@ -13,6 +13,7 @@ import (
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/dbtype"
+	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 	"github.com/qdrant/go-client/qdrant"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -67,6 +68,10 @@ type Server struct {
 	// nil per un Server usato senza reranking. Serve solo quando
 	// HybridSearch riceve enable_rerank=true.
 	Reranker *rerankclient.Client
+	// OpenSearch (SPEC-045) è opzionale come gli altri: resta nil per un
+	// Server usato senza include_source_text. Serve solo quando
+	// HybridSearch riceve include_source_text=true.
+	OpenSearch *opensearchapi.Client
 }
 
 // GetNode — SPEC-016 §2/§3 scenari 1/2: MATCH (n:CodeNode {id: $node_id})
@@ -298,12 +303,16 @@ func (s *Server) hybridSearchGraphVector(ctx context.Context, req *retrievalv1.H
 	if req.GetQueryText() == "" {
 		return nil, status.Error(codes.InvalidArgument, "query_text obbligatorio quando entry_node_id è impostato")
 	}
+	if req.GetIncludeSourceText() && s.OpenSearch == nil {
+		return nil, status.Error(codes.FailedPrecondition, "include_source_text richiesto ma OpenSearch non è configurato su questo server")
+	}
 
 	deps := hybridsearch.Deps{
-		Driver:   s.Driver,
-		Qdrant:   s.Qdrant,
-		Embedder: s.Embedder,
-		Logf:     func(format string, args ...any) { log.Printf(format, args...) },
+		Driver:     s.Driver,
+		Qdrant:     s.Qdrant,
+		Embedder:   s.Embedder,
+		OpenSearch: s.OpenSearch,
+		Logf:       func(format string, args ...any) { log.Printf(format, args...) },
 	}
 
 	var opts []hybridsearch.Option
@@ -321,6 +330,9 @@ func (s *Server) hybridSearchGraphVector(ctx context.Context, req *retrievalv1.H
 	}
 	if req.GetTopK() > 0 {
 		opts = append(opts, hybridsearch.WithTopK(int(req.GetTopK())))
+	}
+	if req.GetIncludeSourceText() {
+		opts = append(opts, hybridsearch.WithIncludeSourceText(true))
 	}
 
 	ranked, err := hybridsearch.HybridGraphVectorSearch(ctx, deps, req.GetQueryText(), req.GetEntryNodeId(), int(req.GetMaxDepth()), opts...)

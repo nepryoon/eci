@@ -7,10 +7,12 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
-// graphTraversalCypher — STESSA query di D5 `_GRAPH_TRAVERSAL_CYPHER`:
-// traversata inversa tipizzata con limite di profondità e pruning DISTINCT.
-// %d è max_depth, letterale intero validato (>=1) prima dell'interpolazione
-// — Cypher non parametrizza i bound di lunghezza variabile (D5 §note, MAI
+// graphTraversalCypher — STESSA query di D5 `_GRAPH_TRAVERSAL_CYPHER`, con
+// UNA aggiunta dichiarata (SPEC-045 §2): `dep.name AS name` nella RETURN
+// già esistente — nessuna nuova query, nessun cambiamento a
+// WHERE/ORDER BY/LIMIT (stesso insieme di righe, stesso ordine). %d è
+// max_depth, letterale intero validato (>=1) prima dell'interpolazione —
+// Cypher non parametrizza i bound di lunghezza variabile (D5 §note, MAI
 // accettare max_depth come stringa non validata: qui è un int Go, non
 // testo, stesso principio di sicurezza già stabilito in SPEC-016 per
 // ExpandNeighbors).
@@ -22,6 +24,7 @@ WHERE ($domain IS NULL OR dep.domain = $domain)
 WITH DISTINCT dep, min(length(path)) AS hop_distance
 RETURN dep.id            AS node_id,
        dep.domain        AS domain,
+       dep.name          AS name,
        dep.repo          AS repo,
        dep.path          AS path,
        dep.start_line    AS start_line,
@@ -62,6 +65,7 @@ func GraphTraversal(ctx context.Context, driver neo4j.DriverWithContext, entryNo
 	for rank, rec := range records {
 		nodeID, _ := rec.Get("node_id")
 		domainVal, _ := rec.Get("domain")
+		nameVal, _ := rec.Get("name")
 		pathVal, _ := rec.Get("path")
 		commitVal, _ := rec.Get("commit")
 		hopVal, _ := rec.Get("hop_distance")
@@ -87,6 +91,7 @@ func GraphTraversal(ctx context.Context, driver neo4j.DriverWithContext, entryNo
 			NodeID:      asString(nodeID),
 			Domain:      orDefault(asString(domainVal), "code"),
 			Source:      "graph",
+			Name:        asString(nameVal),
 			HopDistance: &hop,
 			GraphRank:   &r,
 			Provenance:  prov,
