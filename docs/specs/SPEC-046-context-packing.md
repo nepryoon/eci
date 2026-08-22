@@ -1,5 +1,5 @@
 # SPEC-046 — Context packing "a U" (T4.5, ultimo task di Fase 4)
-Stato: implemented
+Stato: verified
 Task-tree: T4.5 (dip. T4.4, già chiuso) · Servizio: services/retrieval-engine (Go, estende T4.1/T4.4/SPEC-045) · ADD: Modulo 2 §2.4
 
 ## 1. Obiettivo
