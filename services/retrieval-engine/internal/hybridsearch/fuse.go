@@ -23,6 +23,7 @@ func RRFFuse(graphNodes, vectorNodes []RetrievedNode, k int) map[string]*Retriev
 				NodeID:      n.NodeID,
 				Domain:      n.Domain,
 				Source:      "fused",
+				Name:        n.Name,
 				VectorScore: n.VectorScore,
 				HopDistance: n.HopDistance,
 				GraphRank:   n.GraphRank,
@@ -51,6 +52,9 @@ func RRFFuse(graphNodes, vectorNodes []RetrievedNode, k int) map[string]*Retriev
 			}
 			if ex.Provenance == nil && n.Provenance != nil {
 				ex.Provenance = n.Provenance
+			}
+			if ex.Name == "" {
+				ex.Name = n.Name
 			}
 		}
 		fused[n.NodeID].RRFScore += contrib

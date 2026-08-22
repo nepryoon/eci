@@ -31,16 +31,17 @@ func retrievedNodeFromDBNode(n dbtype.Node) *retrievalv1.RetrievedNode {
 }
 
 // retrievedNodeFromHybridSearch proietta un hybridsearch.RetrievedNode
-// (SPEC-041, T4.1) su RetrievedNode proto. NodeType/Name/AstHash restano
-// zero-value: la query Cypher di GraphTraversal è la STESSA di D5 (SPEC-041
-// §2 "stessa query Cypher, stessa struttura", porto fedele non una
-// reinterpretazione) e D5 non le proietta — nessun campo aggiunto
-// indipendentemente dal riferimento, stesso principio già stabilito in
-// SPEC-016 per retrievedNodeFromDBNode.
+// (SPEC-041, T4.1; esteso da SPEC-045) su RetrievedNode proto. Name/
+// SourceText popolati da SPEC-045 (n.name da Neo4j, source_text da
+// OpenSearch se include_source_text=true). NodeType/AstHash restano
+// zero-value: nessuna fonte per questi campi in nessuna delle due gambe
+// (stesso principio già stabilito in SPEC-016 per retrievedNodeFromDBNode).
 func retrievedNodeFromHybridSearch(n hybridsearch.RetrievedNode) *retrievalv1.RetrievedNode {
 	out := &retrievalv1.RetrievedNode{
-		NodeId: n.NodeID,
-		Domain: domainFromProperty(n.Domain),
+		NodeId:     n.NodeID,
+		Domain:     domainFromProperty(n.Domain),
+		Name:       n.Name,
+		SourceText: n.SourceText,
 		Scores: &retrievalv1.NodeScores{
 			RrfScore:   n.RRFScore,
 			FinalScore: n.CombinedScore,

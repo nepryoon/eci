@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 	"github.com/qdrant/go-client/qdrant"
 )
 
@@ -12,12 +13,15 @@ import (
 // esplicitamente (nessuno stato globale, stesso principio già stabilito per
 // sink-graph/sink-vector, SPEC-015/033). Logf è opzionale: se nil, la
 // degradazione della gamba vettoriale (SPEC-041 §3 scenario 5) non viene
-// loggata ma il comportamento resta identico.
+// loggata ma il comportamento resta identico. OpenSearch (SPEC-045) è
+// opzionale a sua volta: richiesto SOLO quando WithIncludeSourceText(true)
+// è passata — nil va bene se il chiamante non lo userà mai.
 type Deps struct {
-	Driver   neo4j.DriverWithContext
-	Qdrant   *qdrant.Client
-	Embedder Embedder
-	Logf     func(format string, args ...any)
+	Driver     neo4j.DriverWithContext
+	Qdrant     *qdrant.Client
+	Embedder   Embedder
+	OpenSearch *opensearchapi.Client
+	Logf       func(format string, args ...any)
 }
 
 // options — parametri opzionali di HybridGraphVectorSearch, stessi default
@@ -25,13 +29,14 @@ type Deps struct {
 // SPEC-033, D5 dichiara "code_nodes", stantio — deviazione dichiarata),
 // domain="code", vector_limit=50, graph_limit=200, top_k=25, beta=0.15.
 type options struct {
-	collection  string
-	domain      *string
-	repo        *string
-	vectorLimit int
-	graphLimit  int
-	topK        int
-	beta        float64
+	collection        string
+	domain            *string
+	repo              *string
+	vectorLimit       int
+	graphLimit        int
+	topK              int
+	beta              float64
+	includeSourceText bool
 }
 
 func defaultOptions() options {
@@ -76,6 +81,12 @@ func WithVectorLimit(n int) Option { return func(o *options) { o.vectorLimit = n
 func WithGraphLimit(n int) Option  { return func(o *options) { o.graphLimit = n } }
 func WithTopK(n int) Option        { return func(o *options) { o.topK = n } }
 func WithBeta(b float64) Option    { return func(o *options) { o.beta = b } }
+
+// WithIncludeSourceText (SPEC-045 §2) attiva la lettura di SourceText da
+// OpenSearch per i risultati finali (dopo troncamento a top_k). false di
+// default: nessuna chiamata OpenSearch, SourceText resta vuoto (SPEC-045
+// §3 scenario 3).
+func WithIncludeSourceText(v bool) Option { return func(o *options) { o.includeSourceText = v } }
 
 // HybridGraphVectorSearch — port 1:1 di D5 `hybrid_graph_vector_search`:
 // (1) embedding query; (2) vector search Qdrant (seed-finding), degrada
@@ -129,6 +140,25 @@ func HybridGraphVectorSearch(ctx context.Context, deps Deps, query, entryNodeID 
 	if o.topK > 0 && len(ranked) > o.topK {
 		ranked = ranked[:o.topK]
 	}
+
+	// (6) idratazione contenuto (SPEC-045): SOLO sui risultati FINALI (dopo
+	// il troncamento a top_k) — meno nodi da idratare, nessun impatto sulla
+	// fusione/ranking (Name/SourceText sono puramente informativi). name è
+	// una proprietà base attesa sempre disponibile per un nodo :CodeNode
+	// reale: un suo fallimento è un errore esplicito, MAI degradato (a
+	// differenza della gamba vettoriale) — SPEC-045 §4.
+	if err := hydrateNames(ctx, deps.Driver, ranked); err != nil {
+		return nil, newHybridSearchError("Hydration name fallita", err)
+	}
+	if o.includeSourceText {
+		// Esplicitamente richiesto dal client (include_source_text=true):
+		// un fallimento OpenSearch fa fallire l'intera chiamata, stesso
+		// principio già stabilito per il reranker in T4.4 — SPEC-045 §4.
+		if err := hydrateSourceText(ctx, deps.OpenSearch, ranked); err != nil {
+			return nil, newHybridSearchError("Hydration source_text fallita", err)
+		}
+	}
+
 	return ranked, nil
 }
 
