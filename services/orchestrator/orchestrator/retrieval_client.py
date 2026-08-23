@@ -116,3 +116,41 @@ def find_callers(
         channel.close()
 
     return list(response.neighbors)
+
+
+def get_node(addr, security_context, node_id: str, include_source_text: bool = False) -> object:
+    channel = _build_channel(security_context, addr)
+    try:
+        response = retrieval_pb2_grpc.RetrievalEngineStub(channel).GetNode(
+            retrieval_pb2.GetNodeRequest(
+                security_context=security_context,
+                node_id=node_id,
+                include_source_text=include_source_text,
+            ),
+            timeout=_RPC_TIMEOUT_SECONDS,
+        )
+        return response.node
+    except grpc.RpcError as e:
+        raise RetrievalUnavailableError(addr, e) from e
+    finally:
+        channel.close()
+
+
+def expand_neighbors(addr, security_context, node_id: str, edge_types, direction, depth: int) -> list:
+    channel = _build_channel(security_context, addr)
+    try:
+        response = retrieval_pb2_grpc.RetrievalEngineStub(channel).ExpandNeighbors(
+            retrieval_pb2.ExpandNeighborsRequest(
+                security_context=security_context,
+                node_id=node_id,
+                edge_types=edge_types,
+                direction=direction,
+                depth=depth,
+            ),
+            timeout=_RPC_TIMEOUT_SECONDS,
+        )
+        return list(response.neighbors)
+    except grpc.RpcError as e:
+        raise RetrievalUnavailableError(addr, e) from e
+    finally:
+        channel.close()

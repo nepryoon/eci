@@ -1,5 +1,5 @@
 # SPEC-047 — Orchestrator agentico: LangGraph + tool tipizzati (T5.1)
-Stato: draft
+Stato: implemented
 Task-tree: T5.1 (dip. T4.2, già chiuso) · Servizio: services/orchestrator (Python, estende T1.5/SPEC-018) · ADD: Modulo 2 §2.2
 
 ## 1. Obiettivo
@@ -71,3 +71,54 @@ Uno span per nodo del grafo attraversato, un evento per ciascuna decisione di st
 - [ ] Edge case tabella §4 verificati esplicitamente.
 - [ ] Sintassi PydanticAI verificata contro la versione installata, non presunta.
 - [ ] Nessuna regressione sui test esistenti di T1.5 (CLI `eci ask` deve continuare a funzionare, anche se il suo core interno cambia).
+
+## 10. Deviazioni rispetto alla SPEC
+
+1. **Il fake non implementa tool calling strutturato.** L'API reale di
+   `fakes/vllm-fake` valida solo `model` e `messages`, poi restituisce l'eco
+   dell'ultimo messaggio utente; non interpreta `tools`, `tool_choice` né
+   produce `tool_calls`. I sette contratti sono quindi registrati e validati
+   realmente da un `pydantic_ai.Agent`, mentre LangGraph mantiene il routing
+   deterministico. Non viene dichiarata una selezione LLM dei tool che il
+   backend corrente non può effettuare; quella integrazione resta dipendente
+   da T5.3.
+
+2. **`semantic_search` usa `HybridSearch`, non una gamba vector-only.** Il
+   contratto retrieval espone solo `HybridSearch`; non esiste una RPC
+   vettoriale separata. Il nome logico del tool dell'ADD è mantenuto senza
+   inventare un'API backend.
+
+3. **`read_source` fallisce esplicitamente con `SourceNotAvailable`.** Sebbene
+   `GetNodeRequest` contenga `include_source_text`, l'implementazione corrente
+   di `GetNode` ignora il flag e proietta soltanto Neo4j. L'hydration di
+   SPEC-045 esiste nel percorso `HybridSearch(include_source_text=true)`, non
+   nel lookup puntuale; il tool non finge quindi di aver recuperato sorgente.
+
+4. **Budget token come stima dichiarata.** Prima di T5.3 il fake riporta un
+   conteggio per parole e non espone il tokenizer del futuro modello reale.
+   L'orchestrator usa una stima deterministica `ceil(UTF-8 bytes / 4)`, chiamata
+   esplicitamente stima e testata; non presenta un word count come token reali.
+
+5. **Dipendenza slim deliberata.** È installato
+   `pydantic-ai-slim[openai]` anziché il metapacchetto `pydantic-ai`, che
+   installerebbe provider cloud e integrazioni non usati. Entrambi espongono
+   lo stesso package Python `pydantic_ai`; la sintassi `Tool(function)`,
+   `RunContext[Deps]` e `Agent(..., tools=...)` è stata verificata con la
+   versione risolta 1.107.5. LangGraph risolto: 1.0.10.
+
+6. **Limite della verifica locale.** Gli unit test reali usano le dipendenze
+   installate, senza stub. I test testcontainers/retrieval end-to-end non sono
+   eseguibili nell'ambiente di verifica privo del daemon Docker; le checkbox di
+   accettazione restano pertanto non marcate come verificate.
+
+7. **Correzione post-review dello skeleton iniziale.** Il primo commit
+   terminava il grafo subito dopo classificazione/piano. È stato sostituito da
+   un loop LangGraph eseguibile `classify_pattern → make_plan (condizionale) →
+   react_step → check_stop → react_step|END`: il piano viene consumato tramite
+   `plan_index`, i tool sono chiamati dal `RetrievalToolRuntime`, la
+   deduplicazione avviene prima della RPC, e una frontiera LIFO conserva rami
+   alternativi per il backtrack. Test unitari dedicati verificano consumo del
+   piano, selezione ReAct, dedup preventiva, backtrack, budget, stabilizzazione,
+   payload LLM senza `visited`, propagazione dell'indisponibilità LLM e
+   span/eventi OTel in-memory. La regressione CLI/infrastrutturale resta
+   soggetta al limite Docker dichiarato al punto 6.
