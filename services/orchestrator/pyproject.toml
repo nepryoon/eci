@@ -12,6 +12,8 @@ dependencies = [
     # diretta di runtime, non solo di test (a differenza di come è usata
     # in fakes/vllm-fake, dove serve solo a TestClient).
     "httpx>=0.27",
+    "langgraph>=1,<2",
+    "pydantic-ai>=1,<3",
 ]
 
 [project.optional-dependencies]

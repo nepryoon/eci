@@ -66,6 +66,8 @@ def hybrid_search(
     query_text: str,
     security_context: retrieval_pb2.SecurityContext,
     tracer_provider=None,
+    entry_node_id: str = "",
+    repos: list[str] | None = None,
 ) -> list:
     """Chiama HybridSearch su retrieval-engine. Ritorna la lista di
     RetrievedNode (protobuf) — tutti gli altri campi della request
@@ -77,7 +79,10 @@ def hybrid_search(
     channel = _build_channel(security_context, addr, tracer_provider)
     stub = retrieval_pb2_grpc.RetrievalEngineStub(channel)
     request = retrieval_pb2.HybridSearchRequest(
-        security_context=security_context, query_text=_sanitize_for_fulltext(query_text)
+        security_context=security_context,
+        query_text=_sanitize_for_fulltext(query_text),
+        entry_node_id=entry_node_id,
+        repos=repos or [],
     )
     try:
         response = stub.HybridSearch(request, timeout=_RPC_TIMEOUT_SECONDS)
@@ -115,4 +120,38 @@ def find_callers(
     finally:
         channel.close()
 
+    return list(response.neighbors)
+
+
+def get_node(addr, security_context, node_id, tracer_provider=None):
+    channel = _build_channel(security_context, addr, tracer_provider)
+    stub = retrieval_pb2_grpc.RetrievalEngineStub(channel)
+    try:
+        response = stub.GetNode(
+            retrieval_pb2.GetNodeRequest(security_context=security_context, node_id=node_id),
+            timeout=_RPC_TIMEOUT_SECONDS,
+        )
+    except grpc.RpcError as e:
+        raise RetrievalUnavailableError(addr, e) from e
+    finally:
+        channel.close()
+    return response.node
+
+
+def expand_neighbors(addr, security_context, node_id, edge_types, direction, depth, tracer_provider=None):
+    channel = _build_channel(security_context, addr, tracer_provider)
+    stub = retrieval_pb2_grpc.RetrievalEngineStub(channel)
+    request = retrieval_pb2.ExpandNeighborsRequest(
+        security_context=security_context,
+        node_id=node_id,
+        edge_types=edge_types,
+        direction=direction,
+        depth=depth,
+    )
+    try:
+        response = stub.ExpandNeighbors(request, timeout=_RPC_TIMEOUT_SECONDS)
+    except grpc.RpcError as e:
+        raise RetrievalUnavailableError(addr, e) from e
+    finally:
+        channel.close()
     return list(response.neighbors)

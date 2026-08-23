@@ -24,3 +24,11 @@ class LLMUnavailableError(Exception):
         self.url = url
         self.cause = cause
         self.sources = sources
+
+
+class SummarizationNotYetAvailable(Exception):
+    """Il tool RAPTOR esiste nell'allow-list, ma sarà costruito da T5.5."""
+
+
+class SourceTextNotYetAvailable(Exception):
+    """GetNode non implementa ancora l'hydration OpenSearch richiesta."""

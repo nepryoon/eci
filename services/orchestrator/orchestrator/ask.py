@@ -4,19 +4,21 @@ Python richiamata sia dalla CLI (`orchestrator.cli`) sia direttamente
 dai test di integrazione (SPEC-018 §7: "orchestrator chiamato
 direttamente, non necessariamente il processo CLI")."""
 
+import asyncio
 from dataclasses import dataclass
 
 import httpx
 
 from orchestrator.errors import LLMUnavailableError
+from orchestrator.graph import run_agent
 from orchestrator.llm_client import chat_completion
 from orchestrator.prompt import build_messages
 from orchestrator.retrieval_client import (
     build_security_context,
     find_callers,
-    hybrid_search,
 )
 from orchestrator.who_calls import is_who_calls_query
+from orchestrator.tools import Deps
 
 
 @dataclass
@@ -38,7 +40,14 @@ def run_ask(query_text: str, retrieval_addr: str, vllm_url: str, tracer_provider
 
     with span_cm:
         security_context = build_security_context()
-        nodes = hybrid_search(retrieval_addr, query_text, security_context, tracer_provider=tracer_provider)
+        state = asyncio.run(
+            run_agent(
+                query_text,
+                Deps(retrieval_addr, security_context, tracer_provider),
+                vllm_url,
+            )
+        )
+        nodes = state["candidates"]
 
         if is_who_calls_query(query_text):
             # SPEC-018 §2: HybridSearch da sola non può rispondere a una

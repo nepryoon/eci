@@ -1,0 +1,96 @@
+# SPEC-047 — Orchestrator agentico: LangGraph + tool tipizzati (T5.1)
+
+Stato: implemented
+
+Task-tree: T5.1 (dip. T4.2, già chiuso) · Servizio: services/orchestrator (Python, estende T1.5/SPEC-018) · ADD: Modulo 2 §2.2
+
+## 1. Obiettivo
+
+Sostituire il core della CLI `eci ask` esistente (T1.5, un solo passaggio deterministico) con un grafo di stato LangGraph che naviga il CPG tramite sei tool tipizzati PydanticAI, seguendo il pattern ibrido plan-then-react prescritto dall'ADD (§2.2): Plan-and-Solve per query multi-hop a struttura nota, ReAct puro per query esplorative. Loop bounded a quattro componenti (budget passi, budget token, criteri di stop, gestione vicoli ciechi), stato di visita mantenuto lato orchestratore non nel prompt.
+
+## 2. Interfaccia
+
+**Verifica preliminare obbligatoria (prima di scrivere qualunque codice)**: PydanticAI ha avuto un bump di versione maggiore (v1→v2) dopo il mio addestramento — verificare la sintassi esatta di decoratori/dependency injection/costruttore `Agent` contro la versione REALMENTE installata (`pip show pydantic-ai`), non presumerla da un ricordo di addestramento potenzialmente stantio.
+
+**Sei tool PydanticAI-tipizzati** (`services/orchestrator/orchestrator/tools.py`, nuovo), compatibili con la registrazione `pydantic_ai.Tool` e costruiti sulle RPC gRPC realmente esistenti — nessuna nuova logica di backend:
+
+```python
+async def get_node(ctx: RunContext[Deps], node_id: str) -> NodeResult
+async def get_callers(ctx: RunContext[Deps], node_id: str, depth: int) -> list[NodeResult]
+async def get_callees(ctx: RunContext[Deps], node_id: str, depth: int) -> list[NodeResult]
+async def expand_dependencies(ctx: RunContext[Deps], node_id: str, edge_types: list[str], depth: int) -> list[NodeResult]
+async def semantic_search(ctx: RunContext[Deps], query: str, filters: dict, entry_node_id: str = "") -> list[NodeResult]
+async def read_source(ctx: RunContext[Deps], node_id: str) -> str
+```
+
+`read_source(node_id)` ritorna `SourceTextNotYetAvailable`: il contratto espone il flag `GetNode.include_source_text`, ma il backend corrente non esegue hydration OpenSearch in quella RPC.
+
+`summarize_subgraph(node_ids)` NON implementato in questa SPEC (dip. T5.5/RAPTOR, non ancora costruito) — dichiarato esplicitamente nella firma del tool: chiamarlo ritorna un errore tipizzato `SummarizationNotYetAvailable`, mai un riassunto fabbricato.
+
+**Grafo di stato LangGraph** (`services/orchestrator/orchestrator/graph.py`, nuovo):
+
+```python
+class AgentState(TypedDict):
+    query: str
+    pattern: Literal["react", "plan_and_solve"]
+    plan: list[str] | None
+    visited: set[str]
+    candidates: list[NodeResult]
+    step_count: int
+    token_count: int
+    stop_reason: str | None
+```
+
+Nodi: `classify_pattern` (euristica semplice temporanea — parole chiave tipo "chi chiama"/"impatto"/"dipendenze" → `plan_and_solve`, altrimenti `react`; **placeholder dichiarato**, sostituito dal vero intent classifier in T5.2), `make_plan` (solo ramo `plan_and_solve` — genera una sequenza di fasi come da esempio ADD: trova X → implementazioni → chiamanti → prioritizza → verifica), `react_step` (un'iterazione: ragiona via LLM, sceglie un tool, osserva il risultato, aggiorna `visited`/`candidates`), `check_stop` (valuta i quattro criteri di stop, §3).
+
+**LLM per il ragionamento**: chiama vllm-fake (T0.9) direttamente via il suo endpoint OpenAI-compatibile — NON attraverso T5.3 (LLM Gateway, non ancora costruito). Nessun routing fake/reale, nessun circuit breaker, nessuna deadline propagation qui — tutti espliciti Non-goal, oggetto di T5.3.
+
+## 3. Comportamento (scenari)
+
+1. **Dato** un `node_id` con chiamanti diretti noti, **quando** chiamo il tool `get_callers`, **allora** ritorna esattamente i nodi raggiungibili REVERSE su CALLS a `depth=1` — stesso risultato che ImpactAnalysis produrrebbe con gli stessi parametri, non una logica diversa.
+2. **Dato** un nodo già presente in `visited`, **quando** un tool lo riscopre durante l'esplorazione, **allora** non viene ri-processato (nessuna nuova chiamata tool su di esso), il grafo prosegue su un ramo diverso.
+3. **Dato** il budget di passi esaurito (default 15-30, configurabile), **quando** il grafo continua a iterare, **allora** si ferma con `stop_reason="step_budget_exhausted"`, non un errore.
+4. **Dato** nessun nuovo nodo con `impact_score` sopra soglia scoperto in un'iterazione, **quando** valuto i criteri di stop, **allora** il grafo si ferma con `stop_reason="blast_radius_stabilized"` (stesso principio "nessun nuovo segnale" già usato altrove nel progetto per condizioni di terminazione).
+5. **Dato** una query contenente "chi chiama" o "impatto", **quando** eseguo `classify_pattern`, **allora** il pattern scelto è `plan_and_solve`, un piano viene generato PRIMA di qualunque chiamata tool.
+6. **Dato** una query esplorativa generica ("capisci come funziona X"), **quando** eseguo `classify_pattern`, **allora** il pattern scelto è `react`, nessuna fase di pianificazione upfront.
+7. **Dato** `summarize_subgraph` invocato, **quando** eseguo il grafo, **allora** ritorna esplicitamente `SummarizationNotYetAvailable`, mai un riassunto fabbricato o un errore generico non tipizzato.
+8. **Dato** il grafo in esecuzione, **quando** ispeziono il testo effettivamente inviato all'LLM (via il fake), **allora** l'elenco completo dei `node_id` visitati NON appare come testo nel prompt — vive solo in `AgentState.visited` (verifica diretta del vincolo architetturale dell'ADD §2.2, non solo dichiarata).
+
+## 4. Errori & edge case
+
+| Condizione | Comportamento atteso |
+|---|---|
+| Un tool ritorna vuoto (nessun risultato) | Trattato come vicolo cieco (§2.2 dell'ADD) — backtrack alla frontiera precedente, non un errore che interrompe il grafo |
+| vllm-fake irraggiungibile | Errore esplicito, il grafo non prosegue con un ragionamento fabbricato |
+| Query vuota | Errore esplicito prima di avviare qualunque nodo del grafo |
+
+## 5. Non-goals
+
+`summarize_subgraph` reale (dip. T5.5). Vero intent classifier (T5.2 — qui solo un'euristica placeholder dichiarata). LLM Gateway/routing fake-reale/circuit breaker/deadline (T5.3). Verification layer (T5.4). Nessuna modifica ai servizi Go di Fase 4. Ricerca vector-only e hydration reale di `read_source` non sono implementabili tramite le RPC correnti: `semantic_search` espone quindi HybridSearch e `read_source` fallisce esplicitamente.
+
+## 6. Vincoli dall'ADD
+
+Modulo 2 §2.2 — sette tool tipizzati (sei implementati qui), pattern ReAct/Plan-and-Solve/ibrido plan-then-react, le quattro componenti di controllo del loop, stato di visita lato orchestratore.
+
+## 7. Test plan
+
+Unitari per `classify_pattern`/i criteri di stop (nessuna infrastruttura reale necessaria). Integrazione con retrieval-engine reale (i servizi Go già testati in Fase 4, invocati via gRPC reale) + vllm-fake reale per gli scenari end-to-end (5-8).
+
+## 8. Osservabilità
+
+Uno span per nodo del grafo attraversato, un evento per ciascuna decisione di stop con la motivazione.
+
+## 9. Criteri di accettazione
+
+- Scenari 1-8 verificati con evidenza diretta, in particolare lo scenario 8 (stato di visita mai nel prompt, verificato ispezionando il testo reale inviato all'LLM).
+- Edge case tabella §4 verificati esplicitamente.
+- Sintassi PydanticAI verificata contro la versione installata, non presunta.
+- Nessuna regressione sui test esistenti di T1.5 (`eci ask` deve continuare a funzionare, anche se il suo core interno cambia).
+
+
+## 10. Deviazioni
+
+- La firma originaria descriveva `semantic_search` come gamba esclusivamente vettoriale, ma il contratto espone soltanto `HybridSearch`: il tool è quindi un wrapper di tale RPC e accetta `entry_node_id`, necessario ad attivare il percorso ibrido. Senza entry point conserva la semantica full-text preesistente; non finge una ricerca vettoriale non disponibile.
+- `read_source` non può essere un wrapper di `hydrateSourceText`, che è interno al percorso Go di HybridSearch. `GetNode(include_source_text=true)` non effettua hydration nell'implementazione corrente. Il tool ritorna pertanto l'errore tipizzato `SourceTextNotYetAvailable`, senza contenuto fabbricato.
+- vllm-fake non implementa il protocollo di tool-calling strutturato. Il fake viene interrogato realmente a ogni `react_step`, mentre la selezione temporanea del primo tool è deterministica lato controller; il vero model routing/tool calling resta demandato a T5.3.
+- Le dipendenze PydanticAI/LangGraph sono state dichiarate, ma il proxy di questo ambiente blocca PyPI con HTTP 403. La verifica runtime della versione installata e la suite che richiede tali pacchetti restano pertanto una limitazione ambientale esplicita, non sono state dichiarate come eseguite.
