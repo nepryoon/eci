@@ -30,6 +30,7 @@ class SummarizationNotYetAvailable(Exception):
 class Deps:
     retrieval_addr: str
     security_context: object
+    query_intent: int = retrieval_pb2.QUERY_INTENT_UNSPECIFIED
 
 
 def _node(value) -> NodeResult:
@@ -105,6 +106,7 @@ async def semantic_search(ctx: RunContext[Deps], query: str, filters: dict) -> l
         ctx.deps.retrieval_addr,
         query,
         ctx.deps.security_context,
+        intent=ctx.deps.query_intent,
     )
     return [_node(value) for value in values]
 
@@ -151,7 +153,10 @@ class RetrievalToolRuntime:
     def execute(self, action: str, query: str, node_id: str | None) -> list[NodeResult]:
         if action == "semantic_search":
             values = retrieval_client.hybrid_search(
-                self.deps.retrieval_addr, query, self.deps.security_context
+                self.deps.retrieval_addr,
+                query,
+                self.deps.security_context,
+                intent=self.deps.query_intent,
             )
         elif action in {"get_callers", "get_callees", "expand_dependencies"}:
             if node_id is None:

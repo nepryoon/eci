@@ -10,6 +10,7 @@ import httpx
 
 from orchestrator.errors import LLMUnavailableError
 from orchestrator.graph import run_agent
+from orchestrator.intent import classify_intent, to_proto_intent
 from orchestrator.llm_client import chat_completion
 from orchestrator.prompt import build_messages
 from orchestrator.retrieval_client import build_security_context
@@ -35,7 +36,10 @@ def run_ask(query_text: str, retrieval_addr: str, vllm_url: str, tracer_provider
 
     with span_cm:
         security_context = build_security_context()
-        runtime = RetrievalToolRuntime(Deps(retrieval_addr, security_context))
+        intent = classify_intent(query_text)
+        runtime = RetrievalToolRuntime(
+            Deps(retrieval_addr, security_context, query_intent=to_proto_intent(intent))
+        )
         try:
             state = run_agent(
                 query_text,

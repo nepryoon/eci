@@ -66,6 +66,7 @@ def hybrid_search(
     query_text: str,
     security_context: retrieval_pb2.SecurityContext,
     tracer_provider=None,
+    intent: int = retrieval_pb2.QUERY_INTENT_UNSPECIFIED,
 ) -> list:
     """Chiama HybridSearch su retrieval-engine. Ritorna la lista di
     RetrievedNode (protobuf) — tutti gli altri campi della request
@@ -76,9 +77,7 @@ def hybrid_search(
     propagata al chiamante."""
     channel = _build_channel(security_context, addr, tracer_provider)
     stub = retrieval_pb2_grpc.RetrievalEngineStub(channel)
-    request = retrieval_pb2.HybridSearchRequest(
-        security_context=security_context, query_text=_sanitize_for_fulltext(query_text)
-    )
+    request = build_hybrid_search_request(query_text, security_context, intent)
     try:
         response = stub.HybridSearch(request, timeout=_RPC_TIMEOUT_SECONDS)
     except grpc.RpcError as e:
@@ -87,6 +86,14 @@ def hybrid_search(
         channel.close()
 
     return list(response.nodes)
+
+
+def build_hybrid_search_request(query_text, security_context, intent):
+    return retrieval_pb2.HybridSearchRequest(
+        security_context=security_context,
+        query_text=_sanitize_for_fulltext(query_text),
+        intent=intent,
+    )
 
 
 def find_callers(

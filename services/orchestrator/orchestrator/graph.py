@@ -7,6 +7,7 @@ from typing import Literal, Protocol, TypedDict
 from langgraph.graph import END, START, StateGraph
 from opentelemetry import trace
 
+from orchestrator.intent import classify_intent
 from orchestrator.tools import NodeResult
 
 
@@ -52,9 +53,8 @@ DEFAULT_AGENT_CONFIG = AgentConfig()
 
 def classify_pattern(state: AgentState) -> dict:
     with _span("classify_pattern"):
-        query = state["query"].lower()
-        structured = any(word in query for word in ("chi chiama", "who calls", "impatto", "dipendenze"))
-        return {"pattern": "plan_and_solve" if structured else "react"}
+        decision = classify_intent(state["query"])
+        return {"pattern": "plan_and_solve" if decision.intent == "structural" else "react"}
 
 
 def make_plan(state: AgentState) -> dict:
@@ -178,6 +178,12 @@ def build_agent_graph(
             if target is not None:
                 visited.add(target)
                 history.add(f"{action}:{target}")
+            advance_plan = 1
+            if plan and action != "semantic_search":
+                pending_seed = any(
+                    f"{action}:{node_id}" not in history for node_id in state["seed_ids"]
+                )
+                advance_plan = 0 if pending_seed else 1
             existing = {node.node_id for node in state["candidates"]}
             novel = [node for node in results if node.node_id not in existing and node.node_id not in visited]
             candidates = [*state["candidates"], *novel]
@@ -197,7 +203,7 @@ def build_agent_graph(
                 "token_count": state["token_count"] + count_tokens(messages),
                 "new_above_threshold": above,
                 "last_action": action,
-                "plan_index": state["plan_index"] + 1,
+                "plan_index": state["plan_index"] + advance_plan,
             }
 
     def stop_node(state: AgentState) -> dict:
