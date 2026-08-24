@@ -110,3 +110,34 @@ Uno span per nodo del grafo attraversato, un evento per ciascuna decisione di st
    installate, senza stub. I test testcontainers/retrieval end-to-end non sono
    eseguibili nell'ambiente di verifica privo del daemon Docker; le checkbox di
    accettazione restano pertanto non marcate come verificate.
+
+7. **Correzione post-review dello skeleton iniziale.** Il primo commit
+   terminava il grafo subito dopo classificazione/piano. È stato sostituito da
+   un loop LangGraph eseguibile `classify_pattern → make_plan (condizionale) →
+   react_step → check_stop → react_step|END`: il piano viene consumato tramite
+   `plan_index`, i tool sono chiamati dal `RetrievalToolRuntime`, la
+   deduplicazione avviene prima della RPC, e una frontiera LIFO conserva rami
+   alternativi per il backtrack. Test unitari dedicati verificano consumo del
+   piano, selezione ReAct, dedup preventiva, backtrack, budget, stabilizzazione,
+   payload LLM senza `visited`, propagazione dell'indisponibilità LLM e
+   span/eventi OTel in-memory. La regressione CLI/infrastrutturale resta
+   soggetta al limite Docker dichiarato al punto 6.
+
+8. **Correzioni della review sulla PR #56 e conflitti con `main`.** Integrato
+   `origin/main` preservando la SPEC e i contratti già confluiti con PR #55.
+   I conflitti add/add sui tre moduli agentici sono stati risolti mantenendo il
+   loop completo del branch e non lo skeleton di `main`. I quattro rilievi
+   inline sono coperti così: `eci ask` passa ora da `run_agent`; ogni fase del
+   piano conserva i seed originali invece di consumare una frontiera DFS
+   condivisa; `run_agent` imposta `recursion_limit = 2 * max_steps + 10`; il
+   piano non invoca più incondizionatamente `read_source`, che resta un tool
+   esplicito con errore tipizzato finché `GetNode` non supporta hydration.
+
+9. **Correzione della regressione CI SPEC-018 scenario 5.** Il primo wiring di
+   `run_ask` invocava il reasoner subito dopo il seed search: con vLLM
+   irraggiungibile l'eccezione conteneva soltanto il target, non anche i suoi
+   chiamanti già richiesti dal contratto SPEC-018. Per i piani strutturati il
+   reasoning è ora differito all'ultima fase deterministica di retrieval; un
+   fallimento LLM conserva quindi tutte le fonti (`Validate` e `Process`) senza
+   eseguire ulteriori tool dopo il fallimento. Un test unitario riproduce
+   esattamente la regressione e verifica le fonti nell'errore tipizzato.

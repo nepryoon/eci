@@ -139,3 +139,57 @@ AGENT_TOOLS = [
 # Agent is nevertheless the authoritative, runtime-validated tool registry;
 # LangGraph owns deterministic routing and invokes the same functions.
 TOOL_AGENT = Agent(deps_type=Deps, tools=AGENT_TOOLS, defer_model_check=True)
+
+
+class RetrievalToolRuntime:
+    """Synchronous LangGraph adapter over the same typed retrieval contracts."""
+
+    def __init__(self, deps: Deps) -> None:
+        self.deps = deps
+        self.raw_nodes: dict[str, object] = {}
+
+    def execute(self, action: str, query: str, node_id: str | None) -> list[NodeResult]:
+        if action == "semantic_search":
+            values = retrieval_client.hybrid_search(
+                self.deps.retrieval_addr, query, self.deps.security_context
+            )
+        elif action in {"get_callers", "get_callees", "expand_dependencies"}:
+            if node_id is None:
+                return []
+            direction = (
+                retrieval_pb2.TRAVERSAL_DIRECTION_REVERSE
+                if action == "get_callers"
+                else retrieval_pb2.TRAVERSAL_DIRECTION_FORWARD
+            )
+            edges = (
+                [retrieval_pb2.EDGE_TYPE_CALLS]
+                if action != "expand_dependencies"
+                else [
+                    retrieval_pb2.EDGE_TYPE_IMPORTS,
+                    retrieval_pb2.EDGE_TYPE_DEPENDS_ON,
+                    retrieval_pb2.EDGE_TYPE_EXTENDS,
+                    retrieval_pb2.EDGE_TYPE_IMPLEMENTS,
+                ]
+            )
+            values = retrieval_client.expand_neighbors(
+                self.deps.retrieval_addr,
+                self.deps.security_context,
+                node_id,
+                edges,
+                direction,
+                1,
+            )
+        elif action == "read_source":
+            if node_id is None:
+                return []
+            value = retrieval_client.get_node(
+                self.deps.retrieval_addr, self.deps.security_context, node_id, True
+            )
+            if not value.source_text:
+                raise SourceNotAvailable(node_id)
+            values = [value]
+        else:
+            raise ValueError(f"tool non consentito: {action}")
+        for value in values:
+            self.raw_nodes[value.node_id] = value
+        return [_node(value) for value in values]

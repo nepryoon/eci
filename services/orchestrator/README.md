@@ -31,6 +31,13 @@ Config via env (`eci_core.config.env_or_default`): `ORCHESTRATOR_RETRIEVAL_ADDR`
 
 ## Test
 
+Il core T5.1 espone `orchestrator.graph.run_agent`: costruisce ed esegue
+realmente il loop LangGraph bounded. In produzione va passato un
+`RetrievalToolRuntime(Deps(...))`; il parametro opzionale `reasoner` riceve il
+payload effettivo di ogni thought e può essere collegato a `chat_completion`.
+`visited` resta nello stato del grafo e non è accettato dalla funzione che
+costruisce il prompt.
+
 Test di integrazione: avviano per davvero un Neo4j via testcontainers,
 un `retrieval-engine` reale (sottoprocesso Go, `go run .` — richiede
 il toolchain Go sul PATH) e un `vllm-fake` reale (sottoprocesso
