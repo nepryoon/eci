@@ -1,11 +1,13 @@
 import asyncio
 
 import pytest
+from eci_core.retrieval.v1 import retrieval_pb2
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic_ai import Tool
 
+from orchestrator.ask import run_ask
 from orchestrator.graph import (
     AgentConfig,
     build_agent_graph,
@@ -38,10 +40,21 @@ def node(node_id, score=1.0):
 
 
 def test_plan_is_created_and_consumed_before_expansion():
-    runtime = RecordingRuntime([[node("target")], [node("dependency")], []])
+    runtime = RecordingRuntime([[node("target")], [node("dependency")], [node("caller")]])
     state = run_agent("impatto di Validate", runtime, AgentConfig(max_steps=5))
-    assert runtime.calls[:2] == [("semantic_search", None), ("expand_dependencies", "target")]
-    assert state["plan_index"] >= 2
+    assert runtime.calls == [
+        ("semantic_search", None),
+        ("expand_dependencies", "target"),
+        ("get_callers", "target"),
+    ]
+    assert state["stop_reason"] == "plan_completed"
+
+
+def test_empty_dependency_stage_preserves_seed_for_callers():
+    runtime = RecordingRuntime([[node("validate")], [], [node("process")]])
+    state = run_agent("chi chiama Validate", runtime, AgentConfig(max_steps=5))
+    assert runtime.calls[-1] == ("get_callers", "validate")
+    assert {item.node_id for item in state["candidates"]} == {"validate", "process"}
 
 
 def test_react_selects_search_then_callees():
@@ -101,7 +114,7 @@ def test_token_measurement_and_visited_not_in_prompt():
 
 def test_reasoner_receives_real_payload_without_visited_ids():
     payloads = []
-    runtime = RecordingRuntime([[node("private-node-id-123")], []])
+    runtime = RecordingRuntime([[node("private-node-id-123")], [node("next-node")]])
     run_agent("explain checkout", runtime, AgentConfig(max_steps=2), lambda messages: payloads.append(messages))
     assert len(payloads) == 2
     assert "private-node-id-123" not in str(payloads[1])
@@ -115,7 +128,45 @@ def test_reasoner_failure_stops_before_tool_call():
 
     with pytest.raises(ConnectionError, match="unreachable"):
         run_agent("explain checkout", runtime, reasoner=unavailable)
-    assert runtime.calls == []
+    # Seed retrieval succeeds first so SPEC-018 can still report sources; no
+    # subsequent traversal tool is called after reasoning fails.
+    assert runtime.calls == [("semantic_search", None)]
+
+
+def test_default_step_budget_does_not_hit_langgraph_recursion_limit():
+    runtime = RecordingRuntime([[node("seed")]] + [[node(f"n{i}")] for i in range(20)])
+    state = run_agent("capisci x", runtime)
+    assert state["stop_reason"] == "step_budget_exhausted"
+    assert state["step_count"] == 15
+
+
+def test_run_ask_routes_through_graph(monkeypatch):
+    validate = retrieval_pb2.RetrievedNode(node_id="validate", name="Validate")
+    process = retrieval_pb2.RetrievedNode(node_id="process", name="Process")
+
+    class Runtime:
+        instance = None
+
+        def __init__(self, _deps):
+            Runtime.instance = self
+            self.calls = []
+            self.raw_nodes = {}
+
+        def execute(self, action, _query, node_id):
+            self.calls.append((action, node_id))
+            values = {
+                "semantic_search": [validate],
+                "expand_dependencies": [],
+                "get_callers": [process],
+            }[action]
+            self.raw_nodes.update((value.node_id, value) for value in values)
+            return [node(value.node_id) for value in values]
+
+    monkeypatch.setattr("orchestrator.ask.RetrievalToolRuntime", Runtime)
+    monkeypatch.setattr("orchestrator.ask.chat_completion", lambda _url, messages: str(messages))
+    result = run_ask("chi chiama Validate", "unused", "http://fake")
+    assert Runtime.instance.calls[-1] == ("get_callers", "validate")
+    assert [value.node_id for value in result.nodes] == ["validate", "process"]
 
 
 def test_each_langgraph_node_emits_span_and_stop_event(monkeypatch):

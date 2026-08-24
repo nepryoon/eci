@@ -17,6 +17,8 @@ class AgentState(TypedDict, total=False):
     plan_index: int
     visited: set[str]
     frontier: list[str]
+    seed_ids: list[str]
+    tool_history: set[str]
     candidates: list[NodeResult]
     step_count: int
     token_count: int
@@ -31,7 +33,7 @@ class ToolRuntime(Protocol):
     def execute(self, action: str, query: str, node_id: str | None) -> list[NodeResult]: ...
 
 
-PLAN = ["semantic_search", "expand_dependencies", "get_callers", "read_source"]
+PLAN = ["semantic_search", "expand_dependencies", "get_callers"]
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,8 @@ def initial_state(query: str) -> AgentState:
         "plan_index": 0,
         "visited": set(),
         "frontier": [],
+        "seed_ids": [],
+        "tool_history": set(),
         "candidates": [],
         "step_count": 0,
         "token_count": 0,
@@ -83,6 +87,9 @@ def check_stop(state: AgentState, max_steps: int, max_tokens: int) -> str | None
         return "step_budget_exhausted"
     if state["token_count"] >= max_tokens:
         return "token_budget_exhausted"
+    plan = state.get("plan")
+    if plan and state["plan_index"] >= len(plan):
+        return "plan_completed"
     # Stabilization is meaningful only after an expansion, not after seed search.
     if state["step_count"] > 1 and state["new_above_threshold"] == 0 and not state["frontier"]:
         return "blast_radius_stabilized"
@@ -118,6 +125,15 @@ def _unvisited_frontier(state: AgentState) -> tuple[str | None, list[str]]:
     return None, frontier
 
 
+def _planned_target(state: AgentState, action: str) -> str | None:
+    """Planned stages operate on the original seed, not a shared DFS pop."""
+    history = state["tool_history"]
+    return next(
+        (node_id for node_id in state["seed_ids"] if f"{action}:{node_id}" not in history),
+        None,
+    )
+
+
 def build_agent_graph(
     runtime: ToolRuntime,
     config: AgentConfig = DEFAULT_AGENT_CONFIG,
@@ -129,14 +145,13 @@ def build_agent_graph(
         with _span("react_step"):
             action = _next_action(state)
             messages = reasoning_messages(state["query"], action)
-            if reasoner is not None:
-                # The fake cannot return tool_calls, but it is contacted for
-                # each thought. Failures propagate; reasoning is not fabricated.
-                reasoner(messages)
             target = None
             remaining = list(state["frontier"])
             if action != "semantic_search":
-                target, remaining = _unvisited_frontier(state)
+                if state.get("plan"):
+                    target = _planned_target(state, action)
+                else:
+                    target, remaining = _unvisited_frontier(state)
                 if target is None:
                     # A dead end backtracks through the saved frontier. If no
                     # alternative exists the stop node observes stabilization.
@@ -150,9 +165,15 @@ def build_agent_graph(
 
             # Deduplication happens before the downstream call.
             results = runtime.execute(action, state["query"], target)
+            if reasoner is not None and results:
+                # No-result behavior remains compatible with SPEC-018: do not
+                # call the LLM with an empty context. Failures still propagate.
+                reasoner(messages)
             visited = set(state["visited"])
+            history = set(state["tool_history"])
             if target is not None:
                 visited.add(target)
+                history.add(f"{action}:{target}")
             existing = {node.node_id for node in state["candidates"]}
             novel = [node for node in results if node.node_id not in existing and node.node_id not in visited]
             candidates = [*state["candidates"], *novel]
@@ -160,7 +181,13 @@ def build_agent_graph(
             above = sum(node.impact_score >= config.impact_threshold for node in novel)
             return {
                 "visited": visited,
+                "tool_history": history,
                 "frontier": remaining,
+                "seed_ids": (
+                    [node.node_id for node in novel]
+                    if action == "semantic_search"
+                    else state["seed_ids"]
+                ),
                 "candidates": candidates,
                 "step_count": state["step_count"] + 1,
                 "token_count": state["token_count"] + count_tokens(messages),
@@ -201,7 +228,11 @@ def run_agent(
     config: AgentConfig = DEFAULT_AGENT_CONFIG,
     reasoner: Callable[[list[dict]], str] | None = None,
 ) -> AgentState:
-    return build_agent_graph(runtime, config, reasoner).invoke(initial_state(query))
+    # Two graph nodes execute per agent step, plus classify/plan overhead.
+    recursion_limit = config.max_steps * 2 + 10
+    return build_agent_graph(runtime, config, reasoner).invoke(
+        initial_state(query), {"recursion_limit": recursion_limit}
+    )
 
 
 def _span(name: str):

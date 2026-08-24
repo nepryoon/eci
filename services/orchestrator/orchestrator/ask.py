@@ -9,14 +9,11 @@ from dataclasses import dataclass
 import httpx
 
 from orchestrator.errors import LLMUnavailableError
+from orchestrator.graph import run_agent
 from orchestrator.llm_client import chat_completion
 from orchestrator.prompt import build_messages
-from orchestrator.retrieval_client import (
-    build_security_context,
-    find_callers,
-    hybrid_search,
-)
-from orchestrator.who_calls import is_who_calls_query
+from orchestrator.retrieval_client import build_security_context
+from orchestrator.tools import Deps, RetrievalToolRuntime
 
 
 @dataclass
@@ -38,16 +35,20 @@ def run_ask(query_text: str, retrieval_addr: str, vllm_url: str, tracer_provider
 
     with span_cm:
         security_context = build_security_context()
-        nodes = hybrid_search(retrieval_addr, query_text, security_context, tracer_provider=tracer_provider)
-
-        if is_who_calls_query(query_text):
-            # SPEC-018 §2: HybridSearch da sola non può rispondere a una
-            # domanda sui chiamanti (full-text solo sul nome) — per
-            # ciascun nodo trovato, aggiungi anche chi lo chiama
-            # (ExpandNeighbors REVERSE su CALLS), deduplicato per
-            # node_id, nell'insieme usato sia per il prompt sia per
-            # "Fonti".
-            nodes = _merge_with_callers(retrieval_addr, security_context, nodes, tracer_provider)
+        runtime = RetrievalToolRuntime(Deps(retrieval_addr, security_context))
+        try:
+            state = run_agent(
+                query_text,
+                runtime,
+                reasoner=lambda messages: chat_completion(vllm_url, messages),
+            )
+        except httpx.HTTPError as e:
+            raise LLMUnavailableError(vllm_url, e, sources=list(runtime.raw_nodes.values())) from e
+        nodes = [
+            runtime.raw_nodes[candidate.node_id]
+            for candidate in state["candidates"]
+            if candidate.node_id in runtime.raw_nodes
+        ]
 
         if not nodes:
             return AskResult(query_text=query_text, nodes=[], answer=None)
@@ -61,17 +62,6 @@ def run_ask(query_text: str, retrieval_addr: str, vllm_url: str, tracer_provider
             raise LLMUnavailableError(vllm_url, e, sources=nodes) from e
 
         return AskResult(query_text=query_text, nodes=nodes, answer=answer)
-
-
-def _merge_with_callers(retrieval_addr, security_context, nodes, tracer_provider) -> list:
-    merged = list(nodes)
-    seen_ids = {n.node_id for n in nodes}
-    for n in nodes:
-        for caller in find_callers(retrieval_addr, security_context, n.node_id, tracer_provider=tracer_provider):
-            if caller.node_id not in seen_ids:
-                seen_ids.add(caller.node_id)
-                merged.append(caller)
-    return merged
 
 
 class _noop_cm:

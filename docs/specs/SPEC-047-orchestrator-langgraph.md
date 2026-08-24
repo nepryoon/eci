@@ -122,3 +122,13 @@ Uno span per nodo del grafo attraversato, un evento per ciascuna decisione di st
    payload LLM senza `visited`, propagazione dell'indisponibilità LLM e
    span/eventi OTel in-memory. La regressione CLI/infrastrutturale resta
    soggetta al limite Docker dichiarato al punto 6.
+
+8. **Correzioni della review sulla PR #56 e conflitti con `main`.** Integrato
+   `origin/main` preservando la SPEC e i contratti già confluiti con PR #55.
+   I conflitti add/add sui tre moduli agentici sono stati risolti mantenendo il
+   loop completo del branch e non lo skeleton di `main`. I quattro rilievi
+   inline sono coperti così: `eci ask` passa ora da `run_agent`; ogni fase del
+   piano conserva i seed originali invece di consumare una frontiera DFS
+   condivisa; `run_agent` imposta `recursion_limit = 2 * max_steps + 10`; il
+   piano non invoca più incondizionatamente `read_source`, che resta un tool
+   esplicito con errore tipizzato finché `GetNode` non supporta hydration.

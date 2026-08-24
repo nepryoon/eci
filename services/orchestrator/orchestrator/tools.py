@@ -146,6 +146,7 @@ class RetrievalToolRuntime:
 
     def __init__(self, deps: Deps) -> None:
         self.deps = deps
+        self.raw_nodes: dict[str, object] = {}
 
     def execute(self, action: str, query: str, node_id: str | None) -> list[NodeResult]:
         if action == "semantic_search":
@@ -189,4 +190,6 @@ class RetrievalToolRuntime:
             values = [value]
         else:
             raise ValueError(f"tool non consentito: {action}")
+        for value in values:
+            self.raw_nodes[value.node_id] = value
         return [_node(value) for value in values]
