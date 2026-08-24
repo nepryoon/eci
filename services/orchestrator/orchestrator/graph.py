@@ -165,9 +165,13 @@ def build_agent_graph(
 
             # Deduplication happens before the downstream call.
             results = runtime.execute(action, state["query"], target)
-            if reasoner is not None and results:
+            plan = state.get("plan")
+            should_reason = not plan or action == plan[-1]
+            if reasoner is not None and results and should_reason:
                 # No-result behavior remains compatible with SPEC-018: do not
-                # call the LLM with an empty context. Failures still propagate.
+                # call the LLM with an empty context. Planned retrieval is
+                # completed before reasoning so an unavailable LLM can still
+                # report every source discovered by the deterministic plan.
                 reasoner(messages)
             visited = set(state["visited"])
             history = set(state["tool_history"])

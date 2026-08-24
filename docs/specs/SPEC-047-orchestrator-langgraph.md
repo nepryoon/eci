@@ -132,3 +132,12 @@ Uno span per nodo del grafo attraversato, un evento per ciascuna decisione di st
    condivisa; `run_agent` imposta `recursion_limit = 2 * max_steps + 10`; il
    piano non invoca più incondizionatamente `read_source`, che resta un tool
    esplicito con errore tipizzato finché `GetNode` non supporta hydration.
+
+9. **Correzione della regressione CI SPEC-018 scenario 5.** Il primo wiring di
+   `run_ask` invocava il reasoner subito dopo il seed search: con vLLM
+   irraggiungibile l'eccezione conteneva soltanto il target, non anche i suoi
+   chiamanti già richiesti dal contratto SPEC-018. Per i piani strutturati il
+   reasoning è ora differito all'ultima fase deterministica di retrieval; un
+   fallimento LLM conserva quindi tutte le fonti (`Validate` e `Process`) senza
+   eseguire ulteriori tool dopo il fallimento. Un test unitario riproduce
+   esattamente la regressione e verifica le fonti nell'errore tipizzato.

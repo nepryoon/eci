@@ -1,5 +1,6 @@
 import asyncio
 
+import httpx
 import pytest
 from eci_core.retrieval.v1 import retrieval_pb2
 from opentelemetry.sdk.trace import TracerProvider
@@ -8,6 +9,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from pydantic_ai import Tool
 
 from orchestrator.ask import run_ask
+from orchestrator.errors import LLMUnavailableError
 from orchestrator.graph import (
     AgentConfig,
     build_agent_graph,
@@ -167,6 +169,34 @@ def test_run_ask_routes_through_graph(monkeypatch):
     result = run_ask("chi chiama Validate", "unused", "http://fake")
     assert Runtime.instance.calls[-1] == ("get_callers", "validate")
     assert [value.node_id for value in result.nodes] == ["validate", "process"]
+
+
+def test_structured_llm_failure_keeps_callers_in_sources(monkeypatch):
+    validate = retrieval_pb2.RetrievedNode(node_id="validate", name="Validate")
+    process = retrieval_pb2.RetrievedNode(node_id="process", name="Process")
+
+    class Runtime:
+        def __init__(self, _deps):
+            self.raw_nodes = {}
+
+        def execute(self, action, _query, _node_id):
+            values = {
+                "semantic_search": [validate],
+                "expand_dependencies": [],
+                "get_callers": [process],
+            }[action]
+            self.raw_nodes.update((value.node_id, value) for value in values)
+            return [node(value.node_id) for value in values]
+
+    monkeypatch.setattr("orchestrator.ask.RetrievalToolRuntime", Runtime)
+
+    def unavailable(_url, _messages):
+        raise httpx.ConnectError("unreachable")
+
+    monkeypatch.setattr("orchestrator.ask.chat_completion", unavailable)
+    with pytest.raises(LLMUnavailableError) as excinfo:
+        run_ask("chi chiama Validate", "unused", "http://fake")
+    assert {value.node_id for value in excinfo.value.sources} == {"validate", "process"}
 
 
 def test_each_langgraph_node_emits_span_and_stop_event(monkeypatch):
