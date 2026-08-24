@@ -59,6 +59,27 @@ def test_empty_dependency_stage_preserves_seed_for_callers():
     assert {item.node_id for item in state["candidates"]} == {"validate", "process"}
 
 
+def test_plan_processes_every_seed_before_advancing_stage():
+    runtime = RecordingRuntime(
+        [
+            [node("seed-a"), node("seed-b")],
+            [node("dep-a")],
+            [node("dep-b")],
+            [node("caller-a")],
+            [node("caller-b")],
+        ]
+    )
+    state = run_agent("impatto di Validate", runtime, AgentConfig(max_steps=8))
+    assert runtime.calls == [
+        ("semantic_search", None),
+        ("expand_dependencies", "seed-a"),
+        ("expand_dependencies", "seed-b"),
+        ("get_callers", "seed-a"),
+        ("get_callers", "seed-b"),
+    ]
+    assert state["stop_reason"] == "plan_completed"
+
+
 def test_react_selects_search_then_callees():
     runtime = RecordingRuntime([[node("target")], []])
     run_agent("capisci checkout", runtime, AgentConfig(max_steps=4))

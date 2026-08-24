@@ -59,3 +59,11 @@ Span `orchestrator.intent.classify` con attributi `intent`, `graph_weight`, `vec
 2. Il classificatore è lessicale e deterministico, scelta ammessa dall'ADD
    (componente leggero) e necessaria finché il fake non supporta output
    strutturato. T5.3 potrà sostituire l'implementazione dietro la stessa firma.
+3. Integrando `origin/main` sono emersi conflitti in `ask.py`, `graph.py` e
+   `tools.py`, perché SPEC-047 era stata nel frattempo unita. È stata preservata
+   integralmente la versione verificata di `main`, applicando soltanto la
+   propagazione additiva dell'intento. La review della PR #57 ha inoltre
+   rilevato che il piano avanzava dopo il primo seed: `plan_index` ora resta
+   sulla stessa fase finché ogni `seed_id` non ha la corrispondente voce in
+   `tool_history`; un test con due seed verifica entrambe le espansioni e
+   entrambe le ricerche dei chiamanti.
