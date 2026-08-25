@@ -30,11 +30,13 @@ Server HTTP reale in-process; dataset temporaneo; successi, errori, atomicità, 
 Summary JSON con pass rate, fact recall, error count, p50/p95 latency; nessun source nei log.
 
 ## 9. Criteri di accettazione
-- [ ] Scenari 1-8 verdi (copertura completa CLI/log ancora pendente).
+- [ ] Scenari 1-8 verdi.
 - [ ] `task build`, `task lint`, `task test`, `task guard` verdi.
 - [ ] Run fake etichettato non-reale; criteri GPU T5.6 ancora aperti.
 
 ## 10. Deviazioni
 Il task T5.6 è diviso in harness software e run GPU differito per minimizzare il costo di provisioning; questa SPEC non costituisce verifica del modello reale.
-Il fact matcher iniziale è deterministico e letterale (case-insensitive): misura la
-presenza dei fatti golden, non equivalenza semantica né qualità stilistica.
+Il runner fornisce al modello un contesto deterministico del fixture `sample-repo`
+e richiede output JSON strutturato (`facts` + `citations`) per misurare anche i
+casi negativi senza LLM judge; non sostituisce ancora la valutazione E2E
+orchestrator+retrieval del task T5.6 completo.

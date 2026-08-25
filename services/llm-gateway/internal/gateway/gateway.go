@@ -138,13 +138,6 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 500 {
-		b.failure(h.cfg.FailureThreshold)
-	} else {
-		// A completed half-open probe must always release the probe slot.
-		// Upstream 4xx responses are client failures, not breaker failures.
-		b.success()
-	}
 	for k, v := range resp.Header {
 		for _, x := range v {
 			w.Header().Add(k, x)
@@ -154,6 +147,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 32*1024)
+	streamErr := io.EOF
 	for {
 		n, e := resp.Body.Read(buf)
 		if n > 0 {
@@ -163,9 +157,17 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if e != nil {
+			streamErr = e
 			break
 		}
 	}
+	if resp.StatusCode >= 500 || !errors.Is(streamErr, io.EOF) {
+		b.failure(h.cfg.FailureThreshold)
+		return
+	}
+	// A completed 2xx/4xx response closes any half-open probe; client
+	// errors do not indicate an unavailable upstream.
+	b.success()
 }
 func (b *breaker) allow(open time.Duration) bool {
 	b.mu.Lock()

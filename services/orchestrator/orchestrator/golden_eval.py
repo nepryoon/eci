@@ -7,10 +7,11 @@ import math
 import os
 import statistics
 import time
+from functools import lru_cache
 from pathlib import Path
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 
 class GoldenEntry(BaseModel):
@@ -28,22 +29,91 @@ class EvalRecord(BaseModel):
     answer: str = ""
     expected_facts: tuple[str, ...]
     matched_facts: tuple[str, ...] = ()
+    unexpected_facts: tuple[str, ...] = ()
+    citations: tuple[str, ...] = ()
+    context_files: tuple[str, ...] = ()
     latency_ms: float
     prompt_tokens: int = 0
     completion_tokens: int = 0
     error: str | None = None
+    passed: bool = False
 
 
-def _facts(entry: GoldenEntry) -> tuple[str, ...]:
-    return tuple(
-        value
-        for values in entry.expected_facts.values()
-        for value in ([values] if isinstance(values, str) else values)
-    )
+class ModelReply(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    facts: dict[str, list[str] | str]
+    citations: tuple[str, ...] = ()
+
+
+def _facts(facts: dict[str, list[str] | str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for category, values in facts.items():
+        if isinstance(values, str):
+            normalized.append(f"{category}={values}")
+            continue
+        if not values:
+            normalized.append(f"{category}=__EMPTY__")
+            continue
+        normalized.extend(f"{category}={value}" for value in values)
+    return tuple(normalized)
 
 
 def _is_fake(model: str) -> bool:
     return "fake" in model.casefold()
+
+
+def _strip_code_fences(answer: str) -> str:
+    stripped = answer.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+@lru_cache(maxsize=1)
+def _sample_repo_context() -> tuple[str, tuple[str, ...]]:
+    repo_root = Path(__file__).resolve().parents[3]
+    fixture_dir = repo_root / "tests" / "fixtures" / "sample-repo"
+    source_files = sorted(path for path in fixture_dir.glob("*.go") if path.is_file())
+    if not source_files:
+        raise FileNotFoundError(f"fixture repo mancante o vuoto: {fixture_dir}")
+    context_files = tuple(path.relative_to(repo_root).as_posix() for path in source_files)
+    rendered = []
+    for path, rel in zip(source_files, context_files, strict=True):
+        rendered.append(f"File: {rel}\n```go\n{path.read_text(encoding='utf-8')}\n```")
+    return "\n\n".join(rendered), context_files
+
+
+def _build_messages(entry: GoldenEntry, repository_context: str) -> list[dict[str, str]]:
+    fact_shape = {
+        key: ([] if isinstance(value, list) else "")
+        for key, value in entry.expected_facts.items()
+    }
+    response_shape = {"facts": fact_shape, "citations": ["tests/fixtures/sample-repo/<file>.go"]}
+    return [
+        {
+            "role": "system",
+            "content": (
+                "Rispondi usando solo il contesto del repository fornito. "
+                "Restituisci solo JSON valido, senza markdown o testo extra, "
+                f"con questa forma esatta: {json.dumps(response_shape, ensure_ascii=False)}. "
+                "Per una categoria lista senza risultati usa []."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Question: {entry.query}\n"
+                f"Scope note: {entry.scope_note}\n"
+                "Repository context:\n"
+                f"{repository_context}"
+            ),
+        },
+    ]
 
 
 def run_golden_eval(
@@ -59,6 +129,7 @@ def run_golden_eval(
     entries = TypeAdapter(list[GoldenEntry]).validate_json(dataset.read_bytes())
     if len({entry.id for entry in entries}) != len(entries):
         raise ValueError("duplicate golden id")
+    repository_context, context_files = _sample_repo_context()
     is_real = not _is_fake(model)
     if require_real and not is_real:
         raise ValueError("--require-real rejects fake models")
@@ -69,7 +140,7 @@ def run_golden_eval(
     records: list[EvalRecord] = []
     with httpx.Client(timeout=timeout) as client:
         for entry in entries:
-            facts = _facts(entry)
+            facts = _facts(entry.expected_facts)
             started = time.perf_counter()
             try:
                 response = client.post(
@@ -77,14 +148,17 @@ def run_golden_eval(
                     json={
                         "model": model,
                         "temperature": 0,
-                        "messages": [{"role": "user", "content": entry.query}],
+                        "messages": _build_messages(entry, repository_context),
                     },
                 )
                 response.raise_for_status()
                 payload = response.json()
                 answer = payload["choices"][0]["message"]["content"]
                 usage = payload.get("usage", {})
-                matched = tuple(fact for fact in facts if fact.casefold() in answer.casefold())
+                reply = ModelReply.model_validate_json(_strip_code_fences(answer))
+                actual_facts = _facts(reply.facts)
+                matched = tuple(fact for fact in facts if fact in actual_facts)
+                unexpected = tuple(fact for fact in actual_facts if fact not in facts)
                 record = EvalRecord(
                     query_id=entry.id,
                     model=model,
@@ -92,16 +166,21 @@ def run_golden_eval(
                     answer=answer,
                     expected_facts=facts,
                     matched_facts=matched,
+                    unexpected_facts=unexpected,
+                    citations=reply.citations,
+                    context_files=context_files,
                     latency_ms=(time.perf_counter() - started) * 1000,
                     prompt_tokens=usage.get("prompt_tokens", 0),
                     completion_tokens=usage.get("completion_tokens", 0),
+                    passed=len(matched) == len(facts) and not unexpected,
                 )
-            except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            except (httpx.HTTPError, ValidationError, ValueError, KeyError, TypeError) as exc:
                 record = EvalRecord(
                     query_id=entry.id,
                     model=model,
                     is_real=is_real,
                     expected_facts=facts,
+                    context_files=context_files,
                     latency_ms=(time.perf_counter() - started) * 1000,
                     error=type(exc).__name__,
                 )
@@ -122,12 +201,13 @@ def run_golden_eval(
     matched = sum(len(record.matched_facts) for record in records)
     latencies = sorted(record.latency_ms for record in records)
     successful = sum(record.error is None for record in records)
+    passed = sum(record.passed for record in records)
     summary: dict[str, float | int | bool] = {
         "is_real": is_real,
         "query_count": len(records),
         "success_count": successful,
         "error_count": len(records) - successful,
-        "pass_rate": successful / len(records) if records else 0.0,
+        "pass_rate": passed / len(records) if records else 0.0,
         "fact_recall": matched / expected if expected else 1.0,
         "latency_p50_ms": statistics.median(latencies) if latencies else 0.0,
         "latency_p95_ms": latencies[math.ceil(len(latencies) * 0.95) - 1] if latencies else 0.0,

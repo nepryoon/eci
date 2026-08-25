@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,6 +13,37 @@ import (
 	"testing"
 	"time"
 )
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type flakyReadCloser struct {
+	chunks [][]byte
+	err    error
+}
+
+func (r *flakyReadCloser) Read(p []byte) (int, error) {
+	if len(r.chunks) > 0 {
+		chunk := r.chunks[0]
+		r.chunks = r.chunks[1:]
+		n := copy(p, chunk)
+		if n < len(chunk) {
+			r.chunks = append([][]byte{chunk[n:]}, r.chunks...)
+		}
+		return n, nil
+	}
+	if r.err != nil {
+		err := r.err
+		r.err = nil
+		return 0, err
+	}
+	return 0, io.EOF
+}
+
+func (r *flakyReadCloser) Close() error { return nil }
 
 func route(raw, model string) Route { u, _ := url.Parse(raw); return Route{Upstream: u, Model: model} }
 func request(h http.Handler, body string) *httptest.ResponseRecorder {
@@ -131,6 +163,30 @@ func TestFourXXHalfOpenProbeClosesCircuit(t *testing.T) {
 	status.Store(422)
 	if request(h, `{"model":"m"}`).Code != 422 || request(h, `{"model":"m"}`).Code != 422 {
 		t.Fatal("4xx half-open probe did not close circuit")
+	}
+}
+func TestMidStreamReadErrorOpensBreaker(t *testing.T) {
+	client := &http.Client{
+		Transport: roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body: &flakyReadCloser{
+					chunks: [][]byte{[]byte("data: one\n\n")},
+					err:    io.ErrUnexpectedEOF,
+				},
+			}, nil
+		}),
+	}
+	h, _ := NewHandler(
+		Config{DefaultRoute: route("http://example.invalid", "m"), Timeout: time.Second, FailureThreshold: 1, OpenDuration: time.Hour},
+		client,
+	)
+	if request(h, `{"model":"m","stream":true}`).Code != 200 {
+		t.Fatal("expected initial streaming response")
+	}
+	if request(h, `{"model":"m","stream":true}`).Code != 503 {
+		t.Fatal("mid-stream upstream error did not open breaker")
 	}
 }
 func TestTimeoutHealthAndLimit(t *testing.T) {
