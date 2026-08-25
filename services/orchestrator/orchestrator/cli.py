@@ -3,13 +3,16 @@
 `pip install -e .`, non solo un `python -m` da ricordare."""
 
 import argparse
+import json
 import sys
+from pathlib import Path
 
 from eci_core.config import env_or_default
 from eci_core.observability import init_tracing
 
 from orchestrator.ask import run_ask
 from orchestrator.errors import LLMUnavailableError, RetrievalUnavailableError
+from orchestrator.golden_eval import run_golden_eval
 
 DEFAULT_RETRIEVAL_ADDR = "localhost:50053"
 DEFAULT_VLLM_URL = "http://localhost:8001"
@@ -21,6 +24,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     ask_parser = subparsers.add_parser("ask", help='Interroga il grafo ed elabora una risposta con fonti')
     ask_parser.add_argument("query", nargs="?", default=None, help="Domanda in linguaggio naturale")
+
+    eval_parser = subparsers.add_parser("eval-golden", help="Esegue il golden dataset")
+    eval_parser.add_argument("--dataset", type=Path, required=True)
+    eval_parser.add_argument("--base-url", required=True)
+    eval_parser.add_argument("--model", required=True)
+    eval_parser.add_argument("--output", type=Path, required=True)
+    eval_parser.add_argument("--force", action="store_true")
+    eval_parser.add_argument("--require-real", action="store_true")
 
     return parser
 
@@ -50,9 +61,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    if args.command != "ask":
-        parser.error("comando sconosciuto")
-        return 2  # pragma: no cover — parser.error esce già col codice 2
+    if args.command == "eval-golden":
+        try:
+            summary = run_golden_eval(
+                args.dataset,
+                args.base_url,
+                args.model,
+                args.output,
+                force=args.force,
+                require_real=args.require_real,
+            )
+        except (OSError, ValueError) as exc:
+            print(f"errore: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(summary, sort_keys=True))
+        return 0
 
     if args.query is None:
         # Query CLI assente (SPEC-018 §4): errore d'uso esplicito via
