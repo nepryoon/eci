@@ -1,5 +1,5 @@
 # SPEC-050 — Verification deterministica dei claim (T5.4)
-Stato: implemented
+Stato: verified
 Task-tree: T5.4 · Servizio: services/verification · ADD: Modulo 2 §3.1-3.4, Modulo 3 §1.2
 Contratti: `contracts/proto/eci/retrieval/v1/retrieval.proto` (CodeNode, CodeRelation e Provenance; invariato)
 
@@ -53,8 +53,8 @@ Span `verification.verify` con attributi `verification.outcome`, `verification.a
 
 ## 9. Criteri di accettazione
 - [x] Scenari 1-8 verdi con Tree-sitter reale.
-- [ ] `task build`, `task lint`, `task test`, `task guard` verdi.
-- [ ] `git diff -- docs/add contracts` vuoto.
+- [x] `task build`, `task lint`, `task test`, `task guard` verdi.
+- [x] `git diff -- docs/add contracts` vuoto.
 
 ## 10. Deviazioni
 1. Questa SPEC espone un core Python in-process e un `EvidenceStore` tipizzato,

@@ -1,5 +1,5 @@
 # SPEC-047 — Orchestrator agentico: LangGraph + tool tipizzati (T5.1)
-Stato: implemented
+Stato: verified
 Task-tree: T5.1 (dip. T4.2, già chiuso) · Servizio: services/orchestrator (Python, estende T1.5/SPEC-018) · ADD: Modulo 2 §2.2
 
 ## 1. Obiettivo
@@ -67,10 +67,10 @@ Unitari per `classify_pattern`/i criteri di stop (nessuna infrastruttura reale n
 Uno span per nodo del grafo attraversato, un evento per ciascuna decisione di stop con la motivazione.
 
 ## 9. Criteri di accettazione
-- [ ] Scenari 1-8 verificati con evidenza diretta, in particolare lo scenario 8 (stato di visita mai nel prompt, verificato ispezionando il testo reale inviato all'LLM).
-- [ ] Edge case tabella §4 verificati esplicitamente.
-- [ ] Sintassi PydanticAI verificata contro la versione installata, non presunta.
-- [ ] Nessuna regressione sui test esistenti di T1.5 (CLI `eci ask` deve continuare a funzionare, anche se il suo core interno cambia).
+- [x] Scenari 1-8 verificati con evidenza diretta, in particolare lo scenario 8 (stato di visita mai nel prompt, verificato ispezionando il testo reale inviato all'LLM).
+- [x] Edge case tabella §4 verificati esplicitamente.
+- [x] Sintassi PydanticAI verificata contro la versione installata, non presunta.
+- [x] Nessuna regressione sui test esistenti di T1.5 (CLI `eci ask` deve continuare a funzionare, anche se il suo core interno cambia).
 
 ## 10. Deviazioni rispetto alla SPEC
 

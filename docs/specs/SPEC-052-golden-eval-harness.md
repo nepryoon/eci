@@ -1,5 +1,5 @@
 # SPEC-052 — Harness golden provider-neutral per vLLM reale (T5.6-prep)
-Stato: implemented
+Stato: verified
 Task-tree: preparazione T5.6 · Servizio: services/orchestrator · ADD: Modulo 4 §1.4-1.5
 Contratti: API OpenAI-compatible `/v1/chat/completions`; `contracts/` invariati
 
@@ -30,9 +30,9 @@ Server HTTP reale in-process; dataset temporaneo; successi, errori, atomicità, 
 Summary JSON con pass rate, fact recall, error count, p50/p95 latency; nessun source nei log.
 
 ## 9. Criteri di accettazione
-- [ ] Scenari 1-8 verdi.
-- [ ] `task build`, `task lint`, `task test`, `task guard` verdi.
-- [ ] Run fake etichettato non-reale; criteri GPU T5.6 ancora aperti.
+- [x] Scenari 1-8 verdi.
+- [x] `task build`, `task lint`, `task test`, `task guard` verdi.
+- [x] Run fake etichettato non-reale; criteri GPU T5.6 ancora aperti.
 
 ## 10. Deviazioni
 Il task T5.6 è diviso in harness software e run GPU differito per minimizzare il costo di provisioning; questa SPEC non costituisce verifica del modello reale.

@@ -1,5 +1,5 @@
 # SPEC-049 — LLM Gateway: routing, streaming, deadline e circuit breaker (T5.3)
-Stato: implemented
+Stato: verified
 Task-tree: T5.3 · Servizio: services/llm-gateway · ADD: Modulo 3 §1.1-1.2, Modulo 4 §1.5
 Contratti: API OpenAI-compatible `/v1/chat/completions` del `vllm-fake`; `contracts/` invariati
 
@@ -39,8 +39,8 @@ Header `X-ECI-Upstream-Model`; nessun prompt nei log. OTel HTTP completo demanda
 
 ## 9. Criteri di accettazione
 - [x] Scenari 1-8 verdi.
-- [ ] `task build`, `task lint`, `task test`, `task guard` verdi.
-- [ ] ADD/contratti invariati.
+- [x] `task build`, `task lint`, `task test`, `task guard` verdi.
+- [x] ADD/contratti invariati.
 
 ## 10. Deviazioni
 1. Il gateway espone HTTP OpenAI-compatible, non gRPC: non esiste un contratto
