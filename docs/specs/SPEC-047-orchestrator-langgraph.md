@@ -106,10 +106,16 @@ Uno span per nodo del grafo attraversato, un evento per ciascuna decisione di st
    `RunContext[Deps]` e `Agent(..., tools=...)` è stata verificata con la
    versione risolta 1.107.5. LangGraph risolto: 1.0.10.
 
-6. **Limite della verifica locale.** Gli unit test reali usano le dipendenze
-   installate, senza stub. I test testcontainers/retrieval end-to-end non sono
-   eseguibili nell'ambiente di verifica privo del daemon Docker; le checkbox di
-   accettazione restano pertanto non marcate come verificate.
+6. **Limite della verifica locale e prova HTTP mirata.** Gli unit test reali
+   usano le dipendenze installate, senza stub. I test
+   testcontainers/retrieval end-to-end non sono eseguibili nell'ambiente di
+   verifica privo del daemon Docker, ma la CI li esegue con successo. Lo
+   scenario 8 non dipende da Neo4j: un test dedicato avvia il vero processo
+   `vllm-fake`, attraversa due iterazioni del grafo e verifica la risposta eco
+   della seconda richiesta HTTP dopo che un ID privato è entrato in
+   `AgentState.visited`. Poiché il fake echeggia letteralmente il messaggio
+   utente ricevuto, l'assenza dell'ID dall'eco prova direttamente che lo stato
+   di visita non è stato serializzato nel prompt.
 
 7. **Correzione post-review dello skeleton iniziale.** Il primo commit
    terminava il grafo subito dopo classificazione/piano. È stato sostituito da

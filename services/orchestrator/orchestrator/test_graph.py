@@ -19,6 +19,7 @@ from orchestrator.graph import (
     reasoning_messages,
     run_agent,
 )
+from orchestrator.llm_client import chat_completion
 from orchestrator.tools import (
     AGENT_TOOLS,
     NodeResult,
@@ -180,6 +181,36 @@ def test_reasoner_receives_real_payload_without_visited_ids():
     run_agent("explain checkout", runtime, AgentConfig(max_steps=2), lambda messages: payloads.append(messages))
     assert len(payloads) == 2
     assert "private-node-id-123" not in str(payloads[1])
+
+
+def test_real_vllm_fake_echo_proves_visited_ids_are_absent_from_http_payload(vllm_fake_url):
+    replies = []
+    requests = []
+    private_node_id = "private-node-id-seen-before-second-thought"
+    runtime = RecordingRuntime([[node(private_node_id)], [node("next-node")]])
+
+    def reason_via_real_fake(messages):
+        requests.append(messages)
+        replies.append(chat_completion(vllm_fake_url, messages))
+
+    state = run_agent(
+        "explain checkout",
+        runtime,
+        AgentConfig(max_steps=2),
+        reason_via_real_fake,
+    )
+
+    assert private_node_id in state["visited"]
+    assert len(requests) == 2
+    assert len(replies) == 2
+    assert all(reply.startswith("[vllm-fake risposta deterministica]") for reply in replies)
+    assert requests[1] == reasoning_messages("explain checkout", "get_callees")
+    assert replies[1] == f"[vllm-fake risposta deterministica] {requests[1][0]['content']}"
+    # The fake echoes the exact last user message received over HTTP.  The
+    # second request is sent only after private_node_id enters AgentState.visited,
+    # so its absence from that echo is direct boundary evidence that visited
+    # state was not serialized into the LLM prompt.
+    assert private_node_id not in replies[1]
 
 
 def test_reasoner_failure_stops_before_tool_call():
