@@ -23,6 +23,7 @@ from orchestrator.tools import (
     AGENT_TOOLS,
     NodeResult,
     SummarizationNotYetAvailable,
+    _resolve_dependency_edges,
     summarize_subgraph,
 )
 
@@ -80,6 +81,44 @@ def test_plan_processes_every_seed_before_advancing_stage():
     assert state["stop_reason"] == "plan_completed"
 
 
+def test_planned_reasoning_runs_once_after_every_seed_finishes():
+    runtime = RecordingRuntime(
+        [
+            [node("seed-a"), node("seed-b")],
+            [],
+            [],
+            [node("caller-a")],
+            [node("caller-b")],
+        ]
+    )
+    payloads = []
+    run_agent(
+        "impatto di Validate",
+        runtime,
+        AgentConfig(max_steps=8),
+        lambda messages: payloads.append(messages),
+    )
+    assert len(payloads) == 1
+    assert runtime.calls[-2:] == [
+        ("get_callers", "seed-a"),
+        ("get_callers", "seed-b"),
+    ]
+
+
+def test_plan_caps_seed_budget_but_still_reaches_callers():
+    runtime = RecordingRuntime([[node(f"seed-{idx}") for idx in range(15)]] + [[] for _ in range(14)])
+    state = run_agent("impatto di Validate", runtime)
+    caller_calls = [call for call in runtime.calls if call[0] == "get_callers"]
+    assert len(caller_calls) == 7
+    assert caller_calls[0] == ("get_callers", "seed-0")
+    assert caller_calls[-1] == ("get_callers", "seed-6")
+    assert state["seed_ids"] == [f"seed-{idx}" for idx in range(7)]
+    assert state["stop_reason"] == "plan_completed"
+
+
+def test_invalid_dependency_edges_fail_closed():
+    with pytest.raises(ValueError, match="unsupported dependency edge types"):
+        _resolve_dependency_edges(["MISSPELLED"])
 def test_react_selects_search_then_callees():
     runtime = RecordingRuntime([[node("target")], []])
     run_agent("capisci checkout", runtime, AgentConfig(max_steps=4))

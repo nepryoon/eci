@@ -83,13 +83,13 @@ def initial_state(query: str) -> AgentState:
 
 
 def check_stop(state: AgentState, max_steps: int, max_tokens: int) -> str | None:
+    plan = state.get("plan")
+    if plan and state["plan_index"] >= len(plan):
+        return "plan_completed"
     if state["step_count"] >= max_steps:
         return "step_budget_exhausted"
     if state["token_count"] >= max_tokens:
         return "token_budget_exhausted"
-    plan = state.get("plan")
-    if plan and state["plan_index"] >= len(plan):
-        return "plan_completed"
     # Stabilization is meaningful only after an expansion, not after seed search.
     if state["step_count"] > 1 and state["new_above_threshold"] == 0 and not state["frontier"]:
         return "blast_radius_stabilized"
@@ -134,6 +134,23 @@ def _planned_target(state: AgentState, action: str) -> str | None:
     )
 
 
+def _budgeted_seed_ids(
+    state: AgentState,
+    plan: list[str],
+    completed_plan_steps: int,
+    discovered_ids: list[str],
+    max_steps: int,
+) -> list[str]:
+    remaining_plan_actions = len(plan) - completed_plan_steps
+    if remaining_plan_actions <= 0:
+        return discovered_ids
+    remaining_steps = max(max_steps - (state["step_count"] + 1), 0)
+    max_seed_count = remaining_steps // remaining_plan_actions
+    if max_seed_count <= 0:
+        return []
+    return discovered_ids[:max_seed_count]
+
+
 def build_agent_graph(
     runtime: ToolRuntime,
     config: AgentConfig = DEFAULT_AGENT_CONFIG,
@@ -166,13 +183,6 @@ def build_agent_graph(
             # Deduplication happens before the downstream call.
             results = runtime.execute(action, state["query"], target)
             plan = state.get("plan")
-            should_reason = not plan or action == plan[-1]
-            if reasoner is not None and results and should_reason:
-                # No-result behavior remains compatible with SPEC-018: do not
-                # call the LLM with an empty context. Planned retrieval is
-                # completed before reasoning so an unavailable LLM can still
-                # report every source discovered by the deterministic plan.
-                reasoner(messages)
             visited = set(state["visited"])
             history = set(state["tool_history"])
             if target is not None:
@@ -184,17 +194,36 @@ def build_agent_graph(
                     f"{action}:{node_id}" not in history for node_id in state["seed_ids"]
                 )
                 advance_plan = 0 if pending_seed else 1
+            should_reason = not plan or (action == plan[-1] and advance_plan == 1)
+            if reasoner is not None and results and should_reason:
+                # For a planned final stage, reason only after every original
+                # seed has completed that stage. This preserves all sources on
+                # failure and avoids discarded completions per seed.
+                reasoner(messages)
             existing = {node.node_id for node in state["candidates"]}
             novel = [node for node in results if node.node_id not in existing and node.node_id not in visited]
+            discovered_ids = [node.node_id for node in novel]
+            planned_seed_ids = discovered_ids
+            if action == "semantic_search" and plan:
+                planned_seed_ids = _budgeted_seed_ids(
+                    state,
+                    plan,
+                    state["plan_index"] + advance_plan,
+                    discovered_ids,
+                    config.max_steps,
+                )
             candidates = [*state["candidates"], *novel]
-            remaining.extend(node.node_id for node in novel if node.node_id not in visited)
+            if action == "semantic_search" and plan:
+                remaining.extend(planned_seed_ids)
+            else:
+                remaining.extend(discovered_ids)
             above = sum(node.impact_score >= config.impact_threshold for node in novel)
             return {
                 "visited": visited,
                 "tool_history": history,
                 "frontier": remaining,
                 "seed_ids": (
-                    [node.node_id for node in novel]
+                    planned_seed_ids
                     if action == "semantic_search"
                     else state["seed_ids"]
                 ),

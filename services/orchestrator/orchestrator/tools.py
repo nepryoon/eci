@@ -33,6 +33,24 @@ class Deps:
     query_intent: int = retrieval_pb2.QUERY_INTENT_UNSPECIFIED
 
 
+_ALLOWED_DEPENDENCY_EDGES = {
+    "IMPORTS": retrieval_pb2.EDGE_TYPE_IMPORTS,
+    "DEPENDS_ON": retrieval_pb2.EDGE_TYPE_DEPENDS_ON,
+    "EXTENDS": retrieval_pb2.EDGE_TYPE_EXTENDS,
+    "IMPLEMENTS": retrieval_pb2.EDGE_TYPE_IMPLEMENTS,
+}
+
+
+def _resolve_dependency_edges(edge_types: list[str]) -> list[int]:
+    if not edge_types:
+        raise ValueError("edge_types richiesto")
+    unsupported = sorted({name for name in edge_types if name not in _ALLOWED_DEPENDENCY_EDGES})
+    if unsupported:
+        joined = ", ".join(unsupported)
+        raise ValueError(f"unsupported dependency edge types: {joined}")
+    return [_ALLOWED_DEPENDENCY_EDGES[name] for name in edge_types]
+
+
 def _node(value) -> NodeResult:
     return NodeResult(
         node_id=value.node_id,
@@ -79,13 +97,7 @@ async def get_callees(ctx: RunContext[Deps], node_id: str, depth: int = 1) -> li
 async def expand_dependencies(
     ctx: RunContext[Deps], node_id: str, edge_types: list[str], depth: int = 1
 ) -> list[NodeResult]:
-    allowed = {
-        "IMPORTS": retrieval_pb2.EDGE_TYPE_IMPORTS,
-        "DEPENDS_ON": retrieval_pb2.EDGE_TYPE_DEPENDS_ON,
-        "EXTENDS": retrieval_pb2.EDGE_TYPE_EXTENDS,
-        "IMPLEMENTS": retrieval_pb2.EDGE_TYPE_IMPLEMENTS,
-    }
-    edges = [allowed[name] for name in edge_types if name in allowed]
+    edges = _resolve_dependency_edges(edge_types)
     values = await asyncio.to_thread(
         retrieval_client.expand_neighbors,
         ctx.deps.retrieval_addr,

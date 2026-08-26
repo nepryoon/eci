@@ -1,5 +1,5 @@
 # SPEC-052 — Harness golden provider-neutral per vLLM reale (T5.6-prep)
-Stato: approved
+Stato: implemented
 Task-tree: preparazione T5.6 · Servizio: services/orchestrator · ADD: Modulo 4 §1.4-1.5
 Contratti: API OpenAI-compatible `/v1/chat/completions`; `contracts/` invariati
 
@@ -36,3 +36,7 @@ Summary JSON con pass rate, fact recall, error count, p50/p95 latency; nessun so
 
 ## 10. Deviazioni
 Il task T5.6 è diviso in harness software e run GPU differito per minimizzare il costo di provisioning; questa SPEC non costituisce verifica del modello reale.
+Il runner fornisce al modello un contesto deterministico del fixture `sample-repo`
+e richiede output JSON strutturato (`facts` + `citations`) per misurare anche i
+casi negativi senza LLM judge; non sostituisce ancora la valutazione E2E
+orchestrator+retrieval del task T5.6 completo.
