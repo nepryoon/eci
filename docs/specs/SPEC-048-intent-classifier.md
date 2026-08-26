@@ -1,5 +1,5 @@
 # SPEC-048 — Intent classifier co-locato nell'Orchestrator (T5.2)
-Stato: implemented
+Stato: verified
 Task-tree: T5.2 · Servizio: services/orchestrator · ADD: Modulo 2 §D4, Modulo 3 §1.1, Modulo 4 §1.5(d)
 Contratti: contracts/proto/eci/retrieval/v1/retrieval.proto (`QueryIntent`, `HybridSearchRequest.intent`)
 
@@ -48,8 +48,8 @@ Span `orchestrator.intent.classify` con attributi `intent`, `graph_weight`, `vec
 
 ## 9. Criteri di accettazione
 - [x] Scenari 1-6 verdi.
-- [ ] `task build`, `task lint`, `task test`, `task guard` verdi.
-- [ ] Nessuna modifica a ADD/contratti.
+- [x] `task build`, `task lint`, `task test`, `task guard` verdi.
+- [x] Nessuna modifica a ADD/contratti.
 
 ## 10. Deviazioni
 1. I pesi sono output advisory tipizzato: il contratto espone soltanto `intent`

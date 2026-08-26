@@ -1,5 +1,5 @@
 # SPEC-051 — Summarization RAPTOR bottom-up con Semantic Cache (T5.5)
-Stato: implemented
+Stato: verified
 Task-tree: T5.5 · Servizio: services/summarization · ADD: Modulo 2 §2.2, Modulo 3 §1.2
 Contratti: nessun nuovo contratto; `contracts/` invariati
 
@@ -49,7 +49,7 @@ Span `summarization.raptor` con hit/miss e nodi elaborati; evento `summarization
 
 ## 9. Criteri di accettazione
 - [x] Scenari unitari verdi.
-- [ ] `task build`, `task lint`, `task test`, `task guard` verdi.
+- [x] `task build`, `task lint`, `task test`, `task guard` verdi.
 - [x] ADD e contratti invariati.
 
 ## 10. Deviazioni
