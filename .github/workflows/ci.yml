@@ -79,7 +79,7 @@ jobs:
       - name: Set up .venv-tools (grpc_tools)
         run: |
           python3 -m venv .venv-tools
-          .venv-tools/bin/pip install grpcio-tools
+          .venv-tools/bin/pip install grpcio-tools==1.83.0
 
       - name: task proto:gen (verifica determinismo)
         run: |

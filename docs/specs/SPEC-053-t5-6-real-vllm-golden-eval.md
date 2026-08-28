@@ -177,7 +177,7 @@ Nessun test della PR contatta vLLM, Runpod o servizi esterni.
 - [x] Cinque failure riportati; analisi manuale marcata post-hoc.
 - [x] Evidenze integre e auditabili; nessun secret versionato.
 - [x] Golden dataset, harness, ADD e contratti invariati.
-- [ ] `task build`, `task lint`, `task test`, `task guard` verdi sul branch PR.
+- [x] `task build`, `task lint`, `task test`, `task guard` verdi sul branch PR.
 
 ## 10. Esito
 
