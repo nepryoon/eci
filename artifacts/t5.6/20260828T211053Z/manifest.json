@@ -1,0 +1,20 @@
+{
+  "actual_eci_commit": "32cd8e17643358a7a4307c92dfb3a025d59045f4",
+  "completed_at_utc": "2026-08-28T21:13:35Z",
+  "execution_gate": "PASS",
+  "fact_recall": 0.4,
+  "gpu_memory_utilization": 0.9,
+  "gpu_name": "NVIDIA L40S",
+  "max_model_len": 4096,
+  "max_num_seqs": 1,
+  "model_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8",
+  "model_revision": "dcaee4d4dfc5ee71ad501f01f530e5652438fde0",
+  "pass_rate": 0.5,
+  "run_duration_seconds": 162,
+  "run_id": "20260828T211053Z",
+  "runpod_pod_id": "xiq4kteisol8ci",
+  "script_version": "1.1.0",
+  "served_model_name": "eci-qwen3-coder-30b-a3b-fp8",
+  "started_at_utc": "2026-08-28T21:10:53Z",
+  "vllm_version": "0.28.0"
+}

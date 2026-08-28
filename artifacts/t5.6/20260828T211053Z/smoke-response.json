@@ -1,0 +1,40 @@
+{
+  "id": "chatcmpl-adb8974528f26536",
+  "object": "chat.completion",
+  "created": 1787951591,
+  "model": "eci-qwen3-coder-30b-a3b-fp8",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"ok\":true}",
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "reasoning": null
+      },
+      "logprobs": null,
+      "finish_reason": "stop",
+      "stop_reason": null,
+      "token_ids": null,
+      "routed_experts": null
+    }
+  ],
+  "service_tier": null,
+  "system_fingerprint": "vllm-0.28.0-8f77b650",
+  "usage": {
+    "prompt_tokens": 19,
+    "total_tokens": 25,
+    "completion_tokens": 6,
+    "prompt_tokens_details": null,
+    "completion_tokens_details": null
+  },
+  "prompt_logprobs": null,
+  "prompt_token_ids": null,
+  "prompt_text": null,
+  "kv_transfer_params": null,
+  "ec_transfer_params": null,
+  "metrics": null
+}
