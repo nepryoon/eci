@@ -41,3 +41,11 @@ scrape_configs:
       - targets: ["host.docker.internal:9104"]
         labels:
           sink: sink-search
+  - job_name: eci-query-services
+    static_configs:
+      - targets: ["host.docker.internal:9105"]
+        labels:
+          service: retrieval-engine
+      - targets: ["host.docker.internal:9106"]
+        labels:
+          service: semantic-cache

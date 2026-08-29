@@ -9,6 +9,7 @@ import (
 	"context"
 	"log"
 	"net"
+	"net/http"
 	"strconv"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -18,6 +19,7 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/qdrant/go-client/qdrant"
 
 	"github.com/eci-project/eci/libs/go/eci/authz"
@@ -29,6 +31,12 @@ import (
 	"github.com/eci-project/eci/services/retrieval-engine/internal/rerankclient"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/server"
 )
+
+const defaultMetricsPort = "9105"
+
+func newMetricsHandler(gatherer prometheus.Gatherer) http.Handler {
+	return promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{})
+}
 
 func main() {
 	ctx := context.Background()
@@ -50,6 +58,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("retrieval-engine: inizializzazione OPA: %v", err)
 	}
+	metricsAddr := ":" + config.EnvOrDefault("METRICS_PORT", defaultMetricsPort)
+	go func() {
+		if err := http.ListenAndServe(metricsAddr, newMetricsHandler(prometheus.DefaultGatherer)); err != nil {
+			log.Printf("retrieval-engine: server HTTP metriche (%s) non avviato: %v", metricsAddr, err)
+		}
+	}()
 
 	neo4jURI := config.EnvOrDefault("NEO4J_URI", "bolt://localhost:7687")
 	neo4jUser := config.EnvOrDefault("NEO4J_USER", "neo4j")
@@ -126,7 +140,7 @@ func main() {
 		OpenSearch: openSearchClient,
 	})
 
-	log.Printf("retrieval-engine: in ascolto su %s (neo4j=%s, qdrant=%s:%d, embedder=%s, reranker=%s, opensearch=%s)", addr, neo4jURI, qdrantHost, qdrantPortNum, embeddingServiceURL, rerankerServiceURL, openSearchURL)
+	log.Printf("retrieval-engine: in ascolto su %s (neo4j=%s, qdrant=%s:%d, embedder=%s, reranker=%s, opensearch=%s, metrics=%s)", addr, neo4jURI, qdrantHost, qdrantPortNum, embeddingServiceURL, rerankerServiceURL, openSearchURL, metricsAddr)
 	if err := srv.Serve(lis); err != nil {
 		log.Fatalf("retrieval-engine: srv.Serve: %v", err)
 	}

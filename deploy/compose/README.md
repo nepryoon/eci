@@ -89,6 +89,8 @@ sono supportati e Keycloak non diventa ready. Non commettere mai `.env`.
 | kafka-connect | 8083 | REST API (registrazione/stato connector) |
 | keycloak | 8081 | OIDC dev (`/realms/eci`) e Admin Console |
 | opa | 8181 | PDP ABAC dev (`/v1/data/eci/authz/decision`) |
+| retrieval-engine metrics | 9105 | Prometheus `/metrics` (processo host) |
+| semantic-cache metrics | 9106 | Prometheus `/metrics` (processo host) |
 
 Se una porta è già occupata da un altro processo (es. un Postgres locale
 su 5432), `docker compose up` fallisce con l'errore nativo di Docker sulla

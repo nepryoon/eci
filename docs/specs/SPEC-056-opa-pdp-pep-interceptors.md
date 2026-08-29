@@ -93,6 +93,7 @@ OPA_URL                  URL base del PDP, obbligatorio in produzione
 OPA_DECISION_PATH        default /v1/data/eci/authz/decision
 OPA_TIMEOUT              default 100ms, >0 e <=2s
 OPA_ALLOW_INSECURE_HTTP  default false; true solo nello stack dev/test
+METRICS_PORT             9105 Retrieval Engine; 9106 Semantic Cache
 ```
 
 ## 3. Comportamento
@@ -211,6 +212,8 @@ package/file/wiring assente prima dell'implementazione.
   chiusa più `pdp_error`.
 - Histogram:
   `eci_authz_pdp_duration_seconds{service,outcome}` senza action/identity.
+- Entrambi i servizi espongono il default registry su `/metrics`; Prometheus
+  dev li scrapa come `eci-query-services` sulle porte host 9105/9106.
 - Log OPA JSON in dev; decision log remoto/WORM è T6.5. Il PEP non stampa
   subject, scope, body o errori crittografici/rete nel messaggio gRPC.
 

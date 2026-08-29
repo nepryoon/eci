@@ -51,6 +51,13 @@ func TestProductionClientAgainstRealPinnedOPA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start OPA %s: %v", opaImage, err)
 	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanupCancel()
+		if err := container.Terminate(cleanupCtx); err != nil {
+			t.Logf("terminate OPA: %v", err)
+		}
+	})
 	exitCode, output, err := container.Exec(ctx, []string{
 		"/opa", "test", "/policies/eci_authz.rego", "/policy-tests/eci_authz_test.rego",
 	})
@@ -64,14 +71,6 @@ func TestProductionClientAgainstRealPinnedOPA(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("OPA policy tests exit=%d:\n%s", exitCode, rawOutput)
 	}
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cleanupCancel()
-		if err := container.Terminate(cleanupCtx); err != nil {
-			t.Logf("terminate OPA: %v", err)
-		}
-	})
-
 	host, err := container.Host(ctx)
 	if err != nil {
 		t.Fatalf("OPA host: %v", err)

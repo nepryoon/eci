@@ -11,8 +11,10 @@ import (
 	"context"
 	"log"
 	"net"
+	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
@@ -24,6 +26,12 @@ import (
 	semanticcachev1 "github.com/eci-project/eci/libs/go/eci/semanticcache/v1"
 	"github.com/eci-project/eci/services/semantic-cache/internal/server"
 )
+
+const defaultMetricsPort = "9106"
+
+func newMetricsHandler(gatherer prometheus.Gatherer) http.Handler {
+	return promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{})
+}
 
 func main() {
 	ctx := context.Background()
@@ -45,6 +53,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("semantic-cache: inizializzazione OPA: %v", err)
 	}
+	metricsAddr := ":" + config.EnvOrDefault("METRICS_PORT", defaultMetricsPort)
+	go func() {
+		if err := http.ListenAndServe(metricsAddr, newMetricsHandler(prometheus.DefaultGatherer)); err != nil {
+			log.Printf("semantic-cache: server HTTP metriche (%s) non avviato: %v", metricsAddr, err)
+		}
+	}()
 
 	redisAddr := config.EnvOrDefault("REDIS_ADDR", "localhost:6379")
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
@@ -65,7 +79,7 @@ func main() {
 	)
 	semanticcachev1.RegisterSemanticCacheServer(srv, &server.Server{Redis: rdb})
 
-	log.Printf("semantic-cache: in ascolto su %s (redis=%s)", addr, redisAddr)
+	log.Printf("semantic-cache: in ascolto su %s (redis=%s, metrics=%s)", addr, redisAddr, metricsAddr)
 	if err := srv.Serve(lis); err != nil {
 		log.Fatalf("semantic-cache: srv.Serve: %v", err)
 	}
