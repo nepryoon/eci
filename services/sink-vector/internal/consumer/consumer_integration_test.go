@@ -58,8 +58,8 @@ func TestSinkVectorConsumer(t *testing.T) {
 	t.Run("EdgeCase_QdrantUnreachableAtStartupReturnsErr", func(t *testing.T) {
 		edgeCaseQdrantUnreachableAtStartupReturnsErr(t)
 	})
-	t.Run("EdgeCase_MessageWithoutProvenanceStillWritten", func(t *testing.T) {
-		edgeCaseMessageWithoutProvenanceStillWritten(t, ctx, st)
+	t.Run("EdgeCase_MessageWithoutSecurityScopeRejected", func(t *testing.T) {
+		edgeCaseMessageWithoutSecurityScopeRejected(t, ctx, st)
 	})
 }
 
@@ -125,6 +125,15 @@ func scenario1PointWrittenWithVectorAndPayload(t *testing.T, ctx context.Context
 	}
 	if got := payloadMap["domain"].GetStringValue(); got != "code" {
 		t.Errorf("payload['domain'] = %q, want %q", got, "code")
+	}
+	if got := payloadMap["tenant_id"].GetStringValue(); got != "tenant-test" {
+		t.Errorf("payload['tenant_id'] = %q, want %q", got, "tenant-test")
+	}
+	if got := payloadMap["repo"].GetStringValue(); got != "sample-repo" {
+		t.Errorf("payload['repo'] = %q, want %q", got, "sample-repo")
+	}
+	if got := payloadMap["acl_group"].GetStringValue(); got != "developers" {
+		t.Errorf("payload['acl_group'] = %q, want %q", got, "developers")
 	}
 	gotProvenance := payloadMap["provenance"].GetStructValue().GetFields()
 	if got := gotProvenance["path"].GetStringValue(); got != "order_service.go" {
@@ -255,23 +264,23 @@ func edgeCaseQdrantUnreachableAtStartupReturnsErr(t *testing.T) {
 }
 
 // ============================================================
-// Edge case §4 — messaggio CodeEmbedding senza provenance: punto scritto
-// comunque, senza la chiave provenance nel payload.
+// Edge case T6.3 — messaggio CodeEmbedding senza security scope: scartato
+// fail-closed e nessun punto materializzato in Qdrant.
 // ============================================================
 
-func edgeCaseMessageWithoutProvenanceStillWritten(t *testing.T, ctx context.Context, st *stack) {
+func edgeCaseMessageWithoutSecurityScopeRejected(t *testing.T, ctx context.Context, st *stack) {
 	deps := newDeps(st)
 	brokers := startKafka(t, ctx)
 
 	embeddingID := uuid.NewString()
 	vector := syntheticVector(3)
-	payload := codeEmbeddingPayload(embeddingID, uuid.NewString(), "entity-no-provenance", vector, "test-model", nil)
+	payload := codeEmbeddingPayloadWithoutProvenance(embeddingID, uuid.NewString(), "entity-no-provenance", vector, "test-model")
 	eventID := uuid.NewString()
 	produce(t, ctx, brokers, consumer.TopicCodeEmbedding, embeddingID, payload, eventID)
 
 	outcome := fetchAndProcessOnce(t, ctx, brokers, deps)
-	if outcome != consumer.OutcomeStored {
-		t.Fatalf("outcome = %v, want OutcomeStored (nessun caso speciale per provenance assente)", outcome)
+	if outcome != consumer.OutcomeInvalidSkipped {
+		t.Fatalf("outcome = %v, want OutcomeInvalidSkipped", outcome)
 	}
 
 	pointID := consumer.DerivePointID(embeddingID)
@@ -283,14 +292,8 @@ func edgeCaseMessageWithoutProvenanceStillWritten(t *testing.T, ctx context.Cont
 	if err != nil {
 		t.Fatalf("Get punto id=%s: %v", pointID, err)
 	}
-	if len(points) != 1 {
-		t.Fatalf("punti trovati per id=%s: %d, want 1", pointID, len(points))
-	}
-	if _, ok := points[0].GetPayload()["provenance"]; ok {
-		t.Errorf("payload non deve contenere la chiave 'provenance' quando il messaggio in ingresso non ce l'aveva: %v", points[0].GetPayload())
-	}
-	if got := points[0].GetPayload()["node_id"].GetStringValue(); got != "entity-no-provenance" {
-		t.Errorf("payload['node_id'] = %q, want %q", got, "entity-no-provenance")
+	if len(points) != 0 {
+		t.Fatalf("punti trovati per id=%s: %d, want 0", pointID, len(points))
 	}
 }
 
@@ -503,6 +506,12 @@ func newReaderWithGroup(brokers []string, groupID string) *kafka.Reader {
 // consumer.go di embedding-worker (SPEC-030/031/032:
 // {id, chunk_id, entity_id, vector, model_id, embedding_dim, provenance?}).
 func codeEmbeddingPayload(id, chunkID, entityID string, vector []float32, modelID string, provenance map[string]any) []byte {
+	if provenance == nil {
+		provenance = map[string]any{}
+	}
+	provenance["tenant_id"] = "tenant-test"
+	provenance["repo"] = "sample-repo"
+	provenance["acl_group"] = "developers"
 	m := map[string]any{
 		"id":            id,
 		"chunk_id":      chunkID,
@@ -513,6 +522,15 @@ func codeEmbeddingPayload(id, chunkID, entityID string, vector []float32, modelI
 	}
 	if provenance != nil {
 		m["provenance"] = provenance
+	}
+	out, _ := json.Marshal(m)
+	return out
+}
+
+func codeEmbeddingPayloadWithoutProvenance(id, chunkID, entityID string, vector []float32, modelID string) []byte {
+	m := map[string]any{
+		"id": id, "chunk_id": chunkID, "entity_id": entityID,
+		"vector": vector, "model_id": modelID, "embedding_dim": len(vector),
 	}
 	out, _ := json.Marshal(m)
 	return out

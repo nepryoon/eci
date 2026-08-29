@@ -17,6 +17,8 @@
       "required": ["repo", "commit_sha", "path", "ingested_at"],
       "properties": {
         "repo": { "type": "string" },
+        "tenant_id": { "type": "string", "minLength": 1 },
+        "acl_group": { "type": "string", "minLength": 1 },
         "commit_sha": { "type": "string", "pattern": "^[a-f0-9]{7,40}$" },
         "path": { "type": "string" },
         "start_line": { "type": "integer", "minimum": 0 },

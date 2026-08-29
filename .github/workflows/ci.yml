@@ -85,3 +85,28 @@ jobs:
         run: |
           task proto:gen
           git diff --exit-code -- libs/go libs/py
+
+  datastore-security-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.9'
+
+      - name: Install golang-migrate
+        run: go install -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.19.1
+
+      - name: T6.3 sink materialization isolation
+        run: |
+          cargo test --manifest-path services/ingestion/Cargo.toml --test persist_integration_test same_parser_ids_remain_isolated_across_tenants -- --ignored --test-threads=1
+          cd services/sink-graph && go test -tags=integration ./internal/consumer -run TestSinkGraphConsumer -v
+          cd ../sink-vector && go test -tags=integration ./internal/consumer -run TestSinkVectorConsumer -v
+          cd ../sink-search && go test -tags=integration ./internal/consumer -run TestSinkSearchConsumer -v
+
+      - name: T6.3 cross-store retrieval isolation
+        run: |
+          cd services/retrieval-engine
+          go test -tags=integration ./internal/server -run TestRetrievalEngineServer -v
+          go test -tags=integration ./internal/hybridsearch -run 'TestHybridSearchIntegration|TestHybridGraphVectorSearchContentHydration' -v

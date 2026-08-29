@@ -35,6 +35,8 @@ class Provenance(BaseModel):
         extra="forbid",
     )
     repo: str
+    tenant_id: constr(min_length=1) | None = None
+    acl_group: constr(min_length=1) | None = None
     commit_sha: constr(pattern=r"^[a-f0-9]{7,40}$")
     path: str
     start_line: conint(ge=0) | None = None

@@ -15,6 +15,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/qdrant/go-client/qdrant"
 	kafka "github.com/segmentio/kafka-go"
+
+	"github.com/eci-project/eci/libs/go/eci/securitylabels"
 )
 
 // ConsumerName identifica questo consumer in processed_events.consumer_name
@@ -69,17 +71,55 @@ func EnsureCollection(ctx context.Context, client *qdrant.Client) error {
 	if err != nil {
 		return fmt.Errorf("CollectionExists(%s): %w", CollectionName, err)
 	}
-	if exists {
-		return nil
+	if !exists {
+		m, payloadM := uint64(0), uint64(16)
+		if err := client.CreateCollection(ctx, &qdrant.CreateCollection{
+			CollectionName: CollectionName,
+			VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
+				Size:     VectorSize,
+				Distance: qdrant.Distance_Cosine,
+			}),
+			HnswConfig: &qdrant.HnswConfigDiff{M: &m, PayloadM: &payloadM},
+		}); err != nil {
+			return fmt.Errorf("CreateCollection(%s): %w", CollectionName, err)
+		}
 	}
-	if err := client.CreateCollection(ctx, &qdrant.CreateCollection{
+	m, payloadM := uint64(0), uint64(16)
+	if err := client.UpdateCollection(ctx, &qdrant.UpdateCollection{
 		CollectionName: CollectionName,
-		VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
-			Size:     VectorSize,
-			Distance: qdrant.Distance_Cosine,
-		}),
+		HnswConfig:     &qdrant.HnswConfigDiff{M: &m, PayloadM: &payloadM},
 	}); err != nil {
-		return fmt.Errorf("CreateCollection(%s): %w", CollectionName, err)
+		return fmt.Errorf("UpdateCollection(%s) HNSW tenant config: %w", CollectionName, err)
+	}
+
+	info, err := client.GetCollectionInfo(ctx, CollectionName)
+	if err != nil {
+		return fmt.Errorf("GetCollectionInfo(%s): %w", CollectionName, err)
+	}
+	wait := true
+	for _, field := range []string{"tenant_id", "repo", "acl_group"} {
+		if existing, ok := info.GetPayloadSchema()[field]; ok {
+			if existing.GetDataType() != qdrant.PayloadSchemaType_Keyword {
+				return fmt.Errorf("payload index %s.%s non-keyword", CollectionName, field)
+			}
+			if field == "tenant_id" && !existing.GetParams().GetKeywordIndexParams().GetIsTenant() {
+				return fmt.Errorf("payload index %s.tenant_id esistente senza is_tenant=true: migrazione esplicita richiesta", CollectionName)
+			}
+			continue
+		}
+		req := &qdrant.CreateFieldIndexCollection{
+			CollectionName: CollectionName,
+			FieldName:      field,
+			FieldType:      qdrant.FieldType_FieldTypeKeyword.Enum(),
+			Wait:           &wait,
+		}
+		if field == "tenant_id" {
+			isTenant := true
+			req.FieldIndexParams = qdrant.NewPayloadIndexParams(&qdrant.KeywordIndexParams{IsTenant: &isTenant})
+		}
+		if _, err := client.CreateFieldIndex(ctx, req); err != nil {
+			return fmt.Errorf("CreateFieldIndex(%s.%s): %w", CollectionName, field, err)
+		}
 	}
 	return nil
 }
@@ -114,6 +154,12 @@ type codeEmbeddingPayload struct {
 	Vector     []float32       `json:"vector"`
 	ModelID    string          `json:"model_id"`
 	Provenance json.RawMessage `json:"provenance"`
+}
+
+type securityProvenance struct {
+	TenantID string `json:"tenant_id"`
+	Repo     string `json:"repo"`
+	ACLGroup string `json:"acl_group"`
 }
 
 // ProcessMessage elabora UN messaggio Kafka già fetchato (SPEC-033 §2/§3):
@@ -151,6 +197,14 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 		deps.Logf("sink-vector: payload CodeEmbedding senza id (event_id=%s)", eventID)
 		return OutcomeInvalidSkipped, nil
 	}
+	var security securityProvenance
+	if len(msg.Provenance) == 0 || json.Unmarshal(msg.Provenance, &security) != nil ||
+		!securitylabels.Valid(security.TenantID, security.Repo, security.ACLGroup) {
+		securitylabels.Observe(ConsumerName, securitylabels.Outcome(security.TenantID, security.Repo, security.ACLGroup))
+		deps.Logf("sink-vector: payload CodeEmbedding senza security labels valide (event_id=%s), scartato", eventID)
+		return OutcomeInvalidSkipped, nil
+	}
+	securitylabels.Observe(ConsumerName, "accepted")
 
 	isNew, err := markProcessed(ctx, deps.DB, eventID)
 	if err != nil {
@@ -221,6 +275,11 @@ func upsertPoint(ctx context.Context, client *qdrant.Client, msg codeEmbeddingPa
 			return fmt.Errorf("decodifica provenance: %w", err)
 		}
 		payloadFields["provenance"] = provenance
+		if p, ok := provenance.(map[string]any); ok {
+			payloadFields["tenant_id"] = p["tenant_id"]
+			payloadFields["repo"] = p["repo"]
+			payloadFields["acl_group"] = p["acl_group"]
+		}
 	}
 	qdrantPayload, err := qdrant.TryValueMap(payloadFields)
 	if err != nil {

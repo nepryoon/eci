@@ -1,0 +1,293 @@
+# SPEC-057 — Enforcement in-query su Neo4j, Qdrant e OpenSearch
+Stato: verified
+Task-tree: T6.3 · Servizio: `services/ingestion`, sink materializzati, `services/retrieval-engine` · ADD: Modulo 3 §2.1–2.5
+Contratti: `contracts/jsonschema/hybrid-graph.json` (estensione additiva, ADR-0010), `contracts/proto/eci/retrieval/v1/retrieval.proto` (sola lettura); identità fisica opaca ADR-0011
+
+## 1. Obiettivo
+
+Applicare lo stesso scope autenticato prima di ogni lettura in Neo4j, Qdrant e
+OpenSearch e materializzare su ogni store le etichette necessarie. Nessun
+parametro RPC, testo utente o output LLM può ampliare `tenant_id`, repository o
+gruppi ACL; dati non etichettati, scope vuoti e store security non configurati
+falliscono chiusi.
+
+T6.3 è un'unica unità cross-store perché l'invariante ADD §2.5 è l'identità del
+filtro sulle tre gambe: spezzarlo consentirebbe finestre di leakage tra store.
+
+## 2. Interfaccia
+
+```rust
+pub struct IngestionScope {
+    pub tenant_id: String,
+    pub repo: String,
+    pub acl_group: String,
+}
+
+impl IngestionScope {
+    pub fn new(tenant_id: String, repo: String, acl_group: String)
+        -> Result<Self, ScopeError>;
+}
+
+pub fn persist_parsed_file(
+    client: &mut postgres::Client,
+    scope: &IngestionScope,
+    nodes: Vec<CodeNode>,
+    relations: Vec<CodeRelation>,
+    chunks: &[CodeChunk],
+) -> Result<PersistSummary, PersistError>;
+```
+
+```go
+package accessscope
+
+type Scope struct {
+    TenantID    string
+    AllowedRepos []string
+    ACLGroups    []string
+}
+
+func FromContext(ctx context.Context) (Scope, error)
+```
+
+```go
+package securityfilter
+
+func Neo4jParams(scope accessscope.Scope) map[string]any
+func QdrantFilter(scope accessscope.Scope, domain, requestedRepo string) *qdrant.Filter
+func OpenSearchFilter(scope accessscope.Scope, entityIDs []string) map[string]any
+func OpenSearchHeaders(scope accessscope.Scope) http.Header
+```
+
+`FromContext` legge soltanto `secctx.FromContext(ctx)`, valida valori non vuoti,
+limiti e duplicati, e restituisce copie ordinate deterministicamente. Le
+request RPC non sono parametri dell'interfaccia.
+
+Materialized security labels:
+
+```json
+{"tenant_id":"tenant-a","repo":"repo-a","acl_group":"engineering"}
+```
+
+Predicato Neo4j obbligatorio per ogni nodo letto o attraversato:
+
+```cypher
+n.tenant_id = $tenant_id
+AND n.repo IN $allowed_repos
+AND n.acl_group IN $acl_groups
+```
+
+Filtro Qdrant obbligatorio:
+
+```json
+{"must":[
+  {"key":"tenant_id","match":{"value":"tenant-a"}},
+  {"key":"repo","match":{"any":["repo-a"]}},
+  {"key":"acl_group","match":{"any":["engineering"]}}
+]}
+```
+
+OpenSearch usa sia un `bool.filter` applicativo equivalente sia DLS su ruolo
+read-only con sostituzioni da attributi autenticati extended-proxy. Il client
+invia `x-proxy-user`, `x-proxy-roles` e attributi `x-proxy-ext-*` esclusivamente
+dallo `Scope`; il backend OpenSearch è raggiungibile solo dal servizio.
+
+## 3. Comportamento
+
+1. **Dato** un ingestion scope valido, **quando** nodi/chunk/embedding vengono
+   materializzati, **allora** tutti e tre gli store contengono le stesse
+   etichette piatte e indicizzate; un evento privo di etichette non riceve
+   placeholder o default.
+   Lo stesso parser ID in tenant/repository diversi viene namespaced prima
+   della persistenza e non può attivare un upsert/delete cross-scope.
+2. **Dato** un `SecurityContext` autenticato, **quando** si esegue `GetNode`,
+   full-text o hydration Neo4j, **allora** la query contiene i tre predicati
+   positivi prima di `LIMIT` e usa soltanto parametri derivati dal context.
+3. **Dato** una traversata o impact analysis, **quando** il path attraversa un
+   nodo fuori scope, **allora** seed, ogni nodo del path e risultato sono
+   filtrati e il blast radius si arresta senza rivelare il nodo.
+4. **Dato** vector search, **quando** Qdrant riceve `QueryPoints`, **allora** il
+   filtro non è mai nil e contiene nel `must` tenant, repo e ACL; i payload
+   index includono `tenant_id` keyword `is_tenant=true`, repo e ACL keyword,
+   con HNSW `payload_m=16,m=0`.
+5. **Dato** full-text/source hydration, **quando** Retrieval Engine chiama
+   OpenSearch, **allora** applica filtro pre-retrieval e identità extended-
+   proxy derivati dal context; la role DLS read-only replica tenant/repo/ACL e
+   una variabile assente produce errore, non fallback.
+6. **Dato** un candidate set fuso, **quando** viene idratato o inviato a
+   reranker/packing, **allora** un re-check Neo4j autorizzato elimina prima
+   qualunque id non più visibile; zero candidate autorizzati è un esito vuoto,
+   non un fallback non filtrato.
+7. **Dato** body RPC con `repos`, prompt o metadata applicativo forgiati,
+   **quando** differiscono dal metadata autenticato, **allora** possono solo
+   restringere i risultati funzionali e non ampliano mai lo scope.
+8. **Dato** configurazione nativa, **quando** vengono validate policy/grant,
+   **allora** Neo4j Enterprise parte da privilegi minimi property-based,
+   OpenSearch usa un ruolo read-only DLS, e Community/security-plugin-off sono
+   dichiarati dev-only senza essere presentati come difesa nativa verificata.
+
+## 4. Errori & edge case
+
+| Condizione | Comportamento atteso |
+|---|---|
+| Context assente/malformato | `Unauthenticated`, normalmente intercettato prima dell'handler |
+| tenant/repo/ACL vuoto o blank | `PermissionDenied`; zero query store |
+| scope oltre i limiti o valore con CR/LF | `PermissionDenied`; nessun header injection |
+| campo security assente nel record | confronto positivo non soddisfatto; invisibile |
+| request repo fuori `allowed_repos` | intersezione vuota; zero risultati, mai ampliamento |
+| seed Neo4j fuori scope | `NotFound`/zero traversal senza distinguerlo da assente |
+| Qdrant filter non costruibile | errore fail-closed; nessuna query senza filter |
+| OpenSearch DLS attribute assente | 4xx/security error propagato; nessun retry anonimo |
+| re-check Neo4j fallisce | intera richiesta fallisce prima del packing |
+| record cambia ACL tra retrieval e re-check | rimosso dal candidate set |
+| stesso path/simbolo in due ownership scope | ID fisici distinti; nessun overwrite/delete cross-scope |
+| GDS globale | proibito; solo proiezioni per tenant/ACL, fuori dal runtime corrente |
+| Neo4j Community | solo test del filtro applicativo; nessuna dichiarazione di RBAC nativo |
+
+## 5. Threat model e non-goals
+
+### Threat model
+
+Attori: tenant autenticato malevolo, prompt/output LLM compromesso, client che
+forgia request/body, producer o consumer interno mal configurato, record legacy
+non etichettato, store raggiunto con credenziali eccessive, cambio ACL TOCTOU.
+Asset: isolamento tenant/repo/ACL, contenuto sorgente, topologia del grafo,
+embedding e full-text. Confini: solo JWT validato crea `SecurityContext`; solo
+ingestion system-to-system crea la provenance; body/prompt/LLM non sono fidati.
+Mitigazioni: filtri positivi pre-retrieval identici, query parametrizzate,
+must non-nil, DLS/RBAC least-privilege, header sanitizzati, re-check prima del
+packing, dati unlabeled invisibili, zero wildcard/default e metriche bounded.
+
+### Non-goals
+
+- Nessun cache/summary `acl_scope` (T6.4), citation/WORM (T6.5), gateway/mTLS
+  production (T6.6/T7.1) o security matrix completa (T6.7).
+- Nessun post-filter come sostituto dei tre filtri pre-retrieval.
+- Nessuna collection/database per tenant o GDS globale.
+- Nessun filtro generato da LLM, fuzzy authorization o default tenant.
+- Nessun backfill automatico di eventi storici e nessuna modifica T5.6.
+
+## 6. Vincoli dall'ADD
+
+- Modulo 3 §2.1: scope soltanto dal `SecurityContext` autenticato.
+- Modulo 3 §2.2(a): predicati Cypher obbligatori in ogni query, mai dall'LLM.
+- Modulo 3 §2.2(b): RBAC Neo4j property-based come secondo livello; Enterprise
+  è vincolo di licenza e non può essere simulato con Community.
+- Modulo 3 §2.2 GDS: proiezioni native globali non sono security-safe.
+- Modulo 3 §2.3: Qdrant `must`, `is_tenant=true`, `payload_m:16,m:0`.
+- Modulo 3 §2.4: OpenSearch DLS derivato dallo stesso contesto.
+- Modulo 3 §2.5: filtri identici sulle tre gambe e re-check prima del packing.
+- ADR-0010: etichette additive nella provenance; legacy unlabeled invisibile.
+- ADR-0011: parser ID repository-local, ID persistito namespaced per
+  tenant/repository; ACL escluso dall'hash per consentire revoca in-place.
+
+## 7. Test plan
+
+- Unit Rust: validazione `IngestionScope`, transazione/payload con etichette,
+  missing scope fallisce prima delle write.
+- Unit Go `accessscope`: origine esclusiva dal context, ordinamento/copie,
+  limiti, CR/LF, Qdrant must, OpenSearch filter/header.
+- Unit query: fake Neo4j verifica testo/parametri per lookup, full-text,
+  traversal, impact, hydration e re-check; request forgiata non amplia scope.
+- Integration Qdrant: due tenant/repo/gruppi nella stessa collection, query A
+  non restituisce B; verifica payload indexes/config.
+- Integration Neo4j Community: due scope e path con nodo intermedio proibito;
+  test applicativo arresta traversal. Grant Enterprise validati staticamente e
+  in ambiente Enterprise solo quando una licenza autorizzata è disponibile.
+- Integration OpenSearch security-enabled: due documenti e due identità,
+  DLS A non restituisce B; in CI senza certificati/licenza, parser + mock HTTP
+  verificano policy, header e filtro senza dichiarare il plugin reale testato.
+- Regression: tutti i precedenti test retrieval con metadata autenticato;
+  baseline/query T5.6 byte-identiche. CPU-only, nessuna GPU.
+
+Red phase: test di scope e query obbligatorie devono fallire perché package,
+etichette e parametri non esistono; il fallimento viene registrato nel commit.
+
+## 8. Osservabilità
+
+- Span `eci.retrieval.security_filter` con attributi bounded
+  `eci.store ∈ {neo4j,qdrant,opensearch}`, `eci.outcome ∈ {allow,empty,error}`;
+  mai tenant, user, repo, gruppo, query o token.
+- Counter `eci_retrieval_security_filter_total{store,outcome}`.
+- Counter `eci_retrieval_acl_recheck_removed_total{store="neo4j"}` senza id.
+- Counter sink `eci_sink_security_labels_total{sink,outcome}` con outcome
+  `accepted|missing|invalid`; cardinalità chiusa.
+- Log di errore senza valori dello scope. Decision/audit WORM è T6.5.
+
+## 9. Criteri di accettazione
+
+- [x] ADR-0010 e contratto additivo documentano migrazione fail-closed.
+- [x] Nuova ingestion richiede scope esplicito e lo propaga a ogni evento.
+- [x] Identità persistite e delete/replace sono namespaced per ownership.
+- [x] Neo4j, Qdrant e OpenSearch memorizzano etichette piatte indicizzate.
+- [x] Ogni query Neo4j filtra seed, risultati e nodi intermedi.
+- [x] Ogni query Qdrant contiene i tre `must`; config multitenant conforme.
+- [x] OpenSearch applica filtro identico e role DLS read-only versionata.
+- [x] Re-check ACL avviene prima di hydration/reranker/packing.
+- [x] Test cross-scope e forged request sono fail-closed e CPU-only.
+- [x] Grant Neo4j Enterprise sono least-privilege e non dichiarati verificati
+      senza un runtime Enterprise autorizzato.
+- [x] T5.6 baseline e `queries_v0.json` restano byte-identici.
+- [x] `task build`, `task lint`, `task test`, `task guard` verdi.
+- [x] Stato passa a `implemented`, poi `verified` solo con CI/PR reale.
+
+## 10. Review avversariale di approvazione
+
+- **Contraddizione ADD:** nessuna; i tre filtri e il re-check sono separati e
+  obbligatori. L'uso di etichette additive risolve, non aggira, D2 incompleto.
+- **Tenant isolation:** record legacy e scope vuoti sono invisibili; nessun
+  default o wildcard. Tutti i nodi di path sono filtrati.
+- **Input LLM/body:** l'unica origine query-plane è `secctx.FromContext`; le
+  request possono solo restringere per intersezione.
+- **Materialized views/idempotenza:** scrivono solo i sink esistenti; scope e
+  dati condividono transazione/evento e gli upsert restano per id.
+- **Fail closed:** errori DLS/RBAC/re-check non degradano verso query anonime.
+- **Contratto condiviso:** modifica additiva coperta da ADR-0010, con legacy
+  leggibile ma non autorizzato; l'ID opaco conserva forma D2 ed è namespaced
+  deterministicamente come deliberato da ADR-0011.
+- **Traversal/deadline:** depth/limit restano bounded e lo stesso context/deadline
+  viene passato a ogni store.
+- **Decisioni nuove:** extended-proxy verso DLS e proprietà piatte sono
+  esplicitate qui/ADR, non introdotte implicitamente.
+
+Esito: approvata dopo seconda passata avversariale; nessun criterio indebolito.
+
+## 11. Evidenza di implementazione e deviazioni
+
+- Red phase registrata nei commit: package `accessscope`, `IngestionScope` e
+  builder dei tre filtri erano assenti e i nuovi test fallivano in compile.
+- `task build`, `task lint` e `task guard` sono verdi localmente. `task test`
+  completa tutti i test CPU ma il runner locale non espone Docker; i test
+  Keycloak/OPA/Neo4j preesistenti falliscono esclusivamente all'apertura del
+  socket Docker. Il job CI containerizzato è l'evidenza richiesta prima di
+  `verified`.
+- Il job `datastore-security-integration` esercita sink, Neo4j, Qdrant e
+  OpenSearch con record cross-tenant. OpenSearch usa il plugin disattivato nel
+  testcontainer e quindi verifica il filtro applicativo, non la DLS nativa.
+- I grant Neo4j Enterprise sono renderizzati e testati deterministicamente ma
+  non eseguiti su Community. Nessuna licenza Enterprise viene accettata o
+  simulata; questa limitazione resta esplicita fino a evidenza autorizzata.
+
+Verifica finale PR [#70](https://github.com/nepryoon/eci/pull/70), commit
+funzionale `99749fd`:
+
+- GitHub Actions run
+  [33245242337](https://github.com/nepryoon/eci/actions/runs/33245242337):
+  `build-lint-test` verde in 7m59s, `guard` verde in 1m52s e
+  `datastore-security-integration` verde in 12m13s.
+- Il job datastore esegue l'ingestion PostgreSQL, i tre sink reali e la
+  retrieval cross-store su Neo4j Community, Qdrant e OpenSearch; i dati fuori
+  tenant/repository/ACL non raggiungono i risultati.
+- La regressione P1 persiste lo stesso output parser sotto due tenant e prova
+  identità fisiche disgiunte, senza overwrite o delete cross-scope. ADR-0011
+  documenta il namespace e il thread di review è stato risolto soltanto dopo
+  il pass containerizzato.
+- La query aggiuntiva di re-check ACL resta batch: il test d'integrazione
+  distingue esplicitamente `GraphTraversal + re-check + hydration` da una
+  hydration N+1.
+- Baseline T5.6 e `queries_v0.json` restano byte-identiche; nessun run GPU è
+  stato eseguito.
+
+Esito T6.3: `verified` per l'enforcement applicativo e per le configurazioni
+native versionate. La DLS OpenSearch security-enabled e i grant Neo4j
+Enterprise non sono dichiarati verificati a runtime senza i relativi runtime
+autorizzati; questa limitazione non viene reinterpretata come evidenza reale.

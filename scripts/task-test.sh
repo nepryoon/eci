@@ -124,4 +124,7 @@ python3 tests/unit/guard/test_guard.py || status=1
 echo "== test (unit: T5.6 runner provenance boundary) =="
 python3 tests/unit/t5_6_runner/test_t5_6_runner.py || status=1
 
+echo "== test (unit: T6.3 native datastore security configuration) =="
+python3 tests/unit/security_config/test_security_config.py || status=1
+
 exit "${status}"

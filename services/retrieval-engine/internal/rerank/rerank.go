@@ -7,8 +7,10 @@ import (
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 
+	"github.com/eci-project/eci/libs/go/eci/accessscope"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/hybridsearch"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/rerankclient"
+	"github.com/eci-project/eci/services/retrieval-engine/internal/securityfilter"
 )
 
 // Rerank — SPEC-044 §2: reranking cross-encoder dei candidati fusi RRF
@@ -104,14 +106,23 @@ func candidateText(n hybridsearch.RetrievedNode) string {
 // semplicemente l'assenza dalla mappa ritornata (SPEC-044 §3 scenario 4).
 func neo4jImpactScoreFetcher(driver neo4j.DriverWithContext) impactScoreFetchFunc {
 	return func(ctx context.Context, nodeIDs []string) (map[string]float64, error) {
+		scope, err := accessscope.FromContext(ctx)
+		if err != nil {
+			return nil, err
+		}
 		session := driver.NewSession(ctx, neo4j.SessionConfig{})
 		defer session.Close(ctx)
 
+		params := securityfilter.Neo4jParams(scope)
+		params["node_ids"] = nodeIDs
 		result, err := session.Run(ctx, `
 			UNWIND $node_ids AS id
 			OPTIONAL MATCH (n:CodeNode {id: id})
+			WHERE n.tenant_id = $tenant_id
+			  AND n.repo IN $allowed_repos
+			  AND n.acl_group IN $acl_groups
 			RETURN id AS node_id, n.impact_score AS impact_score
-		`, map[string]any{"node_ids": nodeIDs})
+		`, params)
 		if err != nil {
 			return nil, err
 		}

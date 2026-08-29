@@ -43,7 +43,7 @@ type referenceNode struct {
 const floatTolerance = 1e-6
 
 func TestHybridSearchParity(t *testing.T) {
-	ctx := context.Background()
+	ctx := authenticatedContext(t, context.Background())
 	f := setupFixture(t, ctx)
 	pythonBin := ensureReferenceVenv(t)
 

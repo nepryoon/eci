@@ -28,7 +28,12 @@ import (
 	"github.com/qdrant/go-client/qdrant"
 	tcneo4j "github.com/testcontainers/testcontainers-go/modules/neo4j"
 	tcqdrant "github.com/testcontainers/testcontainers-go/modules/qdrant"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
 
+	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
+	"github.com/eci-project/eci/libs/go/eci/secctx"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/embedclient"
 )
 
@@ -37,6 +42,28 @@ const (
 	collectionName     = "code_embeddings"
 	vectorSize         = 1536
 )
+
+func authenticatedContext(t *testing.T, base context.Context) context.Context {
+	t.Helper()
+	sc := &retrievalv1.SecurityContext{
+		TenantId: "tenant-test", UserId: "user-test",
+		AllowedRepos: []string{"local"}, AclGroups: []string{"developers"},
+	}
+	encoded, err := proto.Marshal(sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming := metadata.NewIncomingContext(base, metadata.Pairs("eci-security-context-bin", string(encoded)))
+	var result context.Context
+	_, err = secctx.UnaryServerInterceptor()(incoming, nil, &grpc.UnaryServerInfo{}, func(ctx context.Context, _ any) (any, error) {
+		result = ctx
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
 
 // fixtureHandles porta tutto ciò che serve sia al test Go sia (scenario 8)
 // al sottoprocesso Python: le stesse coordinate di connessione, gli stessi
@@ -68,6 +95,7 @@ type fixtureHandles struct {
 	//   unrelatedVector: embedding di un testo completamente diverso,
 	//     lontano dalla query -> presente ma in fondo/fuori dal limite.
 	vectorOnlyID string
+	foreignVectorID string
 
 	queryText string
 }
@@ -93,6 +121,7 @@ func setupFixture(t *testing.T, ctx context.Context) *fixtureHandles {
 		unrelatedID:      "hs-unrelated-graph-node",
 		isolatedID:       "hs-isolated-node",
 		vectorOnlyID:     "hs-vector-only-node",
+		foreignVectorID:  "hs-foreign-vector-node",
 		queryText:        "how does order processing call validation",
 	}
 
@@ -108,11 +137,12 @@ func seedGraph(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext
 	defer session.Close(ctx)
 
 	_, err := session.Run(ctx, `
-		CREATE (seed:CodeNode {id: $seed_id, domain: 'code', repo: 'local', path: 'seed.go', name: 'Seed'})
-		CREATE (direct:CodeNode {id: $caller_direct_id, domain: 'code', repo: 'local', path: 'direct.go', name: 'CallerDirect'})
-		CREATE (indirect:CodeNode {id: $caller_indirect_id, domain: 'code', repo: 'local', path: 'indirect.go', name: 'CallerIndirect'})
-		CREATE (unrelated:CodeNode {id: $unrelated_id, domain: 'code', repo: 'local', path: 'unrelated.go', name: 'Unrelated'})
-		CREATE (isolated:CodeNode {id: $isolated_id, domain: 'code', repo: 'local', path: 'isolated.go', name: 'Isolated'})
+		CREATE (seed:CodeNode {id: $seed_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', path: 'seed.go', name: 'Seed'})
+		CREATE (direct:CodeNode {id: $caller_direct_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', path: 'direct.go', name: 'CallerDirect'})
+		CREATE (indirect:CodeNode {id: $caller_indirect_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', path: 'indirect.go', name: 'CallerIndirect'})
+		CREATE (unrelated:CodeNode {id: $unrelated_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', path: 'unrelated.go', name: 'Unrelated'})
+		CREATE (isolated:CodeNode {id: $isolated_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', path: 'isolated.go', name: 'Isolated'})
+		CREATE (:CodeNode {id: $vector_only_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', path: 'vector.go', name: 'VectorOnly'})
 		CREATE (direct)-[:CALLS {weight: 1}]->(seed)
 		CREATE (indirect)-[:CALLS {weight: 1}]->(direct)
 	`, map[string]any{
@@ -121,6 +151,7 @@ func seedGraph(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext
 		"caller_indirect_id": f.callerIndirectID,
 		"unrelated_id":       f.unrelatedID,
 		"isolated_id":        f.isolatedID,
+		"vector_only_id":     f.vectorOnlyID,
 	})
 	if err != nil {
 		t.Fatalf("seed del grafo di test: %v", err)
@@ -153,6 +184,7 @@ func seedVectors(t *testing.T, ctx context.Context, embedderBaseURL string, qc *
 		vectorPoint(t, f.callerDirectID, callerDirectVec),
 		vectorPoint(t, f.vectorOnlyID, vectorOnlyVec),
 		vectorPoint(t, "hs-unrelated-vector-node", unrelatedVec),
+		vectorPointScoped(t, f.foreignVectorID, qvec, "tenant-b", "local", "developers"),
 	}
 	if _, err := qc.Upsert(ctx, &qdrant.UpsertPoints{
 		CollectionName: collectionName,
@@ -163,11 +195,14 @@ func seedVectors(t *testing.T, ctx context.Context, embedderBaseURL string, qc *
 }
 
 func vectorPoint(t *testing.T, nodeID string, vec []float32) *qdrant.PointStruct {
+	return vectorPointScoped(t, nodeID, vec, "tenant-test", "local", "developers")
+}
+
+func vectorPointScoped(t *testing.T, nodeID string, vec []float32, tenant, repo, group string) *qdrant.PointStruct {
 	t.Helper()
 	payload, err := qdrant.TryValueMap(map[string]any{
-		"node_id": nodeID,
-		"domain":  "code",
-		"repo":    "local",
+		"node_id": nodeID, "domain": "code",
+		"tenant_id": tenant, "repo": repo, "acl_group": group,
 	})
 	if err != nil {
 		t.Fatalf("costruzione payload per %s: %v", nodeID, err)

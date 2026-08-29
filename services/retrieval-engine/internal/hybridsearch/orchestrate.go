@@ -7,6 +7,8 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 	"github.com/qdrant/go-client/qdrant"
+
+	"github.com/eci-project/eci/libs/go/eci/accessscope"
 )
 
 // Deps sono le dipendenze di HybridGraphVectorSearch, iniettate
@@ -98,6 +100,9 @@ func WithIncludeSourceText(v bool) Option { return func(o *options) { o.includeS
 // top_k. Stesso ordine di fasi di D5, stessa distinzione degradabile/
 // obbligatorio.
 func HybridGraphVectorSearch(ctx context.Context, deps Deps, query, entryNodeID string, maxDepth int, opts ...Option) ([]RetrievedNode, error) {
+	if _, err := accessscope.FromContext(ctx); err != nil {
+		return nil, fmt.Errorf("hybridsearch: security scope non valido: %w", err)
+	}
 	if query == "" || entryNodeID == "" {
 		return nil, fmt.Errorf("hybridsearch: query ed entry_node_id sono obbligatori")
 	}
@@ -137,6 +142,14 @@ func HybridGraphVectorSearch(ctx context.Context, deps Deps, query, entryNodeID 
 
 	// (5) scoring combinato con prossimità topologica + troncamento a top_k.
 	ranked := ApplyTopologicalProximity(fused, o.beta)
+
+	// Defense in depth required by ADD §2.5: ACL may have changed between
+	// individual leg retrieval and fusion. No candidate reaches hydration,
+	// reranking, or packing without this authoritative graph re-check.
+	ranked, err = recheckAuthorized(ctx, deps.Driver, ranked)
+	if err != nil {
+		return nil, newHybridSearchError("ACL re-check fallito", err)
+	}
 	if o.topK > 0 && len(ranked) > o.topK {
 		ranked = ranked[:o.topK]
 	}

@@ -218,7 +218,13 @@ def outbox_connector(kafka_connect_url, migrated_postgres) -> None:
 
 
 def _run_ingestion(filename: str, postgres_dsn_: str) -> str:
-    env = {**os.environ, "POSTGRES_DSN": postgres_dsn_}
+    env = {
+        **os.environ,
+        "POSTGRES_DSN": postgres_dsn_,
+        "ECI_TENANT_ID": "eci-e2e-tenant",
+        "ECI_REPOSITORY": "sample-repo",
+        "ECI_ACL_GROUP": "developers",
+    }
     proc = subprocess.run(
         ["cargo", "run", "--quiet", "--manifest-path", str(INGESTION_DIR / "Cargo.toml"), "--", filename],
         cwd=FIXTURE_DIR,

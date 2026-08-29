@@ -46,6 +46,8 @@ const (
 	postgresPassword   = "eci-test-password-1234"
 	postgresDB         = "eci"
 	repoPlaceholder    = "local"
+	tenantPlaceholder  = "tenant-test"
+	aclPlaceholder     = "developers"
 )
 
 // stack raggruppa Neo4j/Postgres, condivisi da tutti gli scenari di
@@ -121,7 +123,6 @@ func TestSinkGraphResilienceWrappingGenuinelyWired(t *testing.T) {
 	deps := consumer.Deps{
 		DB:    unreachableDB,
 		Neo4j: nil,
-		Repo:  repoPlaceholder,
 		Logf:  t.Logf,
 	}
 
@@ -223,7 +224,7 @@ func TestSinkGraphMetricsExposedViaRealHTTP(t *testing.T) {
 	}
 	defer unreachableDB.Close()
 
-	deps := consumer.Deps{DB: unreachableDB, Neo4j: nil, Repo: repoPlaceholder, Logf: t.Logf}
+	deps := consumer.Deps{DB: unreachableDB, Neo4j: nil, Logf: t.Logf}
 
 	retryProducer := &kafka.Writer{
 		Addr:                   kafka.TCP(brokers...),
@@ -345,6 +346,11 @@ func scenario1NewCodeNodeMethodMerged(t *testing.T, ctx context.Context, st *sta
 	}
 	if props["symbol_id"] != nodeID {
 		t.Errorf("symbol_id = %v, want %q (= id, semplificazione dichiarata SPEC-015 §2)", props["symbol_id"], nodeID)
+	}
+	if props["tenant_id"] != tenantPlaceholder || props["repo"] != repoPlaceholder || props["acl_group"] != aclPlaceholder {
+		t.Errorf("security labels = (%v,%v,%v), want (%q,%q,%q)",
+			props["tenant_id"], props["repo"], props["acl_group"],
+			tenantPlaceholder, repoPlaceholder, aclPlaceholder)
 	}
 
 	assertProcessedEvent(t, ctx, st.db, eventID)
@@ -504,6 +510,8 @@ func scenario3RelationBeforeNodesThenEnriched(t *testing.T, ctx context.Context,
 func scenario5InvalidEnumDiscardedNoNeo4jWrite(t *testing.T, ctx context.Context, st *stack) {
 	deps := newDeps(st)
 	brokers := startKafka(t, ctx)
+	reader := newReaderWithGroup(brokers, "sink-graph-test-"+uniqueID(t, "scenario5-group"))
+	defer reader.Close()
 
 	t.Run("node_type_non_valido", func(t *testing.T) {
 		badID := uniqueID(t, "scenario5-bad-node-type")
@@ -511,7 +519,7 @@ func scenario5InvalidEnumDiscardedNoNeo4jWrite(t *testing.T, ctx context.Context
 		payload := codeNodePayload(badID, "Bogus", "BogusType", "go", "x.go")
 		produce(t, ctx, brokers, consumer.TopicCodeNode, badID, payload, eventID, "")
 
-		outcome := fetchAndProcessOnce(t, ctx, brokers, deps)
+		outcome := fetchAndProcessWithReader(t, ctx, reader, deps)
 		if outcome != consumer.OutcomeInvalidSkipped {
 			t.Fatalf("outcome = %v, want OutcomeInvalidSkipped", outcome)
 		}
@@ -527,7 +535,7 @@ func scenario5InvalidEnumDiscardedNoNeo4jWrite(t *testing.T, ctx context.Context
 		payload := codeRelationPayload(fromID, toID, "BOGUS_REL", nil)
 		produce(t, ctx, brokers, consumer.TopicCodeRelation, fromID+"->"+toID, payload, eventID, "")
 
-		outcome := fetchAndProcessOnce(t, ctx, brokers, deps)
+		outcome := fetchAndProcessWithReader(t, ctx, reader, deps)
 		if outcome != consumer.OutcomeInvalidSkipped {
 			t.Fatalf("outcome = %v, want OutcomeInvalidSkipped", outcome)
 		}
@@ -706,7 +714,6 @@ func newDeps(st *stack) consumer.Deps {
 	return consumer.Deps{
 		DB:    st.db,
 		Neo4j: st.driver,
-		Repo:  repoPlaceholder,
 		Logf:  func(format string, args ...any) {},
 	}
 }
@@ -796,7 +803,8 @@ func codeNodePayload(id, name, nodeType, language, path string) []byte {
 		"name":     name,
 		"ast_hash": language, // valore placeholder qualunque, non verificato dal consumer
 		"provenance": map[string]any{
-			"path": path,
+			"path": path, "tenant_id": tenantPlaceholder,
+			"repo": repoPlaceholder, "acl_group": aclPlaceholder,
 		},
 		"ext": map[string]any{
 			"node_type": nodeType,

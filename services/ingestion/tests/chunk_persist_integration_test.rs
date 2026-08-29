@@ -10,7 +10,10 @@
 //! `cargo test --test chunk_persist_integration_test -- --ignored --test-threads=1`
 
 use ingestion::chunking::CodeChunk;
-use ingestion::{parse_file_full, persist_parsed_file};
+use ingestion::{
+    parse_file_full, persist_parsed_file as persist_scoped, CodeNode, CodeRelation,
+    scoped_node_id, IngestionScope, PersistError, PersistSummary,
+};
 use postgres::{Client, NoTls};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, ImageExt};
@@ -19,6 +22,24 @@ use testcontainers_modules::postgres::Postgres as PostgresImage;
 const DB_USER: &str = "eci";
 const DB_PASSWORD: &str = "eci-test-password-1234";
 const DB_NAME: &str = "eci";
+
+fn default_scope() -> IngestionScope {
+    IngestionScope::new("tenant-test", "sample-repo", "developers").unwrap()
+}
+
+fn persisted_id(parser_id: &str) -> String {
+    scoped_node_id(&default_scope(), parser_id)
+}
+
+fn persist_parsed_file(
+    client: &mut Client,
+    nodes: Vec<CodeNode>,
+    relations: Vec<CodeRelation>,
+    chunks: &[CodeChunk],
+) -> Result<PersistSummary, PersistError> {
+    let scope = default_scope();
+    persist_scoped(client, &scope, nodes, relations, chunks)
+}
 
 fn start_migrated_postgres() -> (Container<PostgresImage>, Client) {
     if which("migrate").is_none() {
@@ -146,6 +167,7 @@ fn chunk_persist_scenarios_1_2_4_validate_single_chunk_and_outbox() {
     let source = read_fixture("order_service.go");
     let (nodes, relations, chunks) = parse_file_full("order_service.go", &source);
     let validate_id = find_node_id(&nodes, "Method", "Validate");
+    let persisted_validate_id = persisted_id(&validate_id);
 
     let validate_chunks: Vec<&CodeChunk> = chunks.iter().filter(|c| c.entity_id == validate_id).collect();
     assert_eq!(
@@ -162,7 +184,7 @@ fn chunk_persist_scenarios_1_2_4_validate_single_chunk_and_outbox() {
     );
 
     assert_eq!(
-        chunk_count_for_entity(&mut client, &validate_id),
+        chunk_count_for_entity(&mut client, &persisted_validate_id),
         1,
         "scenario 1: esattamente una riga code_chunk per Validate"
     );
@@ -192,13 +214,18 @@ fn chunk_persist_scenarios_1_2_4_validate_single_chunk_and_outbox() {
     let validate_chunk_payload: serde_json::Value = client
         .query_one(
             "SELECT payload FROM outbox WHERE aggregate_type = 'CodeChunk' AND payload->>'entity_id' = $1",
-            &[&validate_id],
+            &[&persisted_validate_id],
         )
         .expect("query outbox CodeChunk per il chunk di Validate")
         .get(0);
     assert_eq!(
         validate_chunk_payload.get("provenance"),
-        Some(&serde_json::json!({ "path": "order_service.go" })),
+        Some(&serde_json::json!({
+            "path": "order_service.go",
+            "tenant_id": "tenant-test",
+            "repo": "sample-repo",
+            "acl_group": "developers"
+        })),
         "SPEC-032 scenario 1: provenance del CodeChunk di Validate deve combaciare col path del suo CodeNode: {validate_chunk_payload:?}"
     );
 
@@ -207,7 +234,7 @@ fn chunk_persist_scenarios_1_2_4_validate_single_chunk_and_outbox() {
     let _summary2 = persist_parsed_file(&mut client, nodes2, relations2, &chunks2)
         .expect("persist_parsed_file scenario 2");
     assert_eq!(
-        chunk_count_for_entity(&mut client, &validate_id),
+        chunk_count_for_entity(&mut client, &persisted_validate_id),
         1,
         "scenario 2: il conteggio code_chunk per Validate deve restare 1 (vecchie cancellate, nuove identiche inserite, non duplicate)"
     );
@@ -231,6 +258,7 @@ fn chunk_persist_scenario3_repersist_with_different_chunk_count_replaces_not_sum
     std::env::set_var("CHUNK_BUDGET_CHARS_GO", "20");
     let (nodes, relations, chunks) = parse_file_full("order_service.go", &source);
     let validate_id = find_node_id(&nodes, "Method", "Validate");
+    let persisted_validate_id = persisted_id(&validate_id);
     let first_count = chunks.iter().filter(|c| c.entity_id == validate_id).count();
     assert!(
         first_count > 1,
@@ -239,7 +267,7 @@ fn chunk_persist_scenario3_repersist_with_different_chunk_count_replaces_not_sum
     persist_parsed_file(&mut client, nodes, relations, &chunks)
         .expect("persist_parsed_file scenario 3 (prima versione)");
     assert_eq!(
-        chunk_count_for_entity(&mut client, &validate_id),
+        chunk_count_for_entity(&mut client, &persisted_validate_id),
         first_count as i64,
         "dopo il primo persist, il conteggio deve combaciare col numero di chunk prodotti"
     );
@@ -257,7 +285,7 @@ fn chunk_persist_scenario3_repersist_with_different_chunk_count_replaces_not_sum
     std::env::remove_var("CHUNK_BUDGET_CHARS_GO");
 
     assert_eq!(
-        chunk_count_for_entity(&mut client, &validate_id),
+        chunk_count_for_entity(&mut client, &persisted_validate_id),
         1,
         "scenario 3: il conteggio deve riflettere il NUOVO numero di chunk (1), non la somma (first_count + 1)"
     );
@@ -274,6 +302,7 @@ fn chunk_persist_scenario5_js_entity_same_behavior_as_go() {
     let source = read_js_fixture("util.js");
     let (nodes, relations, chunks) = parse_file_full("util.js", &source);
     let compute_total_id = find_node_id(&nodes, "Function", "computeTotal");
+    let persisted_compute_total_id = persisted_id(&compute_total_id);
 
     let entity_chunks: Vec<&CodeChunk> = chunks.iter().filter(|c| c.entity_id == compute_total_id).collect();
     assert_eq!(
@@ -286,7 +315,7 @@ fn chunk_persist_scenario5_js_entity_same_behavior_as_go() {
         .expect("persist_parsed_file scenario 5 (JS)");
 
     assert_eq!(
-        chunk_count_for_entity(&mut client, &compute_total_id),
+        chunk_count_for_entity(&mut client, &persisted_compute_total_id),
         1,
         "scenario 5: il cablaggio deve funzionare identico per un'entità JS"
     );
@@ -303,6 +332,7 @@ fn chunk_persist_edge_case_zero_count_entity_writes_single_chunk_row() {
     let (nodes, relations, chunks) = parse_file_full("empty.go", "");
     assert_eq!(nodes.len(), 1, "precondizione: source vuoto -> solo il File node");
     let file_id = nodes[0].id.clone();
+    let persisted_file_id = persisted_id(&file_id);
     assert_eq!(
         chunks.len(),
         1,
@@ -314,7 +344,7 @@ fn chunk_persist_edge_case_zero_count_entity_writes_single_chunk_row() {
         .expect("persist_parsed_file edge case zero-count");
 
     assert_eq!(
-        chunk_count_for_entity(&mut client, &file_id),
+        chunk_count_for_entity(&mut client, &persisted_file_id),
         1,
         "edge case: una riga code_chunk deve comunque essere scritta, non un caso speciale saltato"
     );

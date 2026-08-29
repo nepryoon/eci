@@ -36,7 +36,17 @@ fn main() {
     let mut client = postgres::Client::connect(&dsn, postgres::NoTls)
         .unwrap_or_else(|e| panic!("connessione a Postgres ({dsn}): {e}"));
 
-    let summary = ingestion::persist_parsed_file(&mut client, nodes, relations, &chunks)
+    let required_env = |name: &str| {
+        std::env::var(name).unwrap_or_else(|_| panic!("{name} is required and has no security default"))
+    };
+    let scope = ingestion::IngestionScope::new(
+        required_env("ECI_TENANT_ID"),
+        required_env("ECI_REPOSITORY"),
+        required_env("ECI_ACL_GROUP"),
+    )
+    .unwrap_or_else(|e| panic!("invalid ingestion scope: {e}"));
+
+    let summary = ingestion::persist_parsed_file(&mut client, &scope, nodes, relations, &chunks)
         .unwrap_or_else(|e| panic!("persist_parsed_file({path:?}): {e}"));
     println!(
         "persist_parsed_file({path:?}): {} nodi upsert, {} relazioni sostituite, {} righe outbox",

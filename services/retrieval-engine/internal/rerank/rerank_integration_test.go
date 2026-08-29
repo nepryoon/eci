@@ -22,7 +22,12 @@ import (
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	tcneo4j "github.com/testcontainers/testcontainers-go/modules/neo4j"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
 
+	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
+	"github.com/eci-project/eci/libs/go/eci/secctx"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/hybridsearch"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/rerank"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/rerankclient"
@@ -33,7 +38,7 @@ const neo4jAdminPassword = "eci-test-password-1234"
 func hop(v float64) *float64 { return &v }
 
 func TestRerankIntegration(t *testing.T) {
-	ctx := context.Background()
+	ctx := authenticatedContext(t, context.Background())
 	driver := startNeo4j(t, ctx)
 	rerankerBaseURL := startRerankerFake(t)
 	client := rerankclient.New(rerankerBaseURL)
@@ -104,6 +109,21 @@ func TestRerankIntegration(t *testing.T) {
 	})
 }
 
+func authenticatedContext(t *testing.T, base context.Context) context.Context {
+	t.Helper()
+	encoded, err := proto.Marshal(&retrievalv1.SecurityContext{TenantId: "tenant-test", UserId: "user-test", AllowedRepos: []string{"local"}, AclGroups: []string{"developers"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming := metadata.NewIncomingContext(base, metadata.Pairs("eci-security-context-bin", string(encoded)))
+	var result context.Context
+	_, err = secctx.UnaryServerInterceptor()(incoming, nil, &grpc.UnaryServerInfo{}, func(ctx context.Context, _ any) (any, error) { result = ctx; return nil, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
 func candidateHop(candidates []hybridsearch.RetrievedNode, id string) *float64 {
 	for _, c := range candidates {
 		if c.NodeID == id {
@@ -126,7 +146,8 @@ func seedNodeWithImpactScore(t *testing.T, ctx context.Context, driver neo4j.Dri
 	t.Helper()
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session.Close(ctx)
-	_, err := session.Run(ctx, "MERGE (n:CodeNode {id: $id}) SET n.impact_score = $score", map[string]any{"id": id, "score": score})
+	_, err := session.Run(ctx, `MERGE (n:CodeNode {id: $id})
+		SET n.impact_score = $score, n.tenant_id = 'tenant-test', n.repo = 'local', n.acl_group = 'developers'`, map[string]any{"id": id, "score": score})
 	if err != nil {
 		t.Fatalf("seed nodo %s con impact_score: %v", id, err)
 	}
@@ -136,7 +157,8 @@ func seedNodeWithoutImpactScore(t *testing.T, ctx context.Context, driver neo4j.
 	t.Helper()
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session.Close(ctx)
-	_, err := session.Run(ctx, "MERGE (n:CodeNode {id: $id})", map[string]any{"id": id})
+	_, err := session.Run(ctx, `MERGE (n:CodeNode {id: $id})
+		SET n.tenant_id = 'tenant-test', n.repo = 'local', n.acl_group = 'developers'`, map[string]any{"id": id})
 	if err != nil {
 		t.Fatalf("seed nodo %s senza impact_score: %v", id, err)
 	}

@@ -18,10 +18,12 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/eci-project/eci/libs/go/eci/accessscope"
 	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/hybridsearch"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/rerank"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/rerankclient"
+	"github.com/eci-project/eci/services/retrieval-engine/internal/securityfilter"
 )
 
 const (
@@ -77,12 +79,23 @@ type Server struct {
 // GetNode — SPEC-016 §2/§3 scenari 1/2: MATCH (n:CodeNode {id: $node_id})
 // RETURN n. Nodo assente -> NotFound esplicito, mai una risposta OK vuota.
 func (s *Server) GetNode(ctx context.Context, req *retrievalv1.GetNodeRequest) (*retrievalv1.GetNodeResponse, error) {
+	ctx, observe := securityfilter.Observe(ctx, "neo4j")
+	outcome := "error"
+	defer func() { observe(outcome) }()
+	scope, err := accessscope.FromContext(ctx)
+	if err != nil {
+		return nil, status.Error(codes.PermissionDenied, "security scope non valido")
+	}
 	session := s.Driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session.Close(ctx)
 
-	result, err := session.Run(ctx, "MATCH (n:CodeNode {id: $node_id}) RETURN n", map[string]any{
-		"node_id": req.GetNodeId(),
-	})
+	params := securityfilter.Neo4jParams(scope)
+	params["node_id"] = req.GetNodeId()
+	result, err := session.Run(ctx, `MATCH (n:CodeNode {id: $node_id})
+WHERE n.tenant_id = $tenant_id
+  AND n.repo IN $allowed_repos
+  AND n.acl_group IN $acl_groups
+RETURN n`, params)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "query Neo4j: %v", err)
 	}
@@ -91,6 +104,7 @@ func (s *Server) GetNode(ctx context.Context, req *retrievalv1.GetNodeRequest) (
 		return nil, status.Errorf(codes.Internal, "lettura risultati Neo4j: %v", err)
 	}
 	if len(records) == 0 {
+		outcome = "empty"
 		return nil, status.Errorf(codes.NotFound, "nodo %q non trovato", req.GetNodeId())
 	}
 
@@ -98,6 +112,7 @@ func (s *Server) GetNode(ctx context.Context, req *retrievalv1.GetNodeRequest) (
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "campo n: %v", err)
 	}
+	outcome = "allow"
 	return &retrievalv1.GetNodeResponse{Node: retrievedNodeFromDBNode(node)}, nil
 }
 
@@ -106,6 +121,13 @@ func (s *Server) GetNode(ctx context.Context, req *retrievalv1.GetNodeRequest) (
 // filtro opzionale (vuoto o solo UNSPECIFIED = nessun filtro),
 // direction=UNSPECIFIED = entrambe le direzioni.
 func (s *Server) ExpandNeighbors(ctx context.Context, req *retrievalv1.ExpandNeighborsRequest) (*retrievalv1.ExpandNeighborsResponse, error) {
+	ctx, observe := securityfilter.Observe(ctx, "neo4j")
+	outcome := "error"
+	defer func() { observe(outcome) }()
+	scope, err := accessscope.FromContext(ctx)
+	if err != nil {
+		return nil, status.Error(codes.PermissionDenied, "security scope non valido")
+	}
 	depth := req.GetDepth()
 	if depth == 0 {
 		depth = defaultExpandDepth
@@ -139,8 +161,13 @@ func (s *Server) ExpandNeighbors(ctx context.Context, req *retrievalv1.ExpandNei
 	// di sicurezza usato per label/tipi di relazione.
 	query := fmt.Sprintf(
 		`MATCH (n:CodeNode {id: $node_id})
+WHERE n.tenant_id = $tenant_id
+  AND n.repo IN $allowed_repos
+  AND n.acl_group IN $acl_groups
 MATCH p = (n)%s[r%s*1..%d]%s(m:CodeNode)
 WHERE m.id <> $node_id
+  AND all(x IN nodes(p) WHERE x.tenant_id = $tenant_id
+      AND x.repo IN $allowed_repos AND x.acl_group IN $acl_groups)
 RETURN DISTINCT m, [x IN relationships(p) | type(x)] AS rel_types
 LIMIT $limit`,
 		left, typeFilter, depth, right,
@@ -149,10 +176,10 @@ LIMIT $limit`,
 	session := s.Driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session.Close(ctx)
 
-	result, err := session.Run(ctx, query, map[string]any{
-		"node_id": req.GetNodeId(),
-		"limit":   int64(limit),
-	})
+	params := securityfilter.Neo4jParams(scope)
+	params["node_id"] = req.GetNodeId()
+	params["limit"] = int64(limit)
+	result, err := session.Run(ctx, query, params)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "query Neo4j: %v", err)
 	}
@@ -194,6 +221,11 @@ LIMIT $limit`,
 		}
 	}
 
+	if len(neighbors) == 0 {
+		outcome = "empty"
+	} else {
+		outcome = "allow"
+	}
 	return &retrievalv1.ExpandNeighborsResponse{
 		Neighbors:          neighbors,
 		TraversedEdgeTypes: traversed,
@@ -223,6 +255,13 @@ func (s *Server) HybridSearch(ctx context.Context, req *retrievalv1.HybridSearch
 // rispetto a SPEC-016 — nessuna riga toccata nella logica, solo rinominata
 // da HybridSearch (SPEC-041 §9: "nessuna regressione sui test di T1.4").
 func (s *Server) hybridSearchFullTextOnly(ctx context.Context, req *retrievalv1.HybridSearchRequest) (*retrievalv1.HybridSearchResponse, error) {
+	ctx, observe := securityfilter.Observe(ctx, "neo4j")
+	outcome := "error"
+	defer func() { observe(outcome) }()
+	scope, err := accessscope.FromContext(ctx)
+	if err != nil {
+		return nil, status.Error(codes.PermissionDenied, "security scope non valido")
+	}
 	graphLimit := req.GetGraphLimit()
 	if graphLimit == 0 {
 		graphLimit = defaultGraphLimit
@@ -232,11 +271,14 @@ func (s *Server) hybridSearchFullTextOnly(ctx context.Context, req *retrievalv1.
 		topK = defaultTopK
 	}
 
-	params := map[string]any{
-		"query_text":  req.GetQueryText(),
-		"graph_limit": int64(graphLimit),
+	params := securityfilter.Neo4jParams(scope)
+	params["query_text"] = req.GetQueryText()
+	params["graph_limit"] = int64(graphLimit)
+	conditions := []string{
+		"node.tenant_id = $tenant_id",
+		"node.repo IN $allowed_repos",
+		"node.acl_group IN $acl_groups",
 	}
-	var conditions []string
 	if req.GetDomain() != retrievalv1.Domain_DOMAIN_UNSPECIFIED {
 		if d, ok := domainToString[req.GetDomain()]; ok {
 			conditions = append(conditions, "node.domain = $domain")
@@ -278,6 +320,11 @@ func (s *Server) hybridSearchFullTextOnly(ctx context.Context, req *retrievalv1.
 		nodes = append(nodes, retrievedNodeFromDBNode(node))
 	}
 
+	if len(nodes) == 0 {
+		outcome = "empty"
+	} else {
+		outcome = "allow"
+	}
 	return &retrievalv1.HybridSearchResponse{
 		Nodes:             nodes,
 		GraphCandidates:   uint32(len(records)),
@@ -297,6 +344,9 @@ func (s *Server) hybridSearchFullTextOnly(ctx context.Context, req *retrievalv1.
 // solo ([]RetrievedNode, error), nessun conteggio separato, scelta
 // dichiarata a fondo SPEC.
 func (s *Server) hybridSearchGraphVector(ctx context.Context, req *retrievalv1.HybridSearchRequest) (*retrievalv1.HybridSearchResponse, error) {
+	if _, err := accessscope.FromContext(ctx); err != nil {
+		return nil, status.Error(codes.PermissionDenied, "security scope non valido")
+	}
 	if s.Qdrant == nil || s.Embedder == nil {
 		return nil, status.Error(codes.FailedPrecondition, "hybrid search grafo+vettoriale non disponibile: Qdrant/Embedder non configurati su questo server")
 	}

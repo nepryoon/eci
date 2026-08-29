@@ -39,7 +39,7 @@ const (
 )
 
 func TestHybridGraphVectorSearchContentHydration(t *testing.T) {
-	ctx := context.Background()
+	ctx := authenticatedContext(t, context.Background())
 	driver, callCount := startCountingNeo4j(t, ctx)
 	qc, _, _ := startQdrant(t, ctx)
 	embedderBaseURL := startEmbedderFake(t)
@@ -89,12 +89,13 @@ func TestHybridGraphVectorSearchContentHydration(t *testing.T) {
 
 		// Prova diretta di "una query batch, non N separate" (SPEC-045 §3
 		// scenario 2): entry_node_id isolato -> GraphTraversal fa UNA
-		// query (risultato vuoto); DUE nodi vector-only mancano di Name ->
-		// se l'hydration fosse una query PER NODO, il totale sarebbe
-		// 1+2=3. Una hydration batch corretta produce 1+1=2.
+		// query (risultato vuoto); il re-check ACL T6.3 fa UNA query batch;
+		// DUE nodi vector-only mancano di Name -> se l'hydration fosse una
+		// query PER NODO, il totale sarebbe 1+1+2=4. Una hydration batch
+		// corretta produce 1+1+1=3.
 		queriesUsed := after - before
-		if queriesUsed > 2 {
-			t.Errorf("query Neo4j eseguite = %d, want <= 2 (1 GraphTraversal + 1 hydration BATCH, non 1 per nodo mancante)", queriesUsed)
+		if queriesUsed > 3 {
+			t.Errorf("query Neo4j eseguite = %d, want <= 3 (1 GraphTraversal + 1 ACL re-check BATCH + 1 hydration BATCH, non 1 per nodo mancante)", queriesUsed)
 		}
 	})
 
@@ -162,12 +163,12 @@ func seedContentGraph(t *testing.T, ctx context.Context, driver neo4j.DriverWith
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session.Close(ctx)
 	_, err := session.Run(ctx, `
-		CREATE (seed:CodeNode {id: $seed_id, domain: 'code', repo: 'local', name: 'Seed'})
-		CREATE (dep:CodeNode {id: $dep_id, domain: 'code', repo: 'local', name: 'GraphDep'})
-		CREATE (nc:CodeNode {id: $nc_id, domain: 'code', repo: 'local', name: 'NoChunks'})
-		CREATE (iso:CodeNode {id: $iso_id, domain: 'code', repo: 'local', name: 'IsolatedEntry'})
-		CREATE (v1:CodeNode {id: $v1_id, domain: 'code', repo: 'local', name: 'VectorOnly1'})
-		CREATE (v2:CodeNode {id: $v2_id, domain: 'code', repo: 'local', name: 'VectorOnly2'})
+		CREATE (seed:CodeNode {id: $seed_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', name: 'Seed'})
+		CREATE (dep:CodeNode {id: $dep_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', name: 'GraphDep'})
+		CREATE (nc:CodeNode {id: $nc_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', name: 'NoChunks'})
+		CREATE (iso:CodeNode {id: $iso_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', name: 'IsolatedEntry'})
+		CREATE (v1:CodeNode {id: $v1_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', name: 'VectorOnly1'})
+		CREATE (v2:CodeNode {id: $v2_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', name: 'VectorOnly2'})
 		CREATE (dep)-[:CALLS {weight: 1}]->(seed)
 		CREATE (nc)-[:CALLS {weight: 1}]->(seed)
 	`, map[string]any{
@@ -246,6 +247,9 @@ func seedContentChunks(t *testing.T, ctx context.Context, client *opensearchapi.
 				"text":        map[string]any{"type": "text"},
 				"entity_id":   map[string]any{"type": "keyword"},
 				"chunk_index": map[string]any{"type": "integer"},
+				"tenant_id":   map[string]any{"type": "keyword"},
+				"repo":        map[string]any{"type": "keyword"},
+				"acl_group":   map[string]any{"type": "keyword"},
 			},
 		},
 	}
@@ -263,11 +267,15 @@ func seedContentChunks(t *testing.T, ctx context.Context, client *opensearchapi.
 		EntityID   string `json:"entity_id"`
 		ChunkIndex int    `json:"chunk_index"`
 		Text       string `json:"text"`
+		TenantID   string `json:"tenant_id"`
+		Repo       string `json:"repo"`
+		ACLGroup   string `json:"acl_group"`
 	}
 	chunks := []chunk{
-		{EntityID: contentGraphDepID, ChunkIndex: 2, Text: "CCC"},
-		{EntityID: contentGraphDepID, ChunkIndex: 0, Text: "AAA"},
-		{EntityID: contentGraphDepID, ChunkIndex: 1, Text: "BBB"},
+		{EntityID: contentGraphDepID, ChunkIndex: 2, Text: "CCC", TenantID: "tenant-test", Repo: "local", ACLGroup: "developers"},
+		{EntityID: contentGraphDepID, ChunkIndex: 0, Text: "AAA", TenantID: "tenant-test", Repo: "local", ACLGroup: "developers"},
+		{EntityID: contentGraphDepID, ChunkIndex: 1, Text: "BBB", TenantID: "tenant-test", Repo: "local", ACLGroup: "developers"},
+		{EntityID: contentGraphDepID, ChunkIndex: 3, Text: "FOREIGN_SECRET", TenantID: "tenant-b", Repo: "local", ACLGroup: "developers"},
 	}
 	for i, c := range chunks {
 		body, err := json.Marshal(c)
