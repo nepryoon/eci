@@ -286,9 +286,9 @@ services:
       start_period: 10s
 
   prometheus:
-    # SPEC-036 §2 (T3.3 parte 2/2) — scrape delle metriche di salute dei
-    # quattro sink Kafka (eci_messages_processed_total/
-    # eci_last_processed_timestamp_seconds, libs/go/eci/metrics). I quattro
+    # SPEC-036 §2 + SPEC-056 §8 — scrape delle metriche di salute dei
+    # quattro sink Kafka e delle decisioni/latency authz dei due servizi
+    # query. I quattro
     # sink NON sono servizi Docker Compose (verificato, non presunto —
     # vedi nota in deploy/compose/prometheus.yml): girano come processi
     # host, raggiunti da questo container via host.docker.internal, che
