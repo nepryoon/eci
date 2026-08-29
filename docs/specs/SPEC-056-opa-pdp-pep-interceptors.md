@@ -1,5 +1,5 @@
 # SPEC-056 — OPA PDP e PEP fail-closed negli interceptor gRPC
-Stato: implemented
+Stato: verified
 Task-tree: T6.2 · Servizio: `libs/go/eci/authz`, `services/retrieval-engine`, `services/semantic-cache` · ADD: Modulo 3 §2.1
 Contratti: `contracts/proto/eci/retrieval/v1/retrieval.proto`, `contracts/proto/eci/semanticcache/v1/semanticcache.proto` (sola lettura)
 
@@ -233,8 +233,8 @@ package/file/wiring assente prima dell'implementazione.
 - [x] Lo stack dev include OPA pin, healthcheck e policy read-only; nessun secret.
 - [x] Metriche/span hanno nomi e cardinalità conformi a §8.
 - [x] Nessun file in `docs/add/**` o `contracts/**` cambia.
-- [ ] `task build`, `task lint`, `task test`, `task guard` verdi in CI.
-- [ ] SPEC passa il secondo review avversariale, poi è `implemented`; diventa
+- [x] `task build`, `task lint`, `task test`, `task guard` verdi in CI.
+- [x] SPEC passa il secondo review avversariale, poi è `implemented`; diventa
   `verified` solo con evidenza CI/PR reale.
 
 ## 10. Review avversariale di approvazione
@@ -284,3 +284,20 @@ Deviazione controllata rispetto all'interfaccia approvata iniziale: durante il
 wiring è stato rilevato che `ImpactAnalysis` è server-streaming. La SPEC e i
 test sono stati corretti prima del merge aggiungendo gli interceptor stream
 `secctx -> authz`; lasciare solo unary avrebbe creato un bypass reale.
+
+Verifica finale PR [#69](https://github.com/nepryoon/eci/pull/69), commit
+funzionale `8370f7e3b12dc9c1ae1b86590a886dc26e8fb247`:
+
+- GitHub Actions run
+  [33241977832](https://github.com/nepryoon/eci/actions/runs/33241977832):
+  `build-lint-test` verde in 8m17s, `guard` verde in 1m50s.
+- Il run include `TestProductionClientAgainstRealPinnedOPA`, che esegue OPA
+  1.20.1 reale, `opa test` sul corpus versionato e decisioni allow/deny via il
+  client production; `libs/go/eci/authz` verde.
+- La suite Orchestrator completa è verde con processo Retrieval reale e prova
+  che la telemetria authz non può bloccare il fixture tramite pipe non drenati.
+- I due finding P2 (metriche registrate ma non esposte; cleanup container
+  registrato troppo tardi) sono coperti da regressioni, risposti e risolti.
+- `/metrics` è verificato per entrambi i servizi e Prometheus scrapa 9105/9106.
+
+Esito T6.2: `verified` senza modifica di ADD o contratti condivisi.
