@@ -194,7 +194,10 @@ def retrieval_engine_addr(neo4j_bolt_url, opa_url):
         "OPA_URL": opa_url,
         "OPA_ALLOW_INSECURE_HTTP": "true",
     }
-    proc = subprocess.Popen([binary], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    # The production stdout OTel exporter emits one multi-line span per authz
+    # decision. A PIPE that nobody drains eventually fills and blocks the gRPC
+    # server; discard test-process telemetry instead of creating that deadlock.
+    proc = subprocess.Popen([binary], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
     try:
         _wait_for_grpc_health(
             addr,

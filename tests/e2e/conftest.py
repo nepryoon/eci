@@ -309,7 +309,9 @@ def retrieval_engine_addr(neo4j_bolt_url, opa_url):
         "OPA_URL": opa_url,
         "OPA_ALLOW_INSECURE_HTTP": "true",
     }
-    proc = subprocess.Popen([binary], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    # Authz adds a span for every request. Do not leave an undrained stdout
+    # pipe that can fill and stop the real retrieval process during the suite.
+    proc = subprocess.Popen([binary], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
     try:
         security_context = retrieval_pb2.SecurityContext(
             tenant_id="eci-e2e-tenant",
