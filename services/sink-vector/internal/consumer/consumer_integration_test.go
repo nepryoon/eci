@@ -126,6 +126,15 @@ func scenario1PointWrittenWithVectorAndPayload(t *testing.T, ctx context.Context
 	if got := payloadMap["domain"].GetStringValue(); got != "code" {
 		t.Errorf("payload['domain'] = %q, want %q", got, "code")
 	}
+	if got := payloadMap["tenant_id"].GetStringValue(); got != "tenant-test" {
+		t.Errorf("payload['tenant_id'] = %q, want %q", got, "tenant-test")
+	}
+	if got := payloadMap["repo"].GetStringValue(); got != "sample-repo" {
+		t.Errorf("payload['repo'] = %q, want %q", got, "sample-repo")
+	}
+	if got := payloadMap["acl_group"].GetStringValue(); got != "developers" {
+		t.Errorf("payload['acl_group'] = %q, want %q", got, "developers")
+	}
 	gotProvenance := payloadMap["provenance"].GetStructValue().GetFields()
 	if got := gotProvenance["path"].GetStringValue(); got != "order_service.go" {
 		t.Errorf("payload['provenance']['path'] = %q, want %q", got, "order_service.go")

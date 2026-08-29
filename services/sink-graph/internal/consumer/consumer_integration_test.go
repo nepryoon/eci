@@ -347,6 +347,11 @@ func scenario1NewCodeNodeMethodMerged(t *testing.T, ctx context.Context, st *sta
 	if props["symbol_id"] != nodeID {
 		t.Errorf("symbol_id = %v, want %q (= id, semplificazione dichiarata SPEC-015 §2)", props["symbol_id"], nodeID)
 	}
+	if props["tenant_id"] != tenantPlaceholder || props["repo"] != repoPlaceholder || props["acl_group"] != aclPlaceholder {
+		t.Errorf("security labels = (%v,%v,%v), want (%q,%q,%q)",
+			props["tenant_id"], props["repo"], props["acl_group"],
+			tenantPlaceholder, repoPlaceholder, aclPlaceholder)
+	}
 
 	assertProcessedEvent(t, ctx, st.db, eventID)
 }
