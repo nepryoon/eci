@@ -11,15 +11,19 @@ import (
 var ErrStalePartitionGeneration = errors.New("gdsimpact: partition generation stale")
 
 const writeBackQuery = `
-MATCH (p:GDSPartition {tenant_id: $tenant_id, repo: $repo, acl_group: $acl_group})
-SET p.write_lock = coalesce(p.write_lock, 0) + 1
-WITH p
-WHERE p.generation = $partition_generation
 UNWIND $rows AS row
+WITH row
+ORDER BY row.id
 MATCH (n:CodeNode {id: row.id})
 WHERE n.tenant_id = $tenant_id AND n.repo = $repo AND n.acl_group = $acl_group
-WITH p, collect({node: n, row: row}) AS targets
+SET n._eci_write_lock = coalesce(n._eci_write_lock, 0) + 1
+REMOVE n._eci_write_lock
+WITH collect({node: n, row: row}) AS targets
 WHERE size(targets) = size($rows)
+MATCH (p:GDSPartition {tenant_id: $tenant_id, repo: $repo, acl_group: $acl_group})
+SET p.write_lock = coalesce(p.write_lock, 0) + 1
+WITH p, targets
+WHERE p.generation = $partition_generation
 UNWIND targets AS target
 WITH p, target.node AS n, target.row AS row
 SET n.impact_score = row.score, n.community_id = row.community, n.impact_kind = row.impact_kind,

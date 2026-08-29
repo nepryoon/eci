@@ -76,6 +76,7 @@ func TestWriteBackLocksTargetsInStableOrderBeforePartitionFence(t *testing.T) {
 	for _, fragment := range []string{
 		"ORDER BY row.id",
 		"SET n._eci_write_lock = coalesce(n._eci_write_lock, 0) + 1",
+		"REMOVE n._eci_write_lock",
 		"MATCH (p:GDSPartition",
 		"SET p.write_lock = coalesce(p.write_lock, 0) + 1",
 	} {

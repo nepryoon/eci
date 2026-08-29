@@ -38,6 +38,7 @@ func TestGDSMutationLockOrderIsDeterministicAndScopeIsReadAfterEntityLock(t *tes
 	assertFragmentsInOrder(t, "node pre-lock", lockCodeNodeQuery,
 		"MERGE (n:CodeNode {id: $id})",
 		"SET n._eci_write_lock = coalesce(n._eci_write_lock, 0) + 1",
+		"REMOVE n._eci_write_lock",
 	)
 	assertFragmentsInOrder(t, "node mutation", nodeQuery,
 		"MATCH (n:CodeNode {id: $id})",
@@ -53,10 +54,11 @@ func TestGDSMutationLockOrderIsDeterministicAndScopeIsReadAfterEntityLock(t *tes
 		"ORDER BY endpoint_id",
 		"MERGE (endpoint:CodeNode {id: endpoint_id})",
 		"SET endpoint._eci_write_lock = coalesce(endpoint._eci_write_lock, 0) + 1",
+		"REMOVE endpoint._eci_write_lock",
 	)
 	assertFragmentsInOrder(t, "relation mutation", relationQuery,
 		"MATCH (from:CodeNode {id: $from_id})",
-		"existing_from.tenant_id",
+		"from.tenant_id AS from_tenant_id",
 		"ORDER BY scope_tenant_id, scope_repo, scope_acl_group",
 		"MERGE (p:GDSPartition",
 	)
