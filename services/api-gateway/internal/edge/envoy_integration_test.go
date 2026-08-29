@@ -374,6 +374,31 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 			t.Fatalf("first stream event=%v err=%v", first, err)
 		}
 		cancelStream()
+		_, _ = stream.Recv()
+
+		beforeConcurrent := len(backend.snapshot())
+		holdContext, cancelHold := context.WithCancel(requestContext)
+		hold, err := retrievalv1.NewRetrievalEngineClient(connection).ImpactAnalysis(holdContext, &retrievalv1.ImpactAnalysisRequest{EntryNodeId: "deadline"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first, err = hold.Recv(); err != nil || first.GetProgress().GetNodesEmitted() != 1 {
+			t.Fatalf("holding stream event=%v err=%v", first, err)
+		}
+		secondContext, cancelSecond := context.WithTimeout(requestContext, time.Second)
+		second, err := retrievalv1.NewRetrievalEngineClient(connection).ImpactAnalysis(secondContext, &retrievalv1.ImpactAnalysisRequest{EntryNodeId: "deadline"})
+		if err == nil {
+			_, err = second.Recv()
+		}
+		cancelSecond()
+		cancelHold()
+		_, _ = hold.Recv()
+		if err == nil {
+			t.Fatal("second concurrent direct stream bypassed the cluster admission bound")
+		}
+		if got := len(backend.snapshot()) - beforeConcurrent; got != 1 {
+			t.Fatalf("concurrent direct streams reaching backend=%d want=1", got)
+		}
 	})
 
 	t.Run("forged proxy and router controls cannot amplify upstream", func(t *testing.T) {
@@ -874,6 +899,7 @@ func renderIntegrationEnvoyConfig(t *testing.T, root string, helperPort, grpcPor
 	config = strings.ReplaceAll(config, "8081", strconv.Itoa(helperPort))
 	config = strings.ReplaceAll(config, "50053", strconv.Itoa(grpcPort))
 	config = strings.ReplaceAll(config, "request_headers_timeout: 5s", "request_headers_timeout: 0.2s")
+	config = strings.ReplaceAll(config, "max_requests: 100", "max_requests: 1")
 	path := filepath.Join(t.TempDir(), "envoy.yaml")
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		t.Fatal(err)

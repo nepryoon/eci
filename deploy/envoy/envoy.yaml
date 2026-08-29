@@ -119,8 +119,49 @@ static_resources:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.LuaPerRoute
                               disabled: true
                         - match:
+                            path: /eci.retrieval.v1.RetrievalEngine/ImpactAnalysis
+                          route:
+                            cluster: retrieval_engine_stream
+                            timeout: 30s
+                            idle_timeout: 30s
+                          typed_per_filter_config:
+                            envoy.filters.http.local_ratelimit:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                              stat_prefix: eci_edge_direct_stream
+                              token_bucket:
+                                max_tokens: 1000
+                                tokens_per_fill: 1000
+                                fill_interval: 1s
+                              descriptors:
+                                - entries:
+                                    - key: authenticated_caller
+                                      value: ""
+                                  token_bucket:
+                                    max_tokens: 10
+                                    tokens_per_fill: 10
+                                    fill_interval: 1s
+                              max_dynamic_descriptors: 10000
+                              rate_limits:
+                                - actions:
+                                    - request_headers:
+                                        header_name: x-eci-rate-limit-key
+                                        descriptor_key: authenticated_caller
+                              filter_enabled:
+                                default_value:
+                                  numerator: 100
+                                  denominator: HUNDRED
+                              filter_enforced:
+                                default_value:
+                                  numerator: 100
+                                  denominator: HUNDRED
+                              response_headers_to_add:
+                                - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                                  header:
+                                    key: retry-after
+                                    value: "1"
+                        - match:
                             safe_regex:
-                              regex: ^/eci\.retrieval\.v1\.RetrievalEngine/(HybridSearch|GetNode|ExpandNeighbors|ImpactAnalysis)$
+                              regex: ^/eci\.retrieval\.v1\.RetrievalEngine/(HybridSearch|GetNode|ExpandNeighbors)$
                           route:
                             cluster: retrieval_engine
                             timeout: 30s
@@ -400,6 +441,29 @@ static_resources:
             http2_protocol_options: {}
       load_assignment:
         cluster_name: retrieval_engine
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: retrieval-engine
+                      port_value: 50053
+    # A separate cluster gives public direct ImpactAnalysis streams an active
+    # request circuit breaker. Rate limits bound starts; this bounds occupancy.
+    - name: retrieval_engine_stream
+      type: STRICT_DNS
+      connect_timeout: 1s
+      circuit_breakers:
+        thresholds:
+          - priority: DEFAULT
+            max_requests: 100
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: retrieval_engine_stream
         endpoints:
           - lb_endpoints:
               - endpoint:

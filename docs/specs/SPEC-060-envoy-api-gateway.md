@@ -140,6 +140,7 @@ trusted upstream metadata:
 | molte connessioni TLS incomplete | massimo 1000 connessioni listener-wide prima dell'HCM |
 | stream SSE concorrenti di un caller | massimo 10 attivi per `tenant_id`/`user_id`; 429 + `Retry-After` |
 | stream SSE concorrenti globali | massimo 1000 attivi; 429 + `Retry-After`; contatori sempre rilasciati |
+| stream `ImpactAnalysis` diretti concorrenti | cluster dedicato, massimo 100 richieste upstream attive; overflow fail-fast |
 | scope autenticato con `SecurityContext` base64 >12 KiB | `invalid_claims`/deny bounded prima del trasporto |
 | deadline SSE assente/malformata | 401; nessuna deadline client-controlled |
 | deadline SSE già trascorsa durante buffering | 504; zero RPC |
@@ -190,7 +191,9 @@ concorrenza SSE bounded per caller e globale, error body allow-listed e test Env
   `traceparent`, upload SSE lento incluso nella deadline assoluta, scope fuori
   dal budget trasporto, XFF/retry/timeout forgiati senza amplification, e route
   unknown. Unit test concorrente prova che il cap SSE di Alice non blocca Bob
-  e che ogni slot viene rilasciato. `envoy --mode validate` sulla
+  e che ogni slot viene rilasciato; l'integrazione Envoy tiene aperto uno
+  stream gRPC diretto e prova che l'overflow non raggiunge il backend.
+  `envoy --mode validate` sulla
   config effettiva prima del test.
 
 ## 8. Osservabilità
@@ -206,7 +209,8 @@ concorrenza SSE bounded per caller e globale, error body allow-listed e test Env
 - gauge `eci_gateway_edge_active_sse` senza label identitarie.
 - Envoy stats: `http.<listener>.downstream_rq_*`,
   `http.<listener>.ext_authz.{ok,denied,error}`,
-  `http.<listener>.local_rate_limit.{enabled,ok,rate_limited}`.
+  `http.<listener>.local_rate_limit.{enabled,ok,rate_limited}` e
+  `cluster.retrieval_engine_stream.circuit_breakers.*`.
 - vietati tenant/user/repo/gruppo/token/query/body/node/path in log, span o label.
 
 ## 9. Criteri di accettazione
