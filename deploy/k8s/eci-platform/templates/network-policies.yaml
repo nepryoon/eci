@@ -55,60 +55,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-observability-probes
-  namespace: observability
-  labels:
-    {{- include "eci.labels" . | nindent 4 }}
-spec:
-  podSelector: {}
-  policyTypes: [Egress]
-  egress:
-    - to:
-        - namespaceSelector:
-            matchExpressions:
-              - {key: kubernetes.io/metadata.name, operator: In, values: [ingress, query-plane, gpu-plane, ingestion-plane, data-plane]}
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-d8-internal
-  namespace: query-plane
-  labels:
-    {{- include "eci.labels" . | nindent 4 }}
-spec:
-  podSelector: {}
-  policyTypes: [Ingress, Egress]
-  ingress:
-    - from:
-        - namespaceSelector:
-            matchExpressions:
-              - {key: kubernetes.io/metadata.name, operator: In, values: [ingress, query-plane, observability]}
-  egress:
-    - to:
-        - namespaceSelector:
-            matchExpressions:
-              - {key: kubernetes.io/metadata.name, operator: In, values: [query-plane, gpu-plane, data-plane]}
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-ingestion-to-data
-  namespace: ingestion-plane
-  labels:
-    {{- include "eci.labels" . | nindent 4 }}
-spec:
-  podSelector: {}
-  policyTypes: [Egress]
-  egress:
-    - to:
-        - namespaceSelector:
-            matchExpressions:
-              - {key: kubernetes.io/metadata.name, operator: In, values: [data-plane, gpu-plane]}
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-data-plane
+  name: allow-data-plane-internal
   namespace: data-plane
   labels:
     {{- include "eci.labels" . | nindent 4 }}
@@ -117,13 +64,10 @@ spec:
   policyTypes: [Ingress, Egress]
   ingress:
     - from:
-        - namespaceSelector:
-            matchExpressions:
-              - {key: kubernetes.io/metadata.name, operator: In, values: [data-plane, query-plane, ingestion-plane, observability]}
+        - podSelector: {}
   egress:
     - to:
-        - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: data-plane}
+        - podSelector: {}
 {{- $apiClients := list
   (dict "name" "strimzi" "selector" (dict "name" "strimzi-cluster-operator"))
   (dict "name" "strimzi-entity" "selector" (dict "app.kubernetes.io/name" "entity-operator"))
@@ -153,44 +97,150 @@ spec:
         - {protocol: TCP, port: 443}
         - {protocol: TCP, port: 6443}
 {{- end }}
+{{- if eq .Values.global.profile "dev" }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-query-to-gpu
-  namespace: gpu-plane
+  name: allow-dev-connectivity-egress
+  namespace: data-plane
   labels:
     {{- include "eci.labels" . | nindent 4 }}
 spec:
-  podSelector: {}
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: eci-connectivity}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: query-plane}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: opa}
+      ports: [{protocol: TCP, port: 8181}]
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: ingress}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: keycloak}
+      ports: [{protocol: TCP, port: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dev-connectivity-to-opa
+  namespace: query-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: opa}
   policyTypes: [Ingress]
   ingress:
     - from:
         - namespaceSelector:
-            matchExpressions:
-              - {key: kubernetes.io/metadata.name, operator: In, values: [query-plane, ingestion-plane, observability]}
+            matchLabels: {kubernetes.io/metadata.name: data-plane}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: eci-connectivity}
+      ports: [{protocol: TCP, port: 8181}]
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-ingress-internal
+  name: allow-dev-connectivity-to-keycloak
   namespace: ingress
   labels:
     {{- include "eci.labels" . | nindent 4 }}
 spec:
-  podSelector: {}
-  policyTypes: [Ingress, Egress]
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: keycloak}
+  policyTypes: [Ingress]
   ingress:
     - from:
         - namespaceSelector:
-            matchExpressions:
-              - {key: kubernetes.io/metadata.name, operator: In, values: [ingress, observability]}
+            matchLabels: {kubernetes.io/metadata.name: data-plane}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: eci-connectivity}
+      ports: [{protocol: TCP, port: 8080}]
+{{- end }}
+{{- if .Values.applications.enabled }}
+{{- $flows := list
+  (dict "name" "envoy-to-api-gateway" "sourceNamespace" "ingress" "source" "envoy" "destinationNamespace" "ingress" "destinationSelector" (dict "app.kubernetes.io/name" "api-gateway") "port" 8081)
+  (dict "name" "api-gateway-to-keycloak" "sourceNamespace" "ingress" "source" "api-gateway" "destinationNamespace" "ingress" "destinationSelector" (dict "app.kubernetes.io/name" "keycloak") "port" 8080)
+  (dict "name" "api-gateway-to-retrieval" "sourceNamespace" "ingress" "source" "api-gateway" "destinationNamespace" "query-plane" "destinationSelector" (dict "app.kubernetes.io/name" "retrieval-engine") "port" 50053)
+  (dict "name" "orchestrator-to-retrieval" "sourceNamespace" "query-plane" "source" "orchestrator" "destinationNamespace" "query-plane" "destinationSelector" (dict "app.kubernetes.io/name" "retrieval-engine") "port" 50053)
+  (dict "name" "orchestrator-to-verification" "sourceNamespace" "query-plane" "source" "orchestrator" "destinationNamespace" "query-plane" "destinationSelector" (dict "app.kubernetes.io/name" "verification") "port" 8080)
+  (dict "name" "orchestrator-to-summarization" "sourceNamespace" "query-plane" "source" "orchestrator" "destinationNamespace" "query-plane" "destinationSelector" (dict "app.kubernetes.io/name" "summarization") "port" 8080)
+  (dict "name" "orchestrator-to-semantic-cache" "sourceNamespace" "query-plane" "source" "orchestrator" "destinationNamespace" "query-plane" "destinationSelector" (dict "app.kubernetes.io/name" "semantic-cache") "port" 50054)
+  (dict "name" "orchestrator-to-vllm" "sourceNamespace" "query-plane" "source" "orchestrator" "destinationNamespace" "gpu-plane" "destinationSelector" (dict "app.kubernetes.io/name" "vllm") "port" 8000)
+  (dict "name" "llm-gateway-to-vllm" "sourceNamespace" "query-plane" "source" "llm-gateway" "destinationNamespace" "gpu-plane" "destinationSelector" (dict "app.kubernetes.io/name" "vllm") "port" 8000)
+  (dict "name" "retrieval-engine-to-embedder" "sourceNamespace" "query-plane" "source" "retrieval-engine" "destinationNamespace" "gpu-plane" "destinationSelector" (dict "app.kubernetes.io/name" "embedder") "port" 80)
+  (dict "name" "retrieval-engine-to-reranker" "sourceNamespace" "query-plane" "source" "retrieval-engine" "destinationNamespace" "gpu-plane" "destinationSelector" (dict "app.kubernetes.io/name" "reranker") "port" 80)
+  (dict "name" "retrieval-engine-to-neo4j" "sourceNamespace" "query-plane" "source" "retrieval-engine" "destinationNamespace" "data-plane" "destinationSelector" (dict "app" "eci-neo4j") "port" 7687)
+  (dict "name" "retrieval-engine-to-qdrant" "sourceNamespace" "query-plane" "source" "retrieval-engine" "destinationNamespace" "data-plane" "destinationSelector" (dict "app.kubernetes.io/name" "qdrant") "port" 6334)
+  (dict "name" "retrieval-engine-to-opensearch" "sourceNamespace" "query-plane" "source" "retrieval-engine" "destinationNamespace" "data-plane" "destinationSelector" (dict "opster.io/opensearch-cluster" "eci-opensearch") "port" 9200)
+  (dict "name" "retrieval-engine-to-opa" "sourceNamespace" "query-plane" "source" "retrieval-engine" "destinationNamespace" "query-plane" "destinationSelector" (dict "app.kubernetes.io/name" "opa") "port" 8181)
+  (dict "name" "llm-gateway-to-opa" "sourceNamespace" "query-plane" "source" "llm-gateway" "destinationNamespace" "query-plane" "destinationSelector" (dict "app.kubernetes.io/name" "opa") "port" 8181)
+  (dict "name" "semantic-cache-to-opa" "sourceNamespace" "query-plane" "source" "semantic-cache" "destinationNamespace" "query-plane" "destinationSelector" (dict "app.kubernetes.io/name" "opa") "port" 8181)
+  (dict "name" "verification-to-minio" "sourceNamespace" "query-plane" "source" "verification" "destinationNamespace" "data-plane" "destinationSelector" (dict "app.kubernetes.io/name" "minio") "port" 9000)
+  (dict "name" "semantic-cache-to-redis" "sourceNamespace" "query-plane" "source" "semantic-cache" "destinationNamespace" "data-plane" "destinationSelector" (dict "app.kubernetes.io/name" "redis") "port" 6379)
+  (dict "name" "ingestion-to-postgres" "sourceNamespace" "ingestion-plane" "source" "ingestion" "destinationNamespace" "data-plane" "destinationSelector" (dict "cnpg.io/cluster" "eci-postgres") "port" 5432)
+  (dict "name" "ingestion-to-embedder" "sourceNamespace" "ingestion-plane" "source" "ingestion" "destinationNamespace" "gpu-plane" "destinationSelector" (dict "app.kubernetes.io/name" "embedder") "port" 80)
+  (dict "name" "embedding-worker-to-postgres" "sourceNamespace" "ingestion-plane" "source" "embedding-worker" "destinationNamespace" "data-plane" "destinationSelector" (dict "cnpg.io/cluster" "eci-postgres") "port" 5432)
+  (dict "name" "embedding-worker-to-kafka" "sourceNamespace" "ingestion-plane" "source" "embedding-worker" "destinationNamespace" "data-plane" "destinationSelector" (dict "strimzi.io/cluster" "eci-kafka" "strimzi.io/component-type" "kafka") "port" 9092)
+  (dict "name" "embedding-worker-to-embedder" "sourceNamespace" "ingestion-plane" "source" "embedding-worker" "destinationNamespace" "gpu-plane" "destinationSelector" (dict "app.kubernetes.io/name" "embedder") "port" 80)
+  (dict "name" "sink-graph-to-postgres" "sourceNamespace" "ingestion-plane" "source" "sink-graph" "destinationNamespace" "data-plane" "destinationSelector" (dict "cnpg.io/cluster" "eci-postgres") "port" 5432)
+  (dict "name" "sink-graph-to-kafka" "sourceNamespace" "ingestion-plane" "source" "sink-graph" "destinationNamespace" "data-plane" "destinationSelector" (dict "strimzi.io/cluster" "eci-kafka" "strimzi.io/component-type" "kafka") "port" 9092)
+  (dict "name" "sink-graph-to-neo4j" "sourceNamespace" "ingestion-plane" "source" "sink-graph" "destinationNamespace" "data-plane" "destinationSelector" (dict "app" "eci-neo4j") "port" 7687)
+  (dict "name" "sink-vector-to-postgres" "sourceNamespace" "ingestion-plane" "source" "sink-vector" "destinationNamespace" "data-plane" "destinationSelector" (dict "cnpg.io/cluster" "eci-postgres") "port" 5432)
+  (dict "name" "sink-vector-to-kafka" "sourceNamespace" "ingestion-plane" "source" "sink-vector" "destinationNamespace" "data-plane" "destinationSelector" (dict "strimzi.io/cluster" "eci-kafka" "strimzi.io/component-type" "kafka") "port" 9092)
+  (dict "name" "sink-vector-to-qdrant" "sourceNamespace" "ingestion-plane" "source" "sink-vector" "destinationNamespace" "data-plane" "destinationSelector" (dict "app.kubernetes.io/name" "qdrant") "port" 6334)
+  (dict "name" "sink-search-to-postgres" "sourceNamespace" "ingestion-plane" "source" "sink-search" "destinationNamespace" "data-plane" "destinationSelector" (dict "cnpg.io/cluster" "eci-postgres") "port" 5432)
+  (dict "name" "sink-search-to-kafka" "sourceNamespace" "ingestion-plane" "source" "sink-search" "destinationNamespace" "data-plane" "destinationSelector" (dict "strimzi.io/cluster" "eci-kafka" "strimzi.io/component-type" "kafka") "port" 9092)
+  (dict "name" "sink-search-to-opensearch" "sourceNamespace" "ingestion-plane" "source" "sink-search" "destinationNamespace" "data-plane" "destinationSelector" (dict "opster.io/opensearch-cluster" "eci-opensearch") "port" 9200)
+  (dict "name" "gds-impact-to-neo4j" "sourceNamespace" "ingestion-plane" "source" "gds-impact" "destinationNamespace" "data-plane" "destinationSelector" (dict "app" "eci-neo4j") "port" 7687)
+}}
+{{- range $flow := $flows }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-{{ $flow.name }}
+  namespace: {{ $flow.sourceNamespace }}
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: {{ $flow.source }}}
+  policyTypes: [Egress]
   egress:
     - to:
         - namespaceSelector:
-            matchExpressions:
-              - {key: kubernetes.io/metadata.name, operator: In, values: [ingress, query-plane]}
-{{- if .Values.applications.enabled }}
+            matchLabels: {kubernetes.io/metadata.name: {{ $flow.destinationNamespace }}}
+          podSelector:
+            matchLabels:
+              {{- toYaml $flow.destinationSelector | nindent 14 }}
+      ports: [{protocol: TCP, port: {{ $flow.port }}}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-{{ $flow.name }}-ingress
+  namespace: {{ $flow.destinationNamespace }}
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $flow.destinationSelector | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ $flow.sourceNamespace }}}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: {{ $flow.source }}}
+      ports: [{protocol: TCP, port: {{ $flow.port }}}]
+{{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -202,10 +252,7 @@ metadata:
 spec:
   podSelector:
     matchLabels: {app.kubernetes.io/name: envoy}
-  policyTypes: [Ingress, Egress]
+  policyTypes: [Ingress]
   ingress:
     - ports: [{protocol: TCP, port: {{ .Values.edge.port }}}]
-  egress:
-    - to:
-        - podSelector: {matchLabels: {app.kubernetes.io/name: api-gateway}}
 {{- end }}

@@ -25,4 +25,23 @@ for profile in standard dev; do
     "$TMP_DIR/$profile.yaml"
 done
 
+# Render the opt-in application topology with explicitly synthetic digest-shaped
+# references. This validates template/schema/policy completeness only; it is
+# never deployment or image-publication evidence.
+catalog_args=(--set applications.enabled=true)
+test_digest="$(printf '0123456789abcdef%.0s' {1..4})"
+for application in \
+  api-gateway orchestrator retrieval-engine verification llm-gateway \
+  summarization semantic-cache ingestion embedding-worker sink-graph \
+  sink-vector sink-search gds-impact; do
+  catalog_args+=(--set-string "global.imageReferences.${application}=registry.example.invalid/eci-test/${application}@sha256:${test_digest}")
+done
+"$HELM_BIN" template eci "$ROOT_DIR/deploy/k8s/eci-platform" --namespace query-plane \
+  "${catalog_args[@]}" >"$TMP_DIR/application-catalog.yaml"
+python3 "$ROOT_DIR/scripts/k8s-policy.py" "$TMP_DIR/application-catalog.yaml" "$ROOT_DIR/deploy/k8s/schemas"
+"$KUBECONFORM_BIN" -strict -summary -kubernetes-version 1.34.0 \
+  -schema-location default \
+  -schema-location "$ROOT_DIR/deploy/k8s/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
+  "$TMP_DIR/application-catalog.yaml"
+
 HELM_BIN="$HELM_BIN" python3 -m unittest tests.k8s.test_platform

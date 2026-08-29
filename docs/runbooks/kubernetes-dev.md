@@ -26,7 +26,8 @@ not need Docker, a cluster or network access.
 Docker must be running with roughly 12 GiB free memory. `task k8s:dev:up`
 creates only `eci-dev`, generates an ephemeral runtime password without printing
 it, derives the OpenSearch admin bcrypt configuration at runtime, installs exact
-operator/chart versions from `operator-versions.yaml`, and
+operator/chart versions from `operator-versions.yaml`, verifies every chart
+archive against its checked-in SHA-256 before Helm executes it, and
 uses atomic Helm upgrades. Source-built ECI applications are disabled by
 default because no published image is assumed; infrastructure readiness is
 never represented by sleep/placeholder containers.
@@ -59,11 +60,14 @@ listens on the bootstrap's actual TLS port 8080, and fails to schedule/start if
 any input is absent. It never falls back to cleartext or generated credentials.
 Each application namespace receives `eci-runtime-routing` with concrete
 cluster DNS names for OPA, retrieval, Neo4j, Qdrant, OpenSearch, Redis, Kafka,
-embedding/reranking and vLLM. The separately managed `eci-runtime` Secret must
-contain at least `POSTGRES_DSN`, `NEO4J_USER`, `NEO4J_PASSWORD`,
-`ECI_OIDC_ISSUER`, `ECI_OIDC_AUDIENCE`, `OPENSEARCH_USERNAME`, and
-`OPENSEARCH_PASSWORD` in addition to datastore bootstrap keys. Missing values
-are deployment errors; do not restore localhost defaults in Helm values.
+embedding/reranking and vLLM. Application workloads never import the shared
+infrastructure `eci-runtime` Secret. Provision one per-workload Secret using
+the exact name and key allow-list in `applications.workloads`: for example,
+`eci-runtime-api-gateway` contains only `ECI_OIDC_ISSUER` and
+`ECI_OIDC_AUDIENCE`, `eci-runtime-retrieval-engine` contains only its Neo4j and
+OpenSearch identities, and each sink has a distinct Secret. Workloads without
+credentials receive no Secret. Missing values are deployment errors; do not
+restore localhost defaults or reuse a sibling Secret.
 
 Application enablement is a two-phase operation because the Strimzi and
 OpenSearch operators create their CAs only after the infrastructure CRs exist.
@@ -95,10 +99,26 @@ username and password. Redis is deployed with `requirepass`, so Semantic Cache
 also requires the explicit `redis-password` mapping. Each client fails before
 serving/consuming if its trust or credential input is absent.
 
+The default-deny boundary is complemented by per-workload NetworkPolicy pairs:
+the egress side selects the calling pod and the ingress side selects the exact
+store/service pod, with only its protocol port. A compromised LLM gateway, for
+example, has no path to PostgreSQL, Neo4j, Qdrant, OpenSearch or Redis even if
+it learns a Service DNS name. External production IdP egress must be added as a
+cluster-specific identity/CIDR policy; the portable chart permits only the dev
+Keycloak pod and otherwise fails closed.
+The temporary connectivity probe runs in `data-plane`, where store-to-store
+traffic is already permitted, and receives two dev-only, port-specific paths
+to OPA and Keycloak. `observability` receives no general datastore path;
+T7.3 must add only exporter/metrics ports together with its ServiceMonitors.
+
 OpenSearch Operator 2.8.0 still defaults its metrics proxy to the removed
 `gcr.io/kubebuilder` location. The installer keeps version 0.15.0 byte lineage
 but overrides only the registry to the official `registry.k8s.io/kubebuilder`
 mirror; it does not disable the proxy or its TLS/auth boundary.
+All five operator/datastore Helm archives are fetched from canonical HTTPS
+release URLs into a temporary directory and checked with the immutable SHA-256
+values in `install-operators.sh`. A digest mismatch stops before any Helm
+mutation; do not replace this with `helm repo update` or a version-only pull.
 
 ```bash
 task k8s:dev:up

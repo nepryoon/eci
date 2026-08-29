@@ -1,5 +1,8 @@
 {{- if .Values.applications.enabled }}
 {{- range $name, $job := dict "gds-impact" .Values.batch.gds }}
+{{- if ne (default "" $job.runtimeSecret) (printf "eci-runtime-%s" $name) }}
+{{- fail (printf "batch.%s.runtimeSecret must be eci-runtime-%s for per-workload isolation" $name $name) }}
+{{- end }}
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -35,7 +38,15 @@ spec:
               securityContext:
                 {{- include "eci.containerSecurityContext" $ | nindent 16 }}
               envFrom:
-                - secretRef: {name: {{ $.Values.global.existingSecret }}}
+                - configMapRef: {name: eci-runtime-routing}
+              env:
+                {{- range $secret := $job.secretEnv }}
+                - name: {{ $secret.name }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ required "batch.gds.runtimeSecret is required" $job.runtimeSecret }}
+                      key: {{ $secret.key }}
+                {{- end }}
               readinessProbe:
                 exec: {command: ["/bin/sh", "-c", "test -r /proc/self/status"]}
               livenessProbe:

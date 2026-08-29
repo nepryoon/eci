@@ -1,5 +1,11 @@
 {{- if .Values.applications.enabled }}
 {{- range $workload := .Values.applications.workloads }}
+{{- with $workload.secretEnv }}
+{{- $expectedSecret := printf "eci-runtime-%s" $workload.name }}
+{{- if ne (default "" $workload.runtimeSecret) $expectedSecret }}
+{{- fail (printf "applications.workloads[%s].runtimeSecret must be %s for per-workload isolation" $workload.name $expectedSecret) }}
+{{- end }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -73,15 +79,15 @@ spec:
           envFrom:
             - configMapRef:
                 name: eci-runtime-routing
-            - secretRef:
-                name: {{ $.Values.global.existingSecret }}
-          {{- if eq $workload.name "semantic-cache" }}
+          {{- with $workload.secretEnv }}
           env:
-            - name: REDIS_PASSWORD
+            {{- range $secret := . }}
+            - name: {{ $secret.name }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ $.Values.global.existingSecret }}
-                  key: redis-password
+                  name: {{ required (printf "applications.workloads[%s].runtimeSecret is required when secretEnv is set" $workload.name) $workload.runtimeSecret }}
+                  key: {{ $secret.key }}
+            {{- end }}
           {{- end }}
           readinessProbe:
             tcpSocket: {port: service}

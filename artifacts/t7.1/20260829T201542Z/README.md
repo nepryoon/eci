@@ -52,8 +52,14 @@ PR review fixes were applied as revision 3: OPA policy loading, the
 ingestion-to-GPU path, and PVC-backed MinIO. The semantic verification passed
 again; the standard render uses four distributed 100 GiB MinIO PVCs.
 The later supply-chain/routing review fixes were verified at revision 6. The
-catalog of 126 application objects was exercised only with an explicit
+final least-privilege/supply-chain review fixes were then applied at ECI
+revision 8 after all five operator chart archives passed their checked-in
+SHA-256 gates and upgraded the real cluster releases to revision 6. The
+catalog of 189 application objects was exercised only with an explicit
 `registry.example.invalid` unit fixture; this proves template completeness and
 digest enforcement, not image publication or application readiness. Released
 applications remain opt-in and require real registry digests plus external
-runtime/Envoy configuration.
+runtime/Envoy configuration. Per-workload Secret and NetworkPolicy assertions
+are deterministic render evidence, not application runtime evidence. The real
+connectivity probe was moved into data-plane with two dev-only OPA/Keycloak
+exceptions, removing the previous generic observability-to-datastore path.

@@ -25,13 +25,13 @@ postgres_primary="$("$KUBECTL_BIN" -n data-plane get pod -l cnpg.io/instanceRole
 test -n "$postgres_primary"
 "$KUBECTL_BIN" -n data-plane exec "$postgres_primary" -- psql -U postgres -tAc 'SHOW wal_level' | grep -qx logical
 
-"$KUBECTL_BIN" -n observability delete pod eci-connectivity --ignore-not-found --wait=true >/dev/null
+"$KUBECTL_BIN" -n data-plane delete pod eci-connectivity --ignore-not-found --wait=true >/dev/null
 "$KUBECTL_BIN" apply -f - <<'EOF'
 apiVersion: v1
 kind: Pod
 metadata:
   name: eci-connectivity
-  namespace: observability
+  namespace: data-plane
   labels:
     app.kubernetes.io/name: eci-connectivity
     app.kubernetes.io/part-of: eci
@@ -80,6 +80,6 @@ spec:
         requests: {cpu: 10m, memory: 16Mi}
         limits: {cpu: 100m, memory: 128Mi}
 EOF
-"$KUBECTL_BIN" -n observability wait --for=jsonpath='{.status.phase}'=Succeeded pod/eci-connectivity --timeout=3m
-"$KUBECTL_BIN" -n observability logs eci-connectivity
+"$KUBECTL_BIN" -n data-plane wait --for=jsonpath='{.status.phase}'=Succeeded pod/eci-connectivity --timeout=3m
+"$KUBECTL_BIN" -n data-plane logs eci-connectivity
 echo "eci-dev connectivity: PASS"

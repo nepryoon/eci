@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -214,14 +215,18 @@ class PlatformChartTests(unittest.TestCase):
                 [{"protocol": "TCP", "port": 443}, {"protocol": "TCP", "port": 6443}],
             )
 
-        ingestion = self.by_key[("NetworkPolicy", "ingestion-plane", "allow-ingestion-to-data")]
-        ingestion_namespaces = set(
-            ingestion["spec"]["egress"][0]["to"][0]["namespaceSelector"]["matchExpressions"][0]["values"]
-        )
-        self.assertEqual(ingestion_namespaces, {"data-plane", "gpu-plane"})
-        gpu = self.by_key[("NetworkPolicy", "gpu-plane", "allow-query-to-gpu")]
-        gpu_sources = set(gpu["spec"]["ingress"][0]["from"][0]["namespaceSelector"]["matchExpressions"][0]["values"])
-        self.assertIn("ingestion-plane", gpu_sources)
+        data_internal = self.by_key[("NetworkPolicy", "data-plane", "allow-data-plane-internal")]
+        self.assertEqual(data_internal["spec"]["ingress"][0]["from"], [{"podSelector": {}}])
+        self.assertEqual(data_internal["spec"]["egress"][0]["to"], [{"podSelector": {}}])
+        self.assertNotIn(("observability", "allow-observability-probes"), policies)
+        dev_policies = {
+            (obj["metadata"]["namespace"], obj["metadata"]["name"])
+            for obj in self.dev
+            if obj.get("kind") == "NetworkPolicy"
+        }
+        self.assertIn(("data-plane", "allow-dev-connectivity-egress"), dev_policies)
+        self.assertIn(("query-plane", "allow-dev-connectivity-to-opa"), dev_policies)
+        self.assertIn(("ingress", "allow-dev-connectivity-to-keycloak"), dev_policies)
 
         webhook = self.by_key[("NetworkPolicy", "data-plane", "allow-kube-api-cloudnative-pg-webhook")]
         self.assertEqual(
@@ -286,6 +291,8 @@ class PlatformChartTests(unittest.TestCase):
         self.assertIn("capabilities: {drop: [ALL]}", verify)
         self.assertIn("neo4j.data-plane.svc:7687", verify)
         self.assertIn("qdrant.data-plane.svc:6334", verify)
+        self.assertIn("namespace: data-plane", verify)
+        self.assertNotIn("namespace: observability", verify)
         self.assertIn("SHOW wal_level", verify)
         self.assertIn("io.debezium.connector.postgresql.PostgresConnector", verify)
         self.assertIn("OPA allow and fail-closed decisions: PASS", verify)
@@ -340,7 +347,7 @@ class PlatformChartTests(unittest.TestCase):
                 continue
             refs = obj["spec"]["template"]["spec"]["containers"][0].get("envFrom", [])
             self.assertIn({"configMapRef": {"name": "eci-runtime-routing"}}, refs)
-            self.assertIn({"secretRef": {"name": "eci-runtime"}}, refs)
+            self.assertFalse(any("secretRef" in ref for ref in refs))
             if obj["metadata"]["namespace"] == "ingestion-plane":
                 mounts = obj["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
                 self.assertIn(
@@ -365,9 +372,87 @@ class PlatformChartTests(unittest.TestCase):
         semantic_cache = self.by_key[("Deployment", "query-plane", "semantic-cache")]
         cache_env = semantic_cache["spec"]["template"]["spec"]["containers"][0]["env"]
         self.assertIn(
-            {"name": "REDIS_PASSWORD", "valueFrom": {"secretKeyRef": {"name": "eci-runtime", "key": "redis-password"}}},
+            {
+                "name": "REDIS_PASSWORD",
+                "valueFrom": {
+                    "secretKeyRef": {"name": "eci-runtime-semantic-cache", "key": "REDIS_PASSWORD"}
+                },
+            },
             cache_env,
         )
+
+        secret_names: dict[str, set[str]] = {}
+        for obj in self.standard:
+            if obj.get("kind") != "Deployment" or obj["metadata"]["name"] in {
+                "envoy", "kafka-connect", "opa", "redis"
+            }:
+                continue
+            app = obj["metadata"]["name"]
+            for env in obj["spec"]["template"]["spec"]["containers"][0].get("env", []):
+                secret = env.get("valueFrom", {}).get("secretKeyRef", {}).get("name")
+                if secret:
+                    secret_names.setdefault(app, set()).add(secret)
+        used = [name for names in secret_names.values() for name in names]
+        self.assertNotIn("eci-runtime", used)
+        self.assertEqual(len(used), len(set(used)))
+        self.assertEqual(secret_names["retrieval-engine"], {"eci-runtime-retrieval-engine"})
+        self.assertEqual(secret_names["sink-graph"], {"eci-runtime-sink-graph"})
+
+        policies = {
+            (obj["metadata"]["namespace"], obj["metadata"]["name"]): obj
+            for obj in self.standard
+            if obj.get("kind") == "NetworkPolicy"
+        }
+        self.assertNotIn(("query-plane", "allow-d8-internal"), policies)
+        self.assertNotIn(("ingestion-plane", "allow-ingestion-to-data"), policies)
+        for namespace, name in {
+            ("query-plane", "allow-retrieval-engine-to-neo4j"),
+            ("data-plane", "allow-retrieval-engine-to-neo4j-ingress"),
+            ("ingestion-plane", "allow-sink-vector-to-qdrant"),
+            ("data-plane", "allow-sink-vector-to-qdrant-ingress"),
+            ("query-plane", "allow-semantic-cache-to-redis"),
+            ("data-plane", "allow-semantic-cache-to-redis-ingress"),
+        }:
+            self.assertIn((namespace, name), policies)
+
+        neo4j_egress = policies[("query-plane", "allow-retrieval-engine-to-neo4j")]
+        self.assertEqual(
+            neo4j_egress["spec"]["podSelector"]["matchLabels"],
+            {"app.kubernetes.io/name": "retrieval-engine"},
+        )
+        self.assertEqual(neo4j_egress["spec"]["egress"][0]["ports"], [{"protocol": "TCP", "port": 7687}])
+
+        invalid_workloads = json.dumps(
+            [
+                {
+                    "name": "api-gateway",
+                    "namespace": "ingress",
+                    "port": 8081,
+                    "metricsPort": 9107,
+                    "replicas": 2,
+                    "profile": "io",
+                    "runtimeSecret": "eci-runtime",
+                    "secretEnv": [{"name": "ECI_OIDC_ISSUER", "key": "ECI_OIDC_ISSUER"}],
+                }
+            ]
+        )
+        shared_secret_command = [
+            HELM,
+            "template",
+            "eci",
+            str(CHART),
+            "--set",
+            "applications.enabled=true",
+            "--set-json",
+            f"applications.workloads={invalid_workloads}",
+            "--set-string",
+            f"global.imageReferences.api-gateway=registry.example.invalid/eci-test/api-gateway@sha256:{TEST_DIGEST}",
+            "--set-string",
+            f"global.imageReferences.gds-impact=registry.example.invalid/eci-test/gds-impact@sha256:{TEST_DIGEST}",
+        ]
+        shared_secret = subprocess.run(shared_secret_command, capture_output=True, text=True)
+        self.assertNotEqual(shared_secret.returncode, 0)
+        self.assertIn("per-workload isolation", shared_secret.stderr)
 
         envoy = self.by_key[("Deployment", "ingress", "envoy")]
         container = envoy["spec"]["template"]["spec"]["containers"][0]
@@ -386,6 +471,19 @@ class PlatformChartTests(unittest.TestCase):
         self.assertIn("--from-file=envoy.yaml=deploy/envoy/envoy.yaml", runbook)
         self.assertIn("--from-file=retrieval.pb=deploy/envoy/retrieval.pb", runbook)
         self.assertIn("Never copy `ca.key`", runbook)
+        self.assertIn("per-workload", runbook)
+
+        installer = (ROOT / "deploy/k8s/install-operators.sh").read_text()
+        self.assertNotIn("helm repo add", installer)
+        self.assertIn("sha256sum -c", installer)
+        for expected in {
+            "0f8a50b2f19bd99482f9fd6e17cf42902f72f9e594a136813ac3f0b7af422efd",
+            "668e065ff53508d58238788fd35b355a925060843629a951df0e6a9362e6d32f",
+            "f289e27e553c45b55e20952c78971b19a1b5defe9f89bea1f6910f3ee3da81eb",
+            "b7dd64379ae449b48f9249c94ae8c8d2a48223e74d9ecd6760beef274bb37c78",
+            "131236b52d7959ee600f86ba43e48e88ff715b12a26451871fe57c2ba5809f0b",
+        }:
+            self.assertIn(expected, installer)
 
     def test_review_application_enablement_requires_real_release_digests(self) -> None:
         result = subprocess.run(

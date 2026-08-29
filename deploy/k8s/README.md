@@ -28,16 +28,21 @@ OpenSearch bcrypt hash is generated at install time, so no default credential
 is stored in Git. Production-like installations must provision these named
 Secrets through their deployment environment before installing the chart.
 
-Application pods also receive non-secret service discovery from the
-namespace-local `eci-runtime-routing` ConfigMap; addresses never default to
-localhost. `eci-runtime` must additionally provide service-specific
-credentials and trusted identity configuration, including `POSTGRES_DSN`,
-`NEO4J_USER`, `NEO4J_PASSWORD`, `ECI_OIDC_ISSUER`, and
-`ECI_OIDC_AUDIENCE`, `OPENSEARCH_USERNAME`, and `OPENSEARCH_PASSWORD`.
+Application pods receive non-secret service discovery from the namespace-local
+`eci-runtime-routing` ConfigMap; addresses never default to localhost. They do
+not import the infrastructure-wide `eci-runtime` Secret. Release automation
+must provision the per-workload Secret named in `applications.workloads` with
+only the explicitly mapped keys for that process. NetworkPolicy likewise
+selects the source workload, destination workload/store and TCP port; namespace
+membership alone grants no datastore access.
 Kafka consumers mount only the Strimzi public cluster CA and always use TLS;
 OpenSearch clients mount only the generated public HTTP CA and require Basic
 Auth. Semantic Cache maps `redis-password` explicitly to `REDIS_PASSWORD`.
 Missing keys or CA files remain a fail-closed rollout failure.
+
+`install-operators.sh` downloads every pinned Helm archive from its canonical
+HTTPS release URL into a temporary directory and verifies its repository
+SHA-256 before Helm sees it. A version-only repository lookup is not used.
 
 Envoy is not a generic application pod. When enabled it mounts the externally
 provisioned `eci-envoy-config` ConfigMap (`envoy.yaml` and binary

@@ -119,6 +119,12 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    sink-search richiedono CA HTTP e credenziali OpenSearch, mentre Semantic
    Cache riceve esplicitamente la password del Redis `requirepass`. Nessuna CA
    privata viene copiata fra namespace.
+   Ogni applicazione riceve solo un Secret per-workload con chiavi enumerate;
+   nessun pod applicativo importa il Secret bootstrap condiviso. Le allow-list
+   di rete selezionano chiamante, destinazione e porta, quindi essere nello
+   stesso namespace non conferisce accesso ai datastore. Il probe dev gira nel
+   data-plane e ottiene solo due eccezioni esplicite verso OPA/Keycloak;
+   observability non riceve accesso generale alle API dati.
 5. **Overlay dev onesto.** Given `values-dev.yaml`, When il bootstrap gira su
    kind, Then usa repliche/storage/resource ridotti e Neo4j Community come
    previsto dagli ADR dev esistenti. I workload ECI senza immagini pubblicate
@@ -129,7 +135,8 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    gli operatori, Then gli URL/chart sono pinned a Strimzi 1.2.0,
    CloudNativePG chart 0.29.0 (app 1.30.0), OpenSearch Operator 2.8.0,
    Neo4j chart/app 5.26.30 e Qdrant chart 1.19.0. CRD/API usate corrispondono alle
-   release e ogni install attende readiness con timeout bounded.
+   release; ogni archivio è verificato con SHA-256 prima di Helm e ogni install
+   attende readiness con timeout bounded.
 7. **Connettività reale.** Given il cluster dev pronto, When
    `task k8s:dev:verify` gira, Then un probe in-cluster risolve e raggiunge
    PostgreSQL, Kafka bootstrap, Kafka Connect con plugin PostgreSQL Debezium,
@@ -150,6 +157,8 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
 | Helm/kubectl/kind assente | preflight fallisce con versione richiesta e link/script, nessuna mutazione |
 | Docker indisponibile | `k8s:validate` resta CPU-only; `k8s:dev:up` fallisce prima di creare cluster |
 | secret runtime assente | pod fail-closed/non schedulato; bootstrap stampa solo nomi chiave, mai valori |
+| Secret di un sibling riusato o chiave non enumerata | non referenziato dal Pod; review/policy test non-zero |
+| digest chart Helm non corrispondente | installer termina prima della prima mutazione Helm |
 | immagine vuota, tag-only, `latest` o non pin-nata per digest | policy check non-zero |
 | applicazioni abilitate senza tutti i digest first-party | render Helm non-zero, nessun Deployment parziale |
 | ConfigMap bootstrap Envoy o Secret TLS assente | Envoy non schedula/avvia; nessun fallback cleartext |
@@ -255,6 +264,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       security passano i check fail-closed.
 - [x] Kafka reader/writer usano TLS+CA; OpenSearch usa HTTPS+CA+Basic Auth;
       Redis `requirepass` è propagato esplicitamente, con unit test fail-closed.
+- [x] Secret applicativi e NetworkPolicy sono per-workload/per-destinazione;
+      ogni archivio Helm terzo è verificato SHA-256 prima dell'installazione.
 - [x] Kubeconform valida built-in e CRD contro schemi pinned.
 - [x] Cluster dev realmente creato; operatori/store Ready e connettività
       in-cluster verificata, oppure eventuale limite esterno/risorse è riportato
