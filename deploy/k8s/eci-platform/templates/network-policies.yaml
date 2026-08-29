@@ -80,7 +80,8 @@ spec:
   egress:
     - to:
         - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: data-plane}
+            matchExpressions:
+              - {key: kubernetes.io/metadata.name, operator: In, values: [data-plane, gpu-plane]}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -145,7 +146,7 @@ spec:
     - from:
         - namespaceSelector:
             matchExpressions:
-              - {key: kubernetes.io/metadata.name, operator: In, values: [query-plane, observability]}
+              - {key: kubernetes.io/metadata.name, operator: In, values: [query-plane, ingestion-plane, observability]}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

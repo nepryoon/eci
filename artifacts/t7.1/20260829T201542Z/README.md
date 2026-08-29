@@ -20,6 +20,9 @@ Results:
 - Kafka Connect/Debezium 3.6.0.Final readiness, Strimzi TLS connection and
   PostgreSQL connector plugin discovery: PASS;
 - PostgreSQL 17.6 `wal_level=logical`: PASS;
+- OPA canonical policy loaded; allow and missing-tenant fail-closed decisions:
+  PASS;
+- MinIO dev StatefulSet backed by a 1 GiB PVC: PASS;
 - in-cluster DNS/TCP connectivity to every required store/service: PASS;
 - Pod Security admission label `restricted` on all six ECI namespaces: PASS;
 - deterministic Helm/policy/kubeconform/unit validation: PASS.
@@ -36,3 +39,6 @@ revision 1. The directory name records the beginning of the evidence session;
 the later clean rerun supersedes its earlier sanitized readiness/render data.
 The final five operator API egress policies were then applied as ECI release
 revision 2 and the full readiness/connectivity verification passed again.
+PR review fixes were applied as revision 3: OPA policy loading, the
+ingestion-to-GPU path, and PVC-backed MinIO. The semantic verification passed
+again; the standard render uses four distributed 100 GiB MinIO PVCs.

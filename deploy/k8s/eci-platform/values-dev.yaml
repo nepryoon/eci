@@ -39,4 +39,5 @@ dataPlane:
     resources:
       requests: {cpu: 100m, memory: 1Gi}
       limits: {cpu: "1", memory: 2Gi}
+  minio: {replicas: 1, storage: 1Gi}
   qdrant: {shardNumber: 1, replicationFactor: 1}

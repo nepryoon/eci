@@ -29,3 +29,8 @@ configuration is stored separately in `eci-debezium-connector`, uses the
 Kafka environment config provider for the PostgreSQL password, and is not
 submitted before the `public.outbox` migration exists. See the runbook for the
 post-migration registration boundary.
+
+The OPA ConfigMap is checked byte-for-byte against the canonical Compose Rego
+policy. MinIO uses a four-member distributed StatefulSet with PVCs in the
+standard profile and one PVC-backed member in dev; no object data is placed on
+`emptyDir`.

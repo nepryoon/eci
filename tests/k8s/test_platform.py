@@ -187,6 +187,32 @@ class PlatformChartTests(unittest.TestCase):
                 [{"protocol": "TCP", "port": 443}, {"protocol": "TCP", "port": 6443}],
             )
 
+        ingestion = self.by_key[("NetworkPolicy", "ingestion-plane", "allow-ingestion-to-data")]
+        ingestion_namespaces = set(
+            ingestion["spec"]["egress"][0]["to"][0]["namespaceSelector"]["matchExpressions"][0]["values"]
+        )
+        self.assertEqual(ingestion_namespaces, {"data-plane", "gpu-plane"})
+        gpu = self.by_key[("NetworkPolicy", "gpu-plane", "allow-query-to-gpu")]
+        gpu_sources = set(gpu["spec"]["ingress"][0]["from"][0]["namespaceSelector"]["matchExpressions"][0]["values"])
+        self.assertIn("ingestion-plane", gpu_sources)
+
+    def test_scenario_4_opa_policy_and_durable_minio(self) -> None:
+        policy = self.by_key[("ConfigMap", "query-plane", "opa-policy")]
+        canonical_policy = (ROOT / "deploy/compose/opa/policies/eci_authz.rego").read_text()
+        self.assertEqual(policy["data"]["eci_authz.rego"], canonical_policy)
+        opa = self.by_key[("Deployment", "query-plane", "opa")]
+        opa_container = opa["spec"]["template"]["spec"]["containers"][0]
+        self.assertIn("/policies/eci_authz.rego", opa_container["args"])
+
+        minio = self.by_key[("StatefulSet", "data-plane", "minio")]
+        self.assertEqual(minio["spec"]["replicas"], 4)
+        self.assertEqual(minio["spec"]["podManagementPolicy"], "Parallel")
+        self.assertEqual(minio["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"], "100Gi")
+        minio_args = minio["spec"]["template"]["spec"]["containers"][0]["args"]
+        self.assertTrue(any("minio-{0...3}" in value for value in minio_args))
+        dev_minio = keyed(self.dev)[("StatefulSet", "data-plane", "minio")]
+        self.assertEqual(dev_minio["spec"]["replicas"], 1)
+
     def test_scenario_5_dev_overlay_is_explicitly_reduced(self) -> None:
         standard = keyed(self.standard)
         dev = keyed(self.dev)
@@ -227,6 +253,7 @@ class PlatformChartTests(unittest.TestCase):
         self.assertIn("qdrant.data-plane.svc:6334", verify)
         self.assertIn("SHOW wal_level", verify)
         self.assertIn("io.debezium.connector.postgresql.PostgresConnector", verify)
+        self.assertIn("OPA allow and fail-closed decisions: PASS", verify)
 
     def test_scenario_6_versions_and_api_groups_are_pinned(self) -> None:
         versions = yaml.safe_load((ROOT / "deploy/k8s/operator-versions.yaml").read_text())

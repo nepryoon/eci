@@ -48,6 +48,12 @@ component with `kubectl -n <namespace> describe ...` and `kubectl logs` before
 retrying; never disable OpenSearch security or operator readiness to make the
 smoke pass.
 
+OPA mounts `eci_authz.rego` from ConfigMap `opa-policy`; the acceptance test
+requires it to remain byte-identical to the Compose policy. The dev verifier
+submits both an authorized request and a missing-tenant request, and requires
+the latter to return the deterministic fail-closed reason. A listening OPA
+socket alone is not readiness evidence.
+
 The data-plane namespace is default-deny. Native Kubernetes NetworkPolicy
 cannot select the `kubernetes.default` Service by name and CNIs may enforce
 policy before or after Service DNAT. Five narrowly selected operator policies
@@ -88,6 +94,16 @@ The teardown command contains the literal `kind delete cluster --name eci-dev`.
 It accepts no namespace/cluster argument and never issues PVC or namespace
 deletes. Data in that local kind cluster is destroyed with the cluster and is
 not recoverable; no external cluster is targeted.
+
+## Object-storage durability
+
+The standard profile runs four MinIO members in distributed mode, each with a
+100 GiB `ReadWriteOnce` PVC; the storage class is platform-supplied. The dev
+overlay deliberately reduces this to one member with a 1 GiB local-path PVC.
+It verifies persistence-backed readiness but is not HA evidence. Failed PVC
+provisioning is fail-closed: do not replace the claim with `emptyDir`. Back up
+source, summary and artifact buckets before any StatefulSet/storage migration;
+Helm rollback does not roll back object data.
 
 ## Production-like Neo4j boundary
 

@@ -74,7 +74,9 @@ tag immutabile; `latest`, tag vuoti e credenziali letterali sono rifiutati.
    Helm Neo4j e Qdrant descrivono core+read
    replica GDS e cluster distribuito a 3 repliche. Qdrant espone inoltre la
    configurazione di collection `shard_number=3`/`replication_factor=2` al job
-   idempotente di bootstrap.
+   idempotente di bootstrap. MinIO standard usa quattro membri distribuiti,
+   ciascuno con PVC da 100 GiB; il dev usa un solo StatefulSet con PVC da 1 GiB,
+   mai repliche indipendenti su `emptyDir` dietro lo stesso Service.
 3. **Disponibilità stateless.** Given un Deployment production-like, When si
    ispeziona il Pod template, Then rollout è `maxSurge=1/maxUnavailable=0`, PDB
    ha `minAvailable>=1`, esistono topology spread per zona e hostname,
@@ -95,6 +97,9 @@ tag immutabile; `latest`, tag vuoti e credenziali letterali sono rifiutati.
    dipende dal CNI, soltanto i pod operator/instance-manager noti possono
    uscire sulle porte API 443/6443; workload e datastore non ricevono egress
    HTTPS generale.
+   OPA monta una copia byte-identica della policy canonica Compose e la carica
+   esplicitamente al bootstrap; readiness TCP senza una decisione allow e una
+   deny fail-closed verificabili non è considerata evidenza sufficiente.
 5. **Overlay dev onesto.** Given `values-dev.yaml`, When il bootstrap gira su
    kind, Then usa repliche/storage/resource ridotti e Neo4j Community come
    previsto dagli ADR dev esistenti. I workload ECI senza immagini pubblicate
@@ -133,6 +138,8 @@ tag immutabile; `latest`, tag vuoti e credenziali letterali sono rifiutati.
 | Neo4j Enterprise senza licenza | production-like richiede Secret/licenza; dev usa Community ed è marcato non equivalente |
 | OpenSearch TLS/admin secret errato | nessun fallback a security plugin disabilitato; verifica fallisce |
 | Qdrant collection già esistente | bootstrap idempotente verifica shard/replica; mismatch fallisce, non ricrea dati |
+| policy OPA assente/non valida | OPA o lo smoke decisionale falliscono; nessun avvio senza policy/default allow |
+| MinIO PVC non provisionabile | StatefulSet resta non Ready; nessun fallback automatico a `emptyDir` |
 | upgrade stateful con campo immutabile | runbook richiede backup/rollback e migrazione esplicita; niente delete automatico PVC |
 | teardown con nome cluster diverso | rifiutato; nessun glob o namespace esterno eliminato |
 
@@ -210,6 +217,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
 - [x] Inventario D8 completo; nessun placeholder/sleep container.
 - [x] Debezium/Kafka Connect è pinned, usa TLS verso Strimzi e non incorpora
       la password PostgreSQL nella ConfigMap del connector.
+- [x] OPA carica la policy canonica e lo smoke prova allow + deny fail-closed.
+- [x] MinIO standard è distribuito 4x100 GiB su PVC; dev è 1x1 GiB su PVC.
 - [x] Strimzi, CNPG, OpenSearch Operator, Neo4j e Qdrant hanno versioni pinned.
 - [x] Standard: Kafka/PG/OpenSearch 3 nodi, Neo4j core+GDS, Qdrant 3 nodi e
       collection con replication factor 2/shard 3.
@@ -239,7 +248,9 @@ stato inizializzato con password casuale non stampata, Neo4j ha riportato
 5.26.30, CloudNativePG ha riportato `wal_level=logical` e il probe in-cluster
 ha confermato il plugin PostgreSQL Debezium e raggiunto PostgreSQL, Kafka,
 Kafka Connect, Neo4j Bolt, Qdrant REST/gRPC, OpenSearch, Redis, MinIO, OPA e
-Keycloak. Tutti i sei
+Keycloak. Un successivo upgrade atomico ha sostituito MinIO `Deployment` con
+StatefulSet/PVC e ha provato una decisione OPA allow più una deny
+`missing_tenant`; la connettività completa è rimasta verde. Tutti i sei
 namespace ECI avevano Pod Security `restricted`; nessun workload applicativo
 senza immagine pubblicata è stato avviato nel profilo dev.
 
@@ -269,7 +280,10 @@ profilo dev Neo4j Community non viene presentato come prova RBAC/HA Enterprise.
 (5) Lo scope del teardown è un nome kind letterale, non variabile/glob. (6) La
 configurazione Debezium non contiene `expected` o credenziali: riusa
 l'EventRouter già contrattualizzato e risolve la password esclusivamente
-dall'ambiente autenticato del worker. Non
+dall'ambiente autenticato del worker. (7) La policy OPA versionata nel chart è
+controllata byte-per-byte contro la fonte Compose e resta fail-closed. (8)
+L'object store standard non replica dischi effimeri divergenti: usa il minimo
+cluster MinIO distribuito a quattro PVC. Non
 emerge una decisione architetturale nuova: l'uso di Helm ufficiale per Neo4j e
 Qdrant è esplicitamente una delle alternative già ammesse dall'ADD; quindi non
 serve ADR.

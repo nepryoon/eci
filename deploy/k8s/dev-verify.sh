@@ -14,7 +14,8 @@ trap diagnostics ERR
 "$KUBECTL_BIN" -n data-plane wait --for=condition=Ready cluster/eci-postgres --timeout=15m
 "$KUBECTL_BIN" -n data-plane wait --for=condition=Ready kafka/eci-kafka --timeout=15m
 "$KUBECTL_BIN" -n data-plane wait --for=condition=Available deployment/kafka-connect --timeout=10m
-"$KUBECTL_BIN" -n data-plane wait --for=condition=Available deployment/redis deployment/minio --timeout=10m
+"$KUBECTL_BIN" -n data-plane wait --for=condition=Available deployment/redis --timeout=10m
+"$KUBECTL_BIN" -n data-plane rollout status statefulset/minio --timeout=10m
 "$KUBECTL_BIN" -n query-plane wait --for=condition=Available deployment/opa --timeout=10m
 "$KUBECTL_BIN" -n ingress wait --for=condition=Available deployment/keycloak --timeout=10m
 "$KUBECTL_BIN" -n data-plane wait --for=condition=Ready pod -l app.kubernetes.io/name=qdrant --timeout=10m
@@ -68,6 +69,13 @@ spec:
           curl -fsS http://kafka-connect.data-plane.svc:8083/connector-plugins | \
             grep -q 'io.debezium.connector.postgresql.PostgresConnector'
           echo 'Debezium PostgreSQL connector plugin: PASS'
+          curl -fsS -H 'content-type: application/json' \
+            --data '{"input":{"action":"/eci.retrieval.v1.RetrievalEngine/GetNode","subject":{"tenant_id":"smoke-tenant","user_id":"smoke-user","allowed_repos":["smoke-repo"],"acl_groups":["smoke-acl"]}}}' \
+            http://opa.query-plane.svc:8181/v1/data/eci/authz/decision | grep -q '"allow":true'
+          curl -fsS -H 'content-type: application/json' \
+            --data '{"input":{"action":"/eci.retrieval.v1.RetrievalEngine/GetNode","subject":{"user_id":"smoke-user","allowed_repos":["smoke-repo"],"acl_groups":["smoke-acl"]}}}' \
+            http://opa.query-plane.svc:8181/v1/data/eci/authz/decision | grep -q '"reason":"missing_tenant"'
+          echo 'OPA allow and fail-closed decisions: PASS'
       resources:
         requests: {cpu: 10m, memory: 16Mi}
         limits: {cpu: 100m, memory: 128Mi}

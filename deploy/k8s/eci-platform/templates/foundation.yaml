@@ -1,7 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opa-policy
+  namespace: query-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+data:
+  eci_authz.rego: |
+{{ .Files.Get "policies/eci_authz.rego" | indent 4 }}
+---
 {{- $items := list
-  (dict "name" "opa" "namespace" "query-plane" "image" "openpolicyagent/opa:1.20.1" "port" 8181 "args" (list "run" "--server" "--addr=0.0.0.0:8181"))
+  (dict "name" "opa" "namespace" "query-plane" "image" "openpolicyagent/opa:1.20.1" "port" 8181 "args" (list "run" "--server" "--addr=0.0.0.0:8181" "/policies/eci_authz.rego"))
   (dict "name" "redis" "namespace" "data-plane" "image" "redis:8.2.1-alpine" "port" 6379 "args" (list "redis-server" "--requirepass" "$(REDIS_PASSWORD)"))
-  (dict "name" "minio" "namespace" "data-plane" "image" "minio/minio:RELEASE.2025-04-22T22-12-26Z" "port" 9000 "args" (list "server" "/data" "--console-address" ":9001"))
 }}
 {{- if eq .Values.global.profile "dev" }}
 {{- $items = append $items (dict "name" "keycloak" "namespace" "ingress" "image" "quay.io/keycloak/keycloak:26.7.2" "port" 8080 "args" (list "start-dev" "--health-enabled=true")) }}
@@ -81,11 +91,6 @@ spec:
             {{- if eq $item.name "redis" }}
             - name: REDIS_PASSWORD
               valueFrom: {secretKeyRef: {name: {{ $.Values.global.existingSecret }}, key: redis-password}}
-            {{- else if eq $item.name "minio" }}
-            - name: MINIO_ROOT_USER
-              valueFrom: {secretKeyRef: {name: {{ $.Values.global.existingSecret }}, key: minio-user}}
-            - name: MINIO_ROOT_PASSWORD
-              valueFrom: {secretKeyRef: {name: {{ $.Values.global.existingSecret }}, key: minio-password}}
             {{- else if eq $item.name "keycloak" }}
             - name: KC_BOOTSTRAP_ADMIN_USERNAME
               valueFrom: {secretKeyRef: {name: {{ $.Values.global.existingSecret }}, key: keycloak-user}}
@@ -115,15 +120,18 @@ spec:
             {{- end }}
           volumeMounts:
             - {name: tmp, mountPath: /tmp}
-            {{- if eq $item.name "minio" }}
-            - {name: data, mountPath: /data}
+            {{- if eq $item.name "opa" }}
+            - {name: policy, mountPath: /policies, readOnly: true}
             {{- else if eq $item.name "keycloak" }}
             - {name: data, mountPath: /opt/keycloak/data}
             {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
-        {{- if or (eq $item.name "minio") (eq $item.name "keycloak") }}
+        {{- if eq $item.name "opa" }}
+        - name: policy
+          configMap: {name: opa-policy}
+        {{- else if eq $item.name "keycloak" }}
         - name: data
           emptyDir: {}
         {{- end }}
