@@ -255,8 +255,8 @@ func edgeCaseQdrantUnreachableAtStartupReturnsErr(t *testing.T) {
 }
 
 // ============================================================
-// Edge case §4 — messaggio CodeEmbedding senza provenance: punto scritto
-// comunque, senza la chiave provenance nel payload.
+// Edge case T6.3 — messaggio CodeEmbedding senza security scope: scartato
+// fail-closed e nessun punto materializzato in Qdrant.
 // ============================================================
 
 func edgeCaseMessageWithoutSecurityScopeRejected(t *testing.T, ctx context.Context, st *stack) {
@@ -285,9 +285,6 @@ func edgeCaseMessageWithoutSecurityScopeRejected(t *testing.T, ctx context.Conte
 	}
 	if len(points) != 0 {
 		t.Fatalf("punti trovati per id=%s: %d, want 0", pointID, len(points))
-	}
-	if got := points[0].GetPayload()["node_id"].GetStringValue(); got != "entity-no-provenance" {
-		t.Errorf("payload['node_id'] = %q, want %q", got, "entity-no-provenance")
 	}
 }
 
