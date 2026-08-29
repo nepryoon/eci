@@ -98,6 +98,12 @@ trusted upstream metadata:
    il listener pubblico, Then il TLS handshake manca e la richiesta non arriva
    a ext_authz/upstream. HTTPS e gRPC TLS richiedono almeno TLS 1.2; certificato
    e chiave sono file montati da Secret e non sono versionati.
+10. **Header e trace bounded.** Given un client TLS che invia header incompleti,
+    When non li completa entro 5s, Then Envoy risponde/chiude la connessione
+    prima di ext_authz. Given una richiesta autenticata, Then il trace id
+    generato dal gateway è il parent trusted dello span
+    `eci.gateway.authorize` e il `traceparent` propagato identifica quello span,
+    senza segmenti orfani o contesto controllato dal client.
 
 ## 4. Errori & edge case
 
@@ -112,6 +118,7 @@ trusted upstream metadata:
 | errore dopo almeno un frame | `event: error` + payload bounded, flush e close |
 | ext_authz timeout | deny 503; mai failure-mode allow |
 | header bucket forgiato | rimosso prima di ext_authz; chiave nuova solo da identità validata |
+| header HTTP incompleti/Slowloris | 408/close entro 5s; zero chiamate ext_authz/upstream |
 | certificato/chiave TLS assente o invalido | Envoy non parte; nessun fallback cleartext |
 | route/servizio non allow-listed | 404; transcoder non passthrough |
 
@@ -135,12 +142,12 @@ trusted upstream metadata:
 ext_auth bypass/failure o resource exhaustion JWKS tramite token invalidi,
 intercettazione/replay del bearer in cleartext,
 replay/esposizione del bearer sull'hop interno, starvation cross-tenant, route
-passthrough, oversized body, slow stream, rate limit bypass, direct
+passthrough, oversized body, Slowloris/header trickle, slow stream, rate limit bypass, direct
 helper/backend exposure, prompt injection che tenta scope, error leakage.
 Controlli: TLS obbligatorio al listener, rimozione metadata forgiabili e ceiling
 coarse prima di auth, stripping del bearer subito dopo ext_authz, bucket opaco
 derivato dal caller autenticato e poi rimosso, replace da validator T6.1, porte interne, strict
-route/transcoder, size/deadline cap, fail-closed, scope metadata-only T6.2/T6.3,
+route/transcoder, size/deadline/header-time cap, fail-closed, scope metadata-only T6.2/T6.3,
 error body allow-listed e test Envoy reale.
 
 ## 7. Test plan
@@ -153,13 +160,17 @@ error body allow-listed e test Envoy reale.
 - Integration CPU-only con `envoyproxy/envoy:v1.39.0` pinned, fake OIDC/auth e
   backend gRPC reale: TLS/cleartext rejection, JSON→gRPC metadata, SSE
   incremental, gRPC passthrough, 401/503, forged headers, 429 isolato tra due
-  caller e route unknown. `envoy --mode validate` sulla
+  caller, header parziali chiusi prima dell'auth, continuità tra auth span e
+  `traceparent`, e route unknown. `envoy --mode validate` sulla
   config effettiva prima del test.
 
 ## 8. Osservabilità
 
 - span `eci.gateway.authorize` e `eci.gateway.sse` con soli attributi bounded
   `gateway.route`, `gateway.outcome`, `rpc.grpc.status_code`.
+- `SecurityContext.trace_id`, span `eci.gateway.authorize` e `traceparent`
+  downstream condividono lo stesso trace id; lo span id propagato è quello
+  dello span authorize realmente registrato.
 - counter `eci_gateway_edge_requests_total{route,outcome}` dove `route` è
   allow-list `{auth,sse,health}` e outcome chiuso.
 - Envoy stats: `http.<listener>.downstream_rq_*`,

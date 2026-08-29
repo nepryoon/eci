@@ -48,8 +48,11 @@ header sanitization → coarse pre-auth load-shedding → ext_authz (fail closed
 ```
 
 Il filtro di sanitizzazione rimuove ogni `eci-security-context-bin` e trace
-context in ingresso. L'helper genera un trace id crittograficamente casuale,
-valida il bearer token con `authn.Authenticator`, serializza il solo
+context in ingresso. L'helper genera un trace id e uno span id
+crittograficamente casuali, li installa come parent remoto trusted prima di
+avviare lo span `eci.gateway.authorize` e propaga un `traceparent` che identifica
+lo span effettivamente registrato nello stesso trace. Quindi valida il bearer
+token con `authn.Authenticator`, serializza il solo
 `SecurityContext` derivato dai claim e restituisce header autorizzati con
 semantica replace. Envoy fallisce chiuso se l'helper è indisponibile. Le porte
 dell'helper e dei servizi gRPC sono cluster-internal e non pubblicate.
@@ -78,6 +81,8 @@ load-shedding per istanza. I limiti producono 429 e `Retry-After`. È un limite
 edge di protezione;
 un ulteriore bucket condiviso da 100 richieste/s per istanza precede ext_authz
 e protegge validatore/JWKS anche da token non autenticabili e route catch-all.
+Il listener impone inoltre un timeout di 5 secondi per completare gli header,
+così connessioni Slowloris incomplete vengono chiuse prima di ext_authz.
 quota globale per user/team/model del LLM Gateway resta responsabilità del
 bounded context LLM. Il limite effettivo aggregato scala con le repliche e sarà
 dimensionato insieme all'HPA in T7.1/T7.2.

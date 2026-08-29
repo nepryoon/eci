@@ -20,6 +20,7 @@ static_resources:
                   headers_with_underscores_action: REJECT_REQUEST
                   max_headers_count: 100
                 request_timeout: 30s
+                request_headers_timeout: 5s
                 stream_idle_timeout: 30s
                 route_config:
                   name: eci_routes

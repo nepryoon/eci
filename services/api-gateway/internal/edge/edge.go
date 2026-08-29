@@ -116,13 +116,33 @@ func NewEdgeHandler(auth Authenticator, impact ImpactClient, cfg EdgeConfig) (ht
 }
 
 func (h *handler) authorize(w http.ResponseWriter, r *http.Request) {
-	ctx, span := h.tracer.Start(r.Context(), "eci.gateway.authorize")
+	traceID, parentSpanID, identifierErr := h.identifiers()
+	spanParent := r.Context()
+	if identifierErr == nil {
+		parsedTraceID, traceErr := trace.TraceIDFromHex(traceID)
+		parsedSpanID, spanErr := trace.SpanIDFromHex(parentSpanID)
+		if traceErr != nil || spanErr != nil {
+			identifierErr = fmt.Errorf("edge: generated invalid trace context")
+		} else {
+			parent := trace.NewSpanContext(trace.SpanContextConfig{
+				TraceID: parsedTraceID, SpanID: parsedSpanID,
+				TraceFlags: trace.FlagsSampled, Remote: true,
+			})
+			spanParent = trace.ContextWithRemoteSpanContext(spanParent, parent)
+		}
+	}
+	ctx, span := h.tracer.Start(spanParent, "eci.gateway.authorize")
 	defer span.End()
 	outcome := "error"
 	defer func() { h.record(span, "auth", outcome) }()
 
-	traceID, spanID, err := h.identifiers()
-	if err != nil {
+	if identifierErr != nil {
+		writeError(w, http.StatusServiceUnavailable, "authentication unavailable")
+		outcome = "unavailable"
+		return
+	}
+	authorizeSpan := span.SpanContext()
+	if !authorizeSpan.IsValid() || authorizeSpan.TraceID().String() != traceID {
 		writeError(w, http.StatusServiceUnavailable, "authentication unavailable")
 		outcome = "unavailable"
 		return
@@ -160,7 +180,7 @@ func (h *handler) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set(SecurityContextHeader, base64.StdEncoding.EncodeToString(raw))
 	w.Header().Set(RateLimitKeyHeader, authenticatedCallerRateLimitKey(canonical.GetTenantId(), canonical.GetUserId()))
-	w.Header().Set("Traceparent", "00-"+traceID+"-"+spanID+"-01")
+	w.Header().Set("Traceparent", "00-"+authorizeSpan.TraceID().String()+"-"+authorizeSpan.SpanID().String()+"-01")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	outcome = "allow"

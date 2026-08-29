@@ -4,6 +4,7 @@ package edge
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -256,9 +257,13 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 		buffer := make([]byte, 256)
-		_, readErr := connection.Read(buffer)
-		if readErr == nil || time.Since(started) > 750*time.Millisecond {
-			t.Fatalf("partial headers were not closed within the configured bound: err=%v elapsed=%s", readErr, time.Since(started))
+		read, readErr := connection.Read(buffer)
+		elapsed := time.Since(started)
+		if elapsed > 750*time.Millisecond {
+			t.Fatalf("partial headers were not rejected within the configured bound: err=%v elapsed=%s", readErr, elapsed)
+		}
+		if readErr == nil && !bytes.Contains(buffer[:read], []byte(" 408 ")) {
+			t.Fatalf("partial headers returned an unexpected response: %q", buffer[:read])
 		}
 		if authenticator.calls.Load() != beforeAuth {
 			t.Fatal("partial headers reached authenticator")
@@ -716,7 +721,7 @@ func renderIntegrationEnvoyConfig(t *testing.T, root string, helperPort, grpcPor
 	config = strings.ReplaceAll(config, "address: retrieval-engine", "address: "+testcontainers.HostInternal)
 	config = strings.ReplaceAll(config, "8081", strconv.Itoa(helperPort))
 	config = strings.ReplaceAll(config, "50053", strconv.Itoa(grpcPort))
-	config = strings.ReplaceAll(config, "request_headers_timeout: 5s", "request_headers_timeout: 200ms")
+	config = strings.ReplaceAll(config, "request_headers_timeout: 5s", "request_headers_timeout: 0.2s")
 	path := filepath.Join(t.TempDir(), "envoy.yaml")
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
