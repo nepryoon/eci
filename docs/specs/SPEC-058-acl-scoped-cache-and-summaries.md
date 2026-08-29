@@ -1,5 +1,5 @@
 # SPEC-058 — Cache ACL-scoped e summary chiusi sui figli autorizzati
-Stato: approved
+Stato: implemented
 Task-tree: T6.4 · Servizio: `services/semantic-cache`, `services/summarization`, `libs/go/eci/accessscope` · ADD: Modulo 3 §2.6.3
 Contratti: `contracts/proto/eci/semanticcache/v1/semanticcache.proto` (semantica del campo esistente, ADR-0012)
 
@@ -198,17 +198,17 @@ nodi non esistono.
 
 ## 9. Criteri di accettazione
 
-- [ ] ADR-0012 e commenti proto descrivono la nuova semantica senza cambiare
+- [x] ADR-0012 e commenti proto descrivono la nuova semantica senza cambiare
       tag o forma wire.
-- [ ] Fingerprint Go/Python byte-identico, versionato e collision-safe.
-- [ ] Semantic Cache deriva/verifica lo scope e rifiuta mismatch prima Redis.
-- [ ] Redis key v2 non collide per separatori e non legge entry legacy.
-- [ ] Summary full/restricted rispettano la closure di tutti i figli.
-- [ ] ACL-only change invalida deterministicamente l'aggregate ristretto.
-- [ ] Source/id/summary negati non raggiungono modello, cache, output o log.
-- [ ] Telemetria bounded senza identità o contenuto.
+- [x] Fingerprint Go/Python byte-identico, versionato e collision-safe.
+- [x] Semantic Cache deriva/verifica lo scope e rifiuta mismatch prima Redis.
+- [x] Redis key v2 non collide per separatori e non legge entry legacy.
+- [x] Summary full/restricted rispettano la closure di tutti i figli.
+- [x] ACL-only change invalida deterministicamente l'aggregate ristretto.
+- [x] Source/id/summary negati non raggiungono modello, cache, output o log.
+- [x] Telemetria bounded senza identità o contenuto.
 - [ ] Test SPEC-022/051 e nuove regressioni verdi CPU-only/container CI.
-- [ ] T5.6 baseline e `queries_v0.json` byte-identici.
+- [x] T5.6 baseline e `queries_v0.json` byte-identici.
 - [ ] `task build`, `task lint`, `task test`, `task guard` verdi.
 - [ ] Stato `implemented`, poi `verified` soltanto con CI/PR reale.
 
@@ -238,3 +238,33 @@ nodi non esistono.
 
 Esito: approvata dopo seconda passata avversariale; nessun invariante ADD,
 security o contratto è stato indebolito.
+
+## 11. Evidenza di implementazione e deviazioni
+
+- Red phase commit `df8958b`: Go non compilava per
+  `accessscope.Fingerprint` assente, il server panicava prima del diniego e
+  Python non esponeva `SummaryAuthorizationError`/fingerprint.
+- Green core commit `310ea92`: vettore cross-language
+  `c94ba9d3ff0d97a5fd8414abbcbad8c01bdc54c35436a9a69496e0b0d184eafa`,
+  key Redis `scache:v2:<sha256>`, enforcement gRPC e projection RAPTOR
+  full/restricted.
+- La review d'implementazione ha eliminato due canali laterali non esplicitati
+  nel draft: gli errori di gerarchia non includono id dei figli e il nodo
+  ristretto passa al modello `effective_ast_hash`, source vuoto e soli child id
+  autorizzati, non l'hash/source/roster completo.
+- `task build`, `task lint`, `task guard`, `task proto:lint`,
+  `task proto:breaking` e rigenerazione proto deterministica sono verdi
+  localmente. I 14 test Summarization, i test Semantic Cache e il package
+  `accessscope` sono verdi.
+- `task test` locale esegue verdi tutti i test T6.4 e fallisce soltanto nelle
+  suite preesistenti Keycloak, OPA e Orchestrator/Neo4j perché Docker Desktop
+  non è in esecuzione. Nessun test è stato skipped o indebolito; la CI aggiunge
+  esplicitamente il test gRPC + Redis reale prima di `verified`.
+- Hash storici confermati invariati:
+  `results.jsonl.summary.json` =
+  `3f3d7053480a7cb6f5db2ffa9f995129aa1bfef95b64155ba3c1d1a7145cf3ac`,
+  `queries_v0.json` =
+  `67b6bca856e7bfce733be2cab38cb10e210ce831e41339393decb3f793c0f06b`.
+
+Nessuna deviazione dall'ADD. Il cambio comportamentale del proto esistente è
+quello approvato da ADR-0012; forma wire e tag restano invariati.
