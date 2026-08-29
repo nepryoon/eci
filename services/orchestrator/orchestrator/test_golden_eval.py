@@ -422,3 +422,71 @@ def test_fact_and_citation_correctness_are_independent(tmp_path):
         "semantic_error",
         "missing_fact",
     ]
+
+
+def test_raw_equality_cannot_credit_an_identifier_absent_from_symbol_table(tmp_path):
+    path = tmp_path / "unknown.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "g1",
+                    "query": "q1",
+                    "expected_facts": {"contains": ["Unknown"]},
+                    "scope_note": "s",
+                }
+            ]
+        )
+    )
+    output = tmp_path / "unknown.jsonl"
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            payload = json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "facts": [
+                                            {"kind": "contains", "value": "Unknown"}
+                                        ],
+                                        "citations": [],
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=httpd.serve_forever)
+    thread.start()
+    try:
+        summary = run_golden_eval(
+            path,
+            f"http://127.0.0.1:{httpd.server_port}",
+            "real",
+            output,
+            symbols=InMemorySymbolResolver([]),
+        )
+    finally:
+        httpd.shutdown()
+        thread.join()
+
+    record = json.loads(output.read_text().splitlines()[0])
+    assert record["matched_facts"] == ["contains=Unknown"]
+    assert record["exact_canonical_matched_facts"] == []
+    assert record["passed"] is False
+    assert summary["fact_recall"] == 1.0
+    assert summary["exact_canonical_fact_recall"] == 0.0
+    assert summary["semantic_entity_recall"] == 0.0

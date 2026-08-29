@@ -66,6 +66,7 @@ class EvalRecord(BaseModel):
     passed: bool = False
     canonicalized_facts: tuple[CanonicalizedFact, ...] = ()
     evaluation_issues: tuple[EvaluationIssue, ...] = ()
+    exact_canonical_matched_facts: tuple[str, ...] = ()
     semantic_matched_facts: tuple[str, ...] = ()
     semantic_unexpected_facts: tuple[str, ...] = ()
     missing_facts: tuple[str, ...] = ()
@@ -198,9 +199,14 @@ def run_golden_eval(
                     latency_ms=(time.perf_counter() - started) * 1000,
                     prompt_tokens=usage.get("prompt_tokens", 0),
                     completion_tokens=usage.get("completion_tokens", 0),
-                    passed=len(matched) == len(facts) and not unexpected,
+                    passed=(
+                        comparison.exact_matched_count == comparison.expected_count
+                        and not unexpected
+                        and not comparison.missing_facts
+                    ),
                     canonicalized_facts=canonicalized,
                     evaluation_issues=comparison.issues,
+                    exact_canonical_matched_facts=comparison.exact_matched_facts,
                     semantic_matched_facts=comparison.semantic_matched_facts,
                     semantic_unexpected_facts=comparison.unexpected_facts,
                     missing_facts=comparison.missing_facts,
@@ -242,7 +248,9 @@ def run_golden_eval(
     latencies = sorted(record.latency_ms for record in records)
     successful = sum(record.error is None for record in records)
     passed = sum(record.passed for record in records)
-    exact_canonical_matched = sum(len(record.matched_facts) for record in records)
+    exact_canonical_matched = sum(
+        len(record.exact_canonical_matched_facts) for record in records
+    )
     semantic_matched = sum(
         len(record.semantic_matched_facts) for record in records if record.error is None
     )
