@@ -174,11 +174,14 @@ class RaptorSummarizer:
             raise InvalidHierarchyError("duplicate node_id")
         if root_id not in by_id:
             raise InvalidHierarchyError("root does not exist")
-        order = self._postorder(by_id, root_id)
         if not self._authorized(
             by_id[root_id], security_context.tenant_id, repos, groups
         ):
             raise SummaryAuthorizationError("not authorized")
+        order = self._postorder(by_id, root_id)
+        authorized_projection = self._authorized_projection(
+            by_id, root_id, security_context.tenant_id, repos, groups
+        )
         summaries: dict[str, str] = {}
         visible: dict[str, bool] = {}
         complete: dict[str, bool] = {}
@@ -186,9 +189,7 @@ class RaptorSummarizer:
         hits = misses = 0
         with self._tracer.start_as_current_span("summarization.raptor") as span:
             for node in order:
-                if not self._authorized(
-                    node, security_context.tenant_id, repos, groups
-                ):
+                if node.node_id not in authorized_projection:
                     visible[node.node_id] = False
                     complete[node.node_id] = False
                     self._observe_visibility(span, node.level, "denied")
@@ -283,6 +284,30 @@ class RaptorSummarizer:
             and node.repo in repos
             and node.acl_group in groups
         )
+
+    @classmethod
+    def _authorized_projection(
+        cls,
+        nodes: dict[str, SummaryNode],
+        root_id: str,
+        tenant_id: str,
+        repos: frozenset[str],
+        groups: frozenset[str],
+    ) -> frozenset[str]:
+        """Return nodes reachable from root through authorized ancestors only."""
+
+        projected: set[str] = set()
+        pending = [root_id]
+        while pending:
+            node_id = pending.pop()
+            if node_id in projected:
+                continue
+            node = nodes[node_id]
+            if not cls._authorized(node, tenant_id, repos, groups):
+                continue
+            projected.add(node_id)
+            pending.extend(reversed(node.child_ids))
+        return frozenset(projected)
 
     @staticmethod
     def _effective_view_hash(
