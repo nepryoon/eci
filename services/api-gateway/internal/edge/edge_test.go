@@ -360,11 +360,11 @@ func TestSSERejectsMalformedOversizedOrMissingAuthenticatedMetadata(t *testing.T
 		want   int
 	}{
 		{"missing metadata", `{}`, "", "", http.StatusUnauthorized},
-		{"bad metadata", `{}`, "%%%", trustedTraceparent(testSecurityContext()), http.StatusUnauthorized},
+		{"bad metadata", `{}`, "%%%", trustedTraceparentHeader(testSecurityContext()), http.StatusUnauthorized},
 		{"missing traceparent", `{}`, encodedContext(t, testSecurityContext()), "", http.StatusUnauthorized},
 		{"mismatched traceparent", `{}`, encodedContext(t, testSecurityContext()), "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1111111111111111-01", http.StatusUnauthorized},
-		{"bad json", `{`, encodedContext(t, testSecurityContext()), trustedTraceparent(testSecurityContext()), http.StatusBadRequest},
-		{"too large", `{"entryNodeId":"` + strings.Repeat("x", 1100) + `"}`, encodedContext(t, testSecurityContext()), trustedTraceparent(testSecurityContext()), http.StatusRequestEntityTooLarge},
+		{"bad json", `{`, encodedContext(t, testSecurityContext()), trustedTraceparentHeader(testSecurityContext()), http.StatusBadRequest},
+		{"too large", `{"entryNodeId":"` + strings.Repeat("x", 1100) + `"}`, encodedContext(t, testSecurityContext()), trustedTraceparentHeader(testSecurityContext()), http.StatusRequestEntityTooLarge},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -383,7 +383,7 @@ func TestSSERejectsMalformedOversizedOrMissingAuthenticatedMetadata(t *testing.T
 	}
 }
 
-func trustedTraceparent(sc *retrievalv1.SecurityContext) string {
+func trustedTraceparentHeader(sc *retrievalv1.SecurityContext) string {
 	return "00-" + sc.GetTraceId() + "-1111111111111111-01"
 }
 
