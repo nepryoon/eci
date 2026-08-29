@@ -1,5 +1,5 @@
 # SPEC-057 — Enforcement in-query su Neo4j, Qdrant e OpenSearch
-Stato: implemented
+Stato: verified
 Task-tree: T6.3 · Servizio: `services/ingestion`, sink materializzati, `services/retrieval-engine` · ADD: Modulo 3 §2.1–2.5
 Contratti: `contracts/jsonschema/hybrid-graph.json` (estensione additiva, ADR-0010), `contracts/proto/eci/retrieval/v1/retrieval.proto` (sola lettura); identità fisica opaca ADR-0011
 
@@ -227,8 +227,8 @@ etichette e parametri non esistono; il fallimento viene registrato nel commit.
 - [x] Grant Neo4j Enterprise sono least-privilege e non dichiarati verificati
       senza un runtime Enterprise autorizzato.
 - [x] T5.6 baseline e `queries_v0.json` restano byte-identici.
-- [ ] `task build`, `task lint`, `task test`, `task guard` verdi.
-- [ ] Stato passa a `implemented`, poi `verified` solo con CI/PR reale.
+- [x] `task build`, `task lint`, `task test`, `task guard` verdi.
+- [x] Stato passa a `implemented`, poi `verified` solo con CI/PR reale.
 
 ## 10. Review avversariale di approvazione
 
@@ -266,3 +266,28 @@ Esito: approvata dopo seconda passata avversariale; nessun criterio indebolito.
 - I grant Neo4j Enterprise sono renderizzati e testati deterministicamente ma
   non eseguiti su Community. Nessuna licenza Enterprise viene accettata o
   simulata; questa limitazione resta esplicita fino a evidenza autorizzata.
+
+Verifica finale PR [#70](https://github.com/nepryoon/eci/pull/70), commit
+funzionale `99749fd`:
+
+- GitHub Actions run
+  [33245242337](https://github.com/nepryoon/eci/actions/runs/33245242337):
+  `build-lint-test` verde in 7m59s, `guard` verde in 1m52s e
+  `datastore-security-integration` verde in 12m13s.
+- Il job datastore esegue l'ingestion PostgreSQL, i tre sink reali e la
+  retrieval cross-store su Neo4j Community, Qdrant e OpenSearch; i dati fuori
+  tenant/repository/ACL non raggiungono i risultati.
+- La regressione P1 persiste lo stesso output parser sotto due tenant e prova
+  identità fisiche disgiunte, senza overwrite o delete cross-scope. ADR-0011
+  documenta il namespace e il thread di review è stato risolto soltanto dopo
+  il pass containerizzato.
+- La query aggiuntiva di re-check ACL resta batch: il test d'integrazione
+  distingue esplicitamente `GraphTraversal + re-check + hydration` da una
+  hydration N+1.
+- Baseline T5.6 e `queries_v0.json` restano byte-identiche; nessun run GPU è
+  stato eseguito.
+
+Esito T6.3: `verified` per l'enforcement applicativo e per le configurazioni
+native versionate. La DLS OpenSearch security-enabled e i grant Neo4j
+Enterprise non sono dichiarati verificati a runtime senza i relativi runtime
+autorizzati; questa limitazione non viene reinterpretata come evidenza reale.
