@@ -140,7 +140,12 @@ class MinioWormAuditSink:
         if now.tzinfo is None or now.utcoffset() is None:
             raise WormAuditConfigurationError("audit clock must be timezone-aware")
         now = now.astimezone(UTC)
-        retain_until = now + timedelta(days=self._retention_days)
+        requested_until = now + timedelta(days=self._retention_days)
+        # S3 Object Lock timestamps have whole-second wire precision. Round up,
+        # never down, so serialization cannot shorten the requested duration.
+        retain_until = requested_until.replace(microsecond=0)
+        if requested_until.microsecond:
+            retain_until += timedelta(seconds=1)
         payload = canonical_event_bytes(event)
         digest = sha256(payload).hexdigest()
         date_path = event.recorded_at.astimezone(UTC).strftime("%Y/%m/%d")
@@ -177,4 +182,3 @@ class MinioWormAuditSink:
             payload_sha256=digest,
             retain_until=actual.retain_until_date.astimezone(UTC),
         )
-

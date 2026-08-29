@@ -34,9 +34,10 @@ class FakeWrite:
 
 
 class FakeClient:
-    def __init__(self, *, exists=False, bad_retention=False):
+    def __init__(self, *, exists=False, bad_retention=False, truncate_retention=False):
         self.exists = exists
         self.bad_retention = bad_retention
+        self.truncate_retention = truncate_retention
         self.made = []
         self.puts = []
 
@@ -57,7 +58,13 @@ class FakeClient:
 
     def get_object_retention(self, bucket, key, version_id=None):
         retention = self.puts[0][4]["retention"]
-        return None if self.bad_retention else retention
+        if self.bad_retention:
+            return None
+        if self.truncate_retention:
+            return type(retention)(
+                retention.mode, retention.retain_until_date.replace(microsecond=0)
+            )
+        return retention
 
 
 def test_canonical_event_bytes_are_stable_sorted_and_minimal():
@@ -100,8 +107,22 @@ def test_retention_mismatch_fails_closed():
         sink.append(event())
 
 
+def test_s3_second_precision_does_not_weaken_requested_retention():
+    precise_now = NOW.replace(microsecond=123456)
+    sink = MinioWormAuditSink(
+        FakeClient(truncate_retention=True),
+        "eci-audit",
+        retention_days=1,
+        now=lambda: precise_now,
+    )
+    sink.initialize()
+    receipt = sink.append(event())
+    assert receipt.retain_until == (
+        precise_now + timedelta(days=1)
+    ).replace(microsecond=0) + timedelta(seconds=1)
+
+
 @pytest.mark.parametrize("days", [0, -1])
 def test_invalid_retention_is_rejected(days):
     with pytest.raises(ValueError, match="retention_days"):
         MinioWormAuditSink(FakeClient(), "eci-audit", retention_days=days)
-
