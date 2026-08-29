@@ -25,6 +25,7 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 		"envoy.filters.http.local_ratelimit",
 		"envoy.filters.http.header_mutation",
 		"envoy.filters.http.buffer",
+		"eci.filters.http.absolute_deadline",
 		"envoy.filters.http.grpc_json_transcoder",
 		"envoy.filters.http.router",
 	}
@@ -75,6 +76,8 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 		"remove: x-envoy-upstream-alt-stat-name",
 		"remove: x-envoy-decorator-operation",
 		"exact: x-eci-request-deadline-unix-ms",
+		"request_handle:timestampString()",
+		"headers:replace(\"x-envoy-upstream-rq-timeout-ms\", tostring(remaining))",
 		"name: envoy.transport_sockets.tls",
 		`alpn_protocols: ["h2", "http/1.1"]`,
 		"tls_minimum_protocol_version: TLSv1_2",

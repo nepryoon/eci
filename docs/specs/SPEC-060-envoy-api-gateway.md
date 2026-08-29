@@ -54,7 +54,7 @@ GET  /healthz                                              200 (no identity data
 trusted upstream metadata:
   eci-security-context-bin: base64(protobuf SecurityContext)
   traceparent: 00-<gateway-generated-trace-id>-<gateway-generated-span-id>-01
-  x-eci-request-deadline-unix-ms: <trusted absolute deadline; SSE route only>
+  x-eci-request-deadline-unix-ms: <trusted absolute deadline; edge-internal only>
 ```
 
 ## 3. Comportamento
@@ -91,7 +91,10 @@ trusted upstream metadata:
    respinto all'edge e non raggiunge l'unknown-service handler del backend.
 8. **Compatibilità gRPC e deadline.** Given client gRPC diretto all'edge, When
    invoca unary/server-stream con JWT metadata, Then Envoy preserva HTTP/2,
-   autenticazione, status/cancellazione e deadline massima 30s. Per SSE il
+   autenticazione, status/cancellazione e deadline assoluta massima 30s,
+   includendo ricezione e buffering del body. Sulle route dirette un filtro
+   deterministico post-buffer converte la deadline trusted nel solo budget
+   residuo del router e rimuove il metadata prima dell'upstream. Per SSE il
    helper possiede la deadline assoluta di 30s; Envoy disabilita il route
    timeout dello stream ma applica un idle timeout di 35s, lasciando margine
    per il frame terminale senza consentire stream bloccati indefinitamente.
@@ -108,8 +111,9 @@ trusted upstream metadata:
 11. **Deadline SSE assoluta.** Given un body SSE caricato lentamente, When il
     tempo da ext-auth alla fine del buffering supera 30s, Then l'adapter riceve
     la deadline trusted già scaduta, risponde 504 e non chiama gRPC. Header
-    deadline forgiati sono rimossi; il metadata è conservato solo sulla route
-    SSE e rimosso prima delle route gRPC dirette.
+    deadline forgiati sono rimossi; sulle route dirette il metadata trusted è
+    consumato post-buffer per derivare il budget residuo e non raggiunge
+    l'upstream.
 12. **Proxy trust boundary.** Given XFF loopback e control header router
     `x-envoy-*` forgiati, When una richiesta raggiunge il listener pubblico,
     Then l'origine deriva dall'indirizzo remoto con zero hop trusted, i control

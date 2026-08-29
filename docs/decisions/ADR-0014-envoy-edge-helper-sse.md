@@ -60,8 +60,12 @@ token con `authn.Authenticator`, serializza il solo
 semantica replace. La rappresentazione base64 è limitata a 12 KiB per restare
 entro il più piccolo budget header interno con margine per trace e protocollo.
 L'helper crea inoltre una deadline assoluta trusted prima della verifica token;
-Envoy rimuove il corrispondente header client, lo propaga soltanto alla route
-SSE e lo rimuove sulle route gRPC dirette. Envoy fallisce chiuso se l'helper è indisponibile. Le porte
+Envoy rimuove il corrispondente header client e conserva solo il valore prodotto
+dall'helper. Sulle route gRPC/JSON dirette, un filtro Lua bounded eseguito dopo
+il buffer calcola il tempo residuo con il clock di Envoy, imposta il timeout
+router trusted e rimuove la deadline interna prima dell'upstream; a budget
+esaurito non apre alcuna chiamata upstream. Il filtro è disabilitato
+esplicitamente sulle route health, SSE e catch-all. Envoy fallisce chiuso se l'helper è indisponibile. Le porte
 dell'helper e dei servizi gRPC sono cluster-internal e non pubblicate.
 
 Il transcoder usa un descriptor set deterministico derivato dal proto

@@ -53,6 +53,9 @@ static_resources:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_json_transcoder.v3.GrpcJsonTranscoder
                               proto_descriptor: /etc/envoy/retrieval.pb
                               services: []
+                            eci.filters.http.absolute_deadline:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.LuaPerRoute
+                              disabled: true
                         - match:
                             path: /v1/impact-analysis:stream
                             headers:
@@ -105,11 +108,12 @@ static_resources:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_json_transcoder.v3.GrpcJsonTranscoder
                               proto_descriptor: /etc/envoy/retrieval.pb
                               services: []
+                            eci.filters.http.absolute_deadline:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.LuaPerRoute
+                              disabled: true
                         - match:
                             safe_regex:
                               regex: ^/eci\.retrieval\.v1\.RetrievalEngine/(HybridSearch|GetNode|ExpandNeighbors|ImpactAnalysis)$
-                          request_headers_to_remove:
-                            - x-eci-request-deadline-unix-ms
                           route:
                             cluster: retrieval_engine
                             timeout: 30s
@@ -155,6 +159,10 @@ static_resources:
                             status: 404
                             body:
                               inline_string: '{"error":"route not found"}\n'
+                          typed_per_filter_config:
+                            eci.filters.http.absolute_deadline:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.LuaPerRoute
+                              disabled: true
                 http_filters:
                   # These removals run before ext_authz and prevent a client
                   # from supplying trusted binary metadata or trace context.
@@ -271,6 +279,54 @@ static_resources:
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.buffer.v3.Buffer
                       max_request_bytes: 1048576
+                  # ext_authz creates this absolute deadline before request-body
+                  # buffering. Once buffering completes, derive only the
+                  # remaining router budget. Client timeout controls were
+                  # removed before authentication.
+                  - name: eci.filters.http.absolute_deadline
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                      stat_prefix: eci_absolute_deadline
+                      default_source_code:
+                        inline_string: |
+                          local function reject(request_handle, status, grpc_status, message)
+                            local content_type = request_handle:headers():get("content-type") or ""
+                            if string.find(content_type, "application/grpc", 1, true) == 1 then
+                              request_handle:respond({
+                                [":status"] = "200",
+                                ["content-type"] = "application/grpc",
+                                ["grpc-status"] = grpc_status,
+                                ["grpc-message"] = message
+                              }, "")
+                              return
+                            end
+                            request_handle:respond({
+                              [":status"] = status,
+                              ["content-type"] = "application/json"
+                            }, "{\"error\":\"" .. message .. "\"}\n")
+                          end
+
+                          function envoy_on_request(request_handle)
+                            local headers = request_handle:headers()
+                            local raw_deadline = headers:get("x-eci-request-deadline-unix-ms")
+                            local deadline = tonumber(raw_deadline)
+                            local now = tonumber(request_handle:timestampString())
+                            if deadline == nil or deadline ~= math.floor(deadline) or now == nil then
+                              reject(request_handle, "401", "16", "authentication required")
+                              return
+                            end
+                            local remaining = deadline - now
+                            if remaining <= 0 then
+                              reject(request_handle, "504", "4", "request deadline exceeded")
+                              return
+                            end
+                            if remaining > 30000 then
+                              reject(request_handle, "401", "16", "authentication required")
+                              return
+                            end
+                            headers:replace("x-envoy-upstream-rq-timeout-ms", tostring(remaining))
+                            headers:remove("x-eci-request-deadline-unix-ms")
+                          end
                   - name: envoy.filters.http.grpc_json_transcoder
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_json_transcoder.v3.GrpcJsonTranscoder
