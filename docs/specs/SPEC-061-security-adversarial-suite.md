@@ -1,5 +1,5 @@
 # SPEC-061 — Security adversarial suite e GDS per-ACL
-Stato: implemented
+Stato: verified
 Task-tree: T6.7 · Servizi: `tools/gds-impact`, `services/retrieval-engine`, `services/orchestrator`, suite security esistente · ADD: Modulo 3 §2.1–§2.6
 Contratti: `contracts/proto/eci/retrieval/v1/retrieval.proto` (sola lettura), `contracts/cypher/schema.cypher` (vincolo additivo ADR-0015)
 
@@ -217,9 +217,9 @@ applicativo e GDS Community con partizionamento esplicito.
 - [x] Matrice nomina test reali per ogni superficie T6.7, senza skip/xfail.
 - [x] JWT/forged metadata/PDP outage e audit WORM restano fail-closed in CI.
 - [x] Baseline T5.6 e golden dataset byte-identici; nessuna GPU.
-- [ ] `task build`, `task lint`, `task test`, `task test:integration`,
+- [x] `task build`, `task lint`, `task test`, `task test:integration`,
       `task guard` e job security CI verdi.
-- [ ] SPEC `verified` dopo review risolta, evidenza CI verde e PR merge-ready.
+- [x] SPEC `verified` dopo review risolta, evidenza CI verde e PR merge-ready.
 
 ## 10. Review avversariale di approvazione
 
@@ -295,5 +295,10 @@ Le run intermedie [33263671444](https://github.com/nepryoon/eci/actions/runs/332
 e [33266041291](https://github.com/nepryoon/eci/actions/runs/33266041291) erano
 verdi rispettivamente sugli head eager `9cfbbb7` e generation-fenced
 `b5ec9d9`, ma non costituiscono evidenza finale per il lock order rafforzato.
-I thread restano aperti fino ai gate e alla fresh review del nuovo head.
+La run finale [33267810093](https://github.com/nepryoon/eci/actions/runs/33267810093)
+è verde sul commit `0823dd9`: `build-lint-test`, `guard`,
+`datastore-security-integration`, `worm-audit-integration` ed
+`envoy-gateway-integration` sono tutti conclusi con successo. Code review e
+security review fresche sullo stesso commit non hanno trovato nuovi finding;
+tutti e sette i thread precedenti sono risolti solo dopo questa evidenza.
 Baseline T5.6, metriche storiche e `queries_v0.json` restano byte-identici.
