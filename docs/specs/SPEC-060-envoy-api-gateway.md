@@ -136,6 +136,7 @@ trusted upstream metadata:
 | ext_authz timeout | deny 503; mai failure-mode allow |
 | header bucket forgiato | rimosso prima di ext_authz; chiave nuova solo da identità validata |
 | header HTTP incompleti/Slowloris | 408/close entro 5s; zero chiamate ext_authz/upstream |
+| burst HTTP/2 con header incompleti | massimo 100 stream concorrenti per connessione, prima dei filtri |
 | scope autenticato con `SecurityContext` base64 >12 KiB | `invalid_claims`/deny bounded prima del trasporto |
 | deadline SSE assente/malformata | 401; nessuna deadline client-controlled |
 | deadline SSE già trascorsa durante buffering | 504; zero RPC |

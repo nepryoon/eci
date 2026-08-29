@@ -64,6 +64,7 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 		"timeout: 0s",
 		"idle_timeout: 35s",
 		"request_headers_timeout: 5s",
+		"max_concurrent_streams: 100",
 		"use_remote_address: true",
 		"xff_num_trusted_hops: 0",
 		"remove: x-forwarded-for",
