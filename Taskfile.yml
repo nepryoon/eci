@@ -51,6 +51,7 @@ tasks:
       - cd services/retrieval-engine && go test -tags=integration ./internal/server -run TestRetrievalEngineServer -v
       - cd services/retrieval-engine && go test -tags=integration ./internal/hybridsearch -run 'TestHybridSearchIntegration|TestHybridGraphVectorSearchContentHydration' -v
       - cd services/semantic-cache && go test -tags=integration ./internal/server -run TestSemanticCacheServer -v
+      - bash scripts/test-minio-worm.sh
 
   proto:gen:
     desc: Codegen Go (buf generate) + Python (grpc_tools.protoc) da retrieval.proto
