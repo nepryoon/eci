@@ -1,5 +1,5 @@
 # SPEC-057 — Enforcement in-query su Neo4j, Qdrant e OpenSearch
-Stato: approved
+Stato: implemented
 Task-tree: T6.3 · Servizio: `services/ingestion`, sink materializzati, `services/retrieval-engine` · ADD: Modulo 3 §2.1–2.5
 Contratti: `contracts/jsonschema/hybrid-graph.json` (estensione additiva, ADR-0010), `contracts/proto/eci/retrieval/v1/retrieval.proto` (sola lettura)
 
@@ -47,10 +47,15 @@ type Scope struct {
 }
 
 func FromContext(ctx context.Context) (Scope, error)
-func (s Scope) Neo4jParams() map[string]any
-func (s Scope) QdrantMust() []*qdrant.Condition
-func (s Scope) OpenSearchFilter() []map[string]any
-func (s Scope) OpenSearchHeaders() http.Header
+```
+
+```go
+package securityfilter
+
+func Neo4jParams(scope accessscope.Scope) map[string]any
+func QdrantFilter(scope accessscope.Scope, domain, requestedRepo string) *qdrant.Filter
+func OpenSearchFilter(scope accessscope.Scope, entityIDs []string) map[string]any
+func OpenSearchHeaders(scope accessscope.Scope) http.Header
 ```
 
 `FromContext` legge soltanto `secctx.FromContext(ctx)`, valida valori non vuoti,
@@ -205,17 +210,17 @@ etichette e parametri non esistono; il fallimento viene registrato nel commit.
 
 ## 9. Criteri di accettazione
 
-- [ ] ADR-0010 e contratto additivo documentano migrazione fail-closed.
-- [ ] Nuova ingestion richiede scope esplicito e lo propaga a ogni evento.
-- [ ] Neo4j, Qdrant e OpenSearch memorizzano etichette piatte indicizzate.
-- [ ] Ogni query Neo4j filtra seed, risultati e nodi intermedi.
-- [ ] Ogni query Qdrant contiene i tre `must`; config multitenant conforme.
-- [ ] OpenSearch applica filtro identico e role DLS read-only versionata.
-- [ ] Re-check ACL avviene prima di hydration/reranker/packing.
-- [ ] Test cross-scope e forged request sono fail-closed e CPU-only.
-- [ ] Grant Neo4j Enterprise sono least-privilege e non dichiarati verificati
+- [x] ADR-0010 e contratto additivo documentano migrazione fail-closed.
+- [x] Nuova ingestion richiede scope esplicito e lo propaga a ogni evento.
+- [x] Neo4j, Qdrant e OpenSearch memorizzano etichette piatte indicizzate.
+- [x] Ogni query Neo4j filtra seed, risultati e nodi intermedi.
+- [x] Ogni query Qdrant contiene i tre `must`; config multitenant conforme.
+- [x] OpenSearch applica filtro identico e role DLS read-only versionata.
+- [x] Re-check ACL avviene prima di hydration/reranker/packing.
+- [x] Test cross-scope e forged request sono fail-closed e CPU-only.
+- [x] Grant Neo4j Enterprise sono least-privilege e non dichiarati verificati
       senza un runtime Enterprise autorizzato.
-- [ ] T5.6 baseline e `queries_v0.json` restano byte-identici.
+- [x] T5.6 baseline e `queries_v0.json` restano byte-identici.
 - [ ] `task build`, `task lint`, `task test`, `task guard` verdi.
 - [ ] Stato passa a `implemented`, poi `verified` solo con CI/PR reale.
 
@@ -238,3 +243,19 @@ etichette e parametri non esistono; il fallimento viene registrato nel commit.
   esplicitate qui/ADR, non introdotte implicitamente.
 
 Esito: approvata dopo seconda passata avversariale; nessun criterio indebolito.
+
+## 11. Evidenza di implementazione e deviazioni
+
+- Red phase registrata nei commit: package `accessscope`, `IngestionScope` e
+  builder dei tre filtri erano assenti e i nuovi test fallivano in compile.
+- `task build`, `task lint` e `task guard` sono verdi localmente. `task test`
+  completa tutti i test CPU ma il runner locale non espone Docker; i test
+  Keycloak/OPA/Neo4j preesistenti falliscono esclusivamente all'apertura del
+  socket Docker. Il job CI containerizzato è l'evidenza richiesta prima di
+  `verified`.
+- Il job `datastore-security-integration` esercita sink, Neo4j, Qdrant e
+  OpenSearch con record cross-tenant. OpenSearch usa il plugin disattivato nel
+  testcontainer e quindi verifica il filtro applicativo, non la DLS nativa.
+- I grant Neo4j Enterprise sono renderizzati e testati deterministicamente ma
+  non eseguiti su Community. Nessuna licenza Enterprise viene accettata o
+  simulata; questa limitazione resta esplicita fino a evidenza autorizzata.

@@ -90,7 +90,6 @@ func main() {
 	deps := consumer.Deps{
 		DB:    db,
 		Neo4j: driver,
-		Repo:  config.EnvOrDefault("SINK_GRAPH_REPO_PLACEHOLDER", "local"),
 		Logf:  log.Printf,
 	}
 

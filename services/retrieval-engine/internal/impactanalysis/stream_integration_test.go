@@ -13,14 +13,19 @@ import (
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	tcneo4j "github.com/testcontainers/testcontainers-go/modules/neo4j"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
 
+	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
+	"github.com/eci-project/eci/libs/go/eci/secctx"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/impactanalysis"
 )
 
 const neo4jAdminPassword = "eci-test-password-1234"
 
 func TestStreamImpactIntegration(t *testing.T) {
-	ctx := context.Background()
+	ctx := authenticatedContext(t, context.Background())
 	driver := startNeo4j(t, ctx)
 	seedFanOutGraph(t, ctx, driver)
 	seedSharedMultiPathGraph(t, ctx, driver)
@@ -97,6 +102,21 @@ func TestStreamImpactIntegration(t *testing.T) {
 	})
 }
 
+func authenticatedContext(t *testing.T, base context.Context) context.Context {
+	t.Helper()
+	encoded, err := proto.Marshal(&retrievalv1.SecurityContext{TenantId: "tenant-test", UserId: "user-test", AllowedRepos: []string{"local"}, AclGroups: []string{"developers"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming := metadata.NewIncomingContext(base, metadata.Pairs("eci-security-context-bin", string(encoded)))
+	var result context.Context
+	_, err = secctx.UnaryServerInterceptor()(incoming, nil, &grpc.UnaryServerInfo{}, func(ctx context.Context, _ any) (any, error) { result = ctx; return nil, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
 func summarize(events []impactanalysis.ImpactEvent) (nodeCount int, lastProgress *impactanalysis.ImpactProgress) {
 	for _, e := range events {
 		if e.Node != nil {
@@ -116,12 +136,12 @@ func seedFanOutGraph(t *testing.T, ctx context.Context, driver neo4j.DriverWithC
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session.Close(ctx)
 	_, err := session.Run(ctx, `
-		CREATE (seed:CodeNode {id: 'ia-fanout-seed', domain: 'code', repo: 'local'})
-		CREATE (a:CodeNode {id: 'ia-fanout-a', domain: 'code', repo: 'local'})
-		CREATE (b:CodeNode {id: 'ia-fanout-b', domain: 'code', repo: 'local'})
-		CREATE (c:CodeNode {id: 'ia-fanout-c', domain: 'code', repo: 'local'})
-		CREATE (d:CodeNode {id: 'ia-fanout-d', domain: 'code', repo: 'local'})
-		CREATE (e:CodeNode {id: 'ia-fanout-e', domain: 'code', repo: 'local'})
+		CREATE (seed:CodeNode {id: 'ia-fanout-seed', domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers'})
+		CREATE (a:CodeNode {id: 'ia-fanout-a', domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers'})
+		CREATE (b:CodeNode {id: 'ia-fanout-b', domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers'})
+		CREATE (c:CodeNode {id: 'ia-fanout-c', domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers'})
+		CREATE (d:CodeNode {id: 'ia-fanout-d', domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers'})
+		CREATE (e:CodeNode {id: 'ia-fanout-e', domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers'})
 		CREATE (a)-[:CALLS {weight: 1}]->(seed)
 		CREATE (b)-[:CALLS {weight: 1}]->(seed)
 		CREATE (c)-[:CALLS {weight: 1}]->(seed)
@@ -142,9 +162,9 @@ func seedSharedMultiPathGraph(t *testing.T, ctx context.Context, driver neo4j.Dr
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session.Close(ctx)
 	_, err := session.Run(ctx, `
-		CREATE (seed:CodeNode {id: 'ia-shared-seed', domain: 'code', repo: 'local'})
-		CREATE (mid:CodeNode {id: 'ia-shared-intermediate', domain: 'code', repo: 'local'})
-		CREATE (shared:CodeNode {id: 'ia-shared-node', domain: 'code', repo: 'local'})
+		CREATE (seed:CodeNode {id: 'ia-shared-seed', domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers'})
+		CREATE (mid:CodeNode {id: 'ia-shared-intermediate', domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers'})
+		CREATE (shared:CodeNode {id: 'ia-shared-node', domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers'})
 		CREATE (mid)-[:EXTENDS {weight: 1}]->(seed)
 		CREATE (shared)-[:CALLS {weight: 1}]->(seed)
 		CREATE (shared)-[:IMPLEMENTS {weight: 1}]->(mid)

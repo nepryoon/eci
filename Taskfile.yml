@@ -44,6 +44,12 @@ tasks:
       - cd tests/integration/postgres_ddl && go test -tags=integration ./...
       - cd tests/integration/outbox_cdc && go test -tags=integration ./...
       - cd services/ingestion && cargo test --test persist_integration_test -- --ignored --test-threads=1
+      - cd services/ingestion && cargo test --test chunk_persist_integration_test -- --ignored --test-threads=1
+      - cd services/sink-graph && go test -tags=integration ./internal/consumer -run TestSinkGraphConsumer -v
+      - cd services/sink-vector && go test -tags=integration ./internal/consumer -run TestSinkVectorConsumer -v
+      - cd services/sink-search && go test -tags=integration ./internal/consumer -run TestSinkSearchConsumer -v
+      - cd services/retrieval-engine && go test -tags=integration ./internal/server -run TestRetrievalEngineServer -v
+      - cd services/retrieval-engine && go test -tags=integration ./internal/hybridsearch -run 'TestHybridSearchIntegration|TestHybridGraphVectorSearchContentHydration' -v
 
   proto:gen:
     desc: Codegen Go (buf generate) + Python (grpc_tools.protoc) da retrieval.proto

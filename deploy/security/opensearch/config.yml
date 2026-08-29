@@ -1,0 +1,23 @@
+---
+_meta:
+  type: config
+  config_version: 2
+config:
+  dynamic:
+    http:
+      anonymous_auth_enabled: false
+    authc:
+      eci_extended_proxy:
+        description: "Trusted Retrieval Engine identity attributes"
+        http_enabled: true
+        transport_enabled: false
+        order: 0
+        http_authenticator:
+          type: extended-proxy
+          challenge: false
+          config:
+            user_header: x-proxy-user
+            roles_header: x-proxy-roles
+            attr_header_prefix: x-proxy-ext-
+        authentication_backend:
+          type: noop

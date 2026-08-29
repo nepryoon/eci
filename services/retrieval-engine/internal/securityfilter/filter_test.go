@@ -56,10 +56,10 @@ func TestOpenSearchFilterAndHeadersAreScopeDerived(t *testing.T) {
 		t.Fatalf("filter=%#v", filter)
 	}
 	headers := OpenSearchHeaders(testScope())
-	if headers.Get("x-proxy-user") != "user-a" || headers.Get("x-proxy-ext-tenant-id") != "tenant-a" {
+	if headers.Get("x-proxy-user") != "user-a" || headers.Get("x-proxy-ext-tenant_id") != "tenant-a" {
 		t.Fatalf("headers=%v", headers)
 	}
-	if headers.Get("x-proxy-ext-allowed-repos") != `"repo-a","repo-b"` {
-		t.Fatalf("repo attribute=%q", headers.Get("x-proxy-ext-allowed-repos"))
+	if headers.Get("x-proxy-ext-allowed_repos") != `"repo-a","repo-b"` {
+		t.Fatalf("repo attribute=%q", headers.Get("x-proxy-ext-allowed_repos"))
 	}
 }

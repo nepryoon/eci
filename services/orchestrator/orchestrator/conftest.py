@@ -59,11 +59,11 @@ def _seed_graph(session) -> None:
     # identico con FORWARD).
     session.run(
         """
-        CREATE (f:CodeNode:File {id: $file_id, domain: 'code', name: 'order_service.go', ast_hash: 'hash-file', repo: 'local', path: 'order_service.go'})
-        CREATE (c:CodeNode:Class {id: $class_id, domain: 'code', name: 'OrderService', ast_hash: 'hash-class', repo: 'local', path: 'order_service.go'})
-        CREATE (p:CodeNode:Method {id: $process_id, domain: 'code', name: 'Process', ast_hash: 'hash-process', repo: 'local', path: 'order_service.go', symbol_id: $process_id})
-        CREATE (v:CodeNode:Method {id: $validate_id, domain: 'code', name: 'Validate', ast_hash: 'hash-validate', repo: 'local', path: 'order_service.go', symbol_id: $validate_id})
-        CREATE (ct:CodeNode:Function {id: $compute_id, domain: 'code', name: 'computeTotal', ast_hash: 'hash-compute', repo: 'local', path: 'util.go'})
+        CREATE (f:CodeNode:File {id: $file_id, domain: 'code', name: 'order_service.go', ast_hash: 'hash-file', tenant_id: 'eci-test-tenant', repo: 'local', acl_group: 'developers', path: 'order_service.go'})
+        CREATE (c:CodeNode:Class {id: $class_id, domain: 'code', name: 'OrderService', ast_hash: 'hash-class', tenant_id: 'eci-test-tenant', repo: 'local', acl_group: 'developers', path: 'order_service.go'})
+        CREATE (p:CodeNode:Method {id: $process_id, domain: 'code', name: 'Process', ast_hash: 'hash-process', tenant_id: 'eci-test-tenant', repo: 'local', acl_group: 'developers', path: 'order_service.go', symbol_id: $process_id})
+        CREATE (v:CodeNode:Method {id: $validate_id, domain: 'code', name: 'Validate', ast_hash: 'hash-validate', tenant_id: 'eci-test-tenant', repo: 'local', acl_group: 'developers', path: 'order_service.go', symbol_id: $validate_id})
+        CREATE (ct:CodeNode:Function {id: $compute_id, domain: 'code', name: 'computeTotal', ast_hash: 'hash-compute', tenant_id: 'eci-test-tenant', repo: 'local', acl_group: 'developers', path: 'util.go'})
         CREATE (f)-[:CONTAINS {weight: 1}]->(c)
         CREATE (f)-[:CONTAINS {weight: 1}]->(p)
         CREATE (f)-[:CONTAINS {weight: 1}]->(v)

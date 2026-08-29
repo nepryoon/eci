@@ -20,7 +20,7 @@ import (
 )
 
 func TestHybridSearchIntegration(t *testing.T) {
-	ctx := context.Background()
+	ctx := authenticatedContext(t, context.Background())
 	f := setupFixture(t, ctx)
 	deps := goodDeps(f)
 
@@ -69,6 +69,9 @@ func scenarios1to3FusionEndToEnd(t *testing.T, ctx context.Context, f *fixtureHa
 	byID := map[string]hybridsearch.RetrievedNode{}
 	for _, n := range ranked {
 		byID[n.NodeID] = n
+	}
+	if _, leaked := byID[f.foreignVectorID]; leaked {
+		t.Fatalf("cross-tenant Qdrant point leaked: %+v", byID[f.foreignVectorID])
 	}
 
 	direct, ok := byID[f.callerDirectID]

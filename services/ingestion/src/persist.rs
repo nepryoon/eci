@@ -11,6 +11,56 @@ use rust_decimal::Decimal;
 use crate::chunking::CodeChunk;
 use crate::{CodeNode, CodeRelation};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestionScope {
+    tenant_id: String,
+    repo: String,
+    acl_group: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeError;
+
+impl std::fmt::Display for ScopeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ingestion security scope is missing or invalid")
+    }
+}
+
+impl std::error::Error for ScopeError {}
+
+impl IngestionScope {
+    pub fn new(
+        tenant_id: impl Into<String>,
+        repo: impl Into<String>,
+        acl_group: impl Into<String>,
+    ) -> Result<Self, ScopeError> {
+        let value = Self {
+            tenant_id: tenant_id.into(),
+            repo: repo.into(),
+            acl_group: acl_group.into(),
+        };
+        if [&value.tenant_id, &value.repo, &value.acl_group]
+            .iter()
+            .any(|v| !valid_scope_value(v))
+        {
+            return Err(ScopeError);
+        }
+        Ok(value)
+    }
+
+    pub fn tenant_id(&self) -> &str { &self.tenant_id }
+    pub fn repo(&self) -> &str { &self.repo }
+    pub fn acl_group(&self) -> &str { &self.acl_group }
+}
+
+fn valid_scope_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.len() <= 256
+        && !value.chars().any(char::is_control)
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct PersistSummary {
     pub nodes_upserted: usize,
@@ -50,6 +100,7 @@ impl From<postgres::Error> for PersistError {
 /// documentato sul suo stesso `Transaction`, non reimplementato qui).
 pub fn persist_parsed_file(
     client: &mut postgres::Client,
+    scope: &IngestionScope,
     nodes: Vec<CodeNode>,
     relations: Vec<CodeRelation>,
     chunks: &[CodeChunk],
@@ -70,13 +121,15 @@ pub fn persist_parsed_file(
     let mut outbox_rows_written = 0usize;
 
     for node in &nodes {
-        // Provenance minimale (SPEC-014 §10 — deviazione dichiarata):
-        // solo `path`, unico dato disponibile all'interfaccia di questa
-        // funzione. `repo`/`commit_sha`/`ingested_at`, richiesti dalla
-        // definizione "provenance" di D2 (hybrid-graph.json), non sono
-        // ricavabili da `CodeNode` così come definito in SPEC-013 — non
-        // fabbricati con placeholder finti.
-        let provenance = serde_json::json!({ "path": node.file_path });
+        // Le etichette sono parte della provenance transazionale e provengono
+        // soltanto dall'ingestion context validato (ADR-0010). Non sono mai
+        // ricavate dal path, dal payload o da un consumer downstream.
+        let provenance = serde_json::json!({
+            "path": node.file_path,
+            "tenant_id": scope.tenant_id(),
+            "repo": scope.repo(),
+            "acl_group": scope.acl_group(),
+        });
 
         tx.execute(
             "INSERT INTO code_node (id, domain, node_type, name, ast_hash, provenance)
@@ -85,6 +138,7 @@ pub fn persist_parsed_file(
                node_type = EXCLUDED.node_type,
                name = EXCLUDED.name,
                ast_hash = EXCLUDED.ast_hash,
+               provenance = EXCLUDED.provenance,
                updated_at = now()",
             &[
                 &node.id,
@@ -137,14 +191,19 @@ pub fn persist_parsed_file(
         // il sorgente del crate prima di introdurlo.
         let weight = relation.weight.map(Decimal::from);
         let row = tx.query_one(
-            "INSERT INTO code_relation (domain, rel_type, from_id, to_id, weight)
-             VALUES ('code', $1, $2, $3, $4)
+            "INSERT INTO code_relation (domain, rel_type, from_id, to_id, weight, provenance)
+             VALUES ('code', $1, $2, $3, $4, $5)
              RETURNING id::text",
             &[
                 &relation.rel_type,
                 &relation.from_id,
                 &relation.to_id,
                 &weight,
+                &serde_json::json!({
+                    "tenant_id": scope.tenant_id(),
+                    "repo": scope.repo(),
+                    "acl_group": scope.acl_group(),
+                }),
             ],
         )?;
         let relation_id: String = row.get(0);
@@ -157,6 +216,11 @@ pub fn persist_parsed_file(
             "from_id": relation.from_id,
             "to_id": relation.to_id,
             "weight": relation.weight,
+            "provenance": {
+                "tenant_id": scope.tenant_id(),
+                "repo": scope.repo(),
+                "acl_group": scope.acl_group(),
+            },
         });
         tx.execute(
             "INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload, trace_id)
@@ -208,7 +272,12 @@ pub fn persist_parsed_file(
         // resta semplicemente omesso dal payload — mai un panic, mai un
         // valore fabbricato.
         if let Some(file_path) = file_path_by_node_id.get(chunk.entity_id.as_str()) {
-            payload["provenance"] = serde_json::json!({ "path": file_path });
+            payload["provenance"] = serde_json::json!({
+                "path": file_path,
+                "tenant_id": scope.tenant_id(),
+                "repo": scope.repo(),
+                "acl_group": scope.acl_group(),
+            });
         }
         tx.execute(
             "INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload, trace_id)

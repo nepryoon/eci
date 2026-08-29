@@ -5,6 +5,9 @@ import (
 	"fmt"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+
+	"github.com/eci-project/eci/libs/go/eci/accessscope"
+	"github.com/eci-project/eci/services/retrieval-engine/internal/securityfilter"
 )
 
 // graphTraversalCypher — STESSA query di D5 `_GRAPH_TRAVERSAL_CYPHER`, con
@@ -18,8 +21,13 @@ import (
 // ExpandNeighbors).
 const graphTraversalCypher = `
 MATCH (seed:CodeNode {id: $entry_node_id})
+WHERE seed.tenant_id = $tenant_id
+  AND seed.repo IN $allowed_repos
+  AND seed.acl_group IN $acl_groups
 MATCH path = (seed)<-[r:CALLS|IMPLEMENTS|EXTENDS|OVERRIDES|DEPENDS_ON|IMPORTS*1..%d]-(dep:CodeNode)
-WHERE ($domain IS NULL OR dep.domain = $domain)
+WHERE all(x IN nodes(path) WHERE x.tenant_id = $tenant_id
+      AND x.repo IN $allowed_repos AND x.acl_group IN $acl_groups)
+  AND ($domain IS NULL OR dep.domain = $domain)
   AND ($repo   IS NULL OR dep.repo   = $repo)
 WITH DISTINCT dep, min(length(path)) AS hop_distance
 RETURN dep.id            AS node_id,
@@ -39,6 +47,13 @@ LIMIT $graph_limit
 // entryNodeID, bounded a maxDepth, pruning DISTINCT. Riusa il driver Neo4j
 // già esistente in retrieval-engine (T1.4), nessuna nuova connessione.
 func GraphTraversal(ctx context.Context, driver neo4j.DriverWithContext, entryNodeID string, maxDepth int, domain, repo *string, graphLimit int) ([]RetrievedNode, error) {
+	ctx, observe := securityfilter.Observe(ctx, "neo4j")
+	outcome := "error"
+	defer func() { observe(outcome) }()
+	scope, err := accessscope.FromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("security scope non valido: %w", err)
+	}
 	if maxDepth < 1 {
 		return nil, fmt.Errorf("max_depth deve essere >= 1, ricevuto %d", maxDepth)
 	}
@@ -47,12 +62,12 @@ func GraphTraversal(ctx context.Context, driver neo4j.DriverWithContext, entryNo
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session.Close(ctx)
 
-	result, err := session.Run(ctx, cypher, map[string]any{
-		"entry_node_id": entryNodeID,
-		"domain":        derefOrNil(domain),
-		"repo":          derefOrNil(repo),
-		"graph_limit":   int64(graphLimit),
-	})
+	params := securityfilter.Neo4jParams(scope)
+	params["entry_node_id"] = entryNodeID
+	params["domain"] = derefOrNil(domain)
+	params["repo"] = derefOrNil(repo)
+	params["graph_limit"] = int64(graphLimit)
+	result, err := session.Run(ctx, cypher, params)
 	if err != nil {
 		return nil, newHybridSearchError("Neo4j traversal fallito", err)
 	}
@@ -96,6 +111,11 @@ func GraphTraversal(ctx context.Context, driver neo4j.DriverWithContext, entryNo
 			GraphRank:   &r,
 			Provenance:  prov,
 		})
+	}
+	if len(out) == 0 {
+		outcome = "empty"
+	} else {
+		outcome = "allow"
 	}
 	return out, nil
 }

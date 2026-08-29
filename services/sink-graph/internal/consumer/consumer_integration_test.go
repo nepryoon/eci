@@ -46,6 +46,8 @@ const (
 	postgresPassword   = "eci-test-password-1234"
 	postgresDB         = "eci"
 	repoPlaceholder    = "local"
+	tenantPlaceholder  = "tenant-test"
+	aclPlaceholder     = "developers"
 )
 
 // stack raggruppa Neo4j/Postgres, condivisi da tutti gli scenari di
@@ -121,7 +123,6 @@ func TestSinkGraphResilienceWrappingGenuinelyWired(t *testing.T) {
 	deps := consumer.Deps{
 		DB:    unreachableDB,
 		Neo4j: nil,
-		Repo:  repoPlaceholder,
 		Logf:  t.Logf,
 	}
 
@@ -223,7 +224,7 @@ func TestSinkGraphMetricsExposedViaRealHTTP(t *testing.T) {
 	}
 	defer unreachableDB.Close()
 
-	deps := consumer.Deps{DB: unreachableDB, Neo4j: nil, Repo: repoPlaceholder, Logf: t.Logf}
+	deps := consumer.Deps{DB: unreachableDB, Neo4j: nil, Logf: t.Logf}
 
 	retryProducer := &kafka.Writer{
 		Addr:                   kafka.TCP(brokers...),
@@ -706,7 +707,6 @@ func newDeps(st *stack) consumer.Deps {
 	return consumer.Deps{
 		DB:    st.db,
 		Neo4j: st.driver,
-		Repo:  repoPlaceholder,
 		Logf:  func(format string, args ...any) {},
 	}
 }
@@ -796,7 +796,8 @@ func codeNodePayload(id, name, nodeType, language, path string) []byte {
 		"name":     name,
 		"ast_hash": language, // valore placeholder qualunque, non verificato dal consumer
 		"provenance": map[string]any{
-			"path": path,
+			"path": path, "tenant_id": tenantPlaceholder,
+			"repo": repoPlaceholder, "acl_group": aclPlaceholder,
 		},
 		"ext": map[string]any{
 			"node_type": nodeType,

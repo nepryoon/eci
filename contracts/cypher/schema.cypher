@@ -19,6 +19,9 @@ FOR (n:CodeNode) ON (n.ast_hash);
 CREATE RANGE INDEX code_node_domain IF NOT EXISTS
 FOR (n:CodeNode) ON (n.domain);
 
+CREATE RANGE INDEX code_node_security_scope IF NOT EXISTS
+FOR (n:CodeNode) ON (n.tenant_id, n.repo, n.acl_group);
+
 CREATE RANGE INDEX method_name IF NOT EXISTS
 FOR (m:Method) ON (m.name);
 

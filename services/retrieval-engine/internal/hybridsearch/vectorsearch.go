@@ -5,6 +5,9 @@ import (
 	"fmt"
 
 	"github.com/qdrant/go-client/qdrant"
+
+	"github.com/eci-project/eci/libs/go/eci/accessscope"
+	"github.com/eci-project/eci/services/retrieval-engine/internal/securityfilter"
 )
 
 // VectorSearch — port 1:1 di D5 `_vector_search`: query Qdrant per
@@ -20,17 +23,21 @@ import (
 // scritta da sink-vector (SPEC-033), che nidifica la provenance sotto la
 // chiave "provenance": deviazione dichiarata a fondo SPEC-041.
 func VectorSearch(ctx context.Context, client *qdrant.Client, collection string, queryVector []float32, domain, repo *string, limit int) ([]RetrievedNode, error) {
-	var must []*qdrant.Condition
-	if domain != nil && *domain != "" {
-		must = append(must, qdrant.NewMatch("domain", *domain))
+	ctx, observe := securityfilter.Observe(ctx, "qdrant")
+	outcome := "error"
+	defer func() { observe(outcome) }()
+	scope, err := accessscope.FromContext(ctx)
+	if err != nil {
+		return nil, newHybridSearchError("security scope non valido", err)
 	}
-	if repo != nil && *repo != "" {
-		must = append(must, qdrant.NewMatch("repo", *repo))
+	domainValue, repoValue := "", ""
+	if domain != nil {
+		domainValue = *domain
 	}
-	var filter *qdrant.Filter
-	if len(must) > 0 {
-		filter = &qdrant.Filter{Must: must}
+	if repo != nil {
+		repoValue = *repo
 	}
+	filter := securityfilter.QdrantFilter(scope, domainValue, repoValue)
 
 	points, err := client.Query(ctx, &qdrant.QueryPoints{
 		CollectionName: collection,
@@ -78,6 +85,11 @@ func VectorSearch(ctx context.Context, client *qdrant.Client, collection string,
 			Provenance:  prov,
 			Payload:     payloadToMap(payload),
 		})
+	}
+	if len(out) == 0 {
+		outcome = "empty"
+	} else {
+		outcome = "allow"
 	}
 	return out, nil
 }

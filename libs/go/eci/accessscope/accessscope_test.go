@@ -94,4 +94,3 @@ func TestScopeReturnsDefensiveCopies(t *testing.T) {
 		t.Fatalf("context scope was mutated: %v", again.AllowedRepos)
 	}
 }
-

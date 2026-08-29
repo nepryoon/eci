@@ -22,7 +22,7 @@ pub mod resolve;
 pub mod hashing;
 pub mod lineage;
 pub mod persist;
-pub use persist::{persist_parsed_file, PersistError, PersistSummary};
+pub use persist::{persist_parsed_file, IngestionScope, PersistError, PersistSummary, ScopeError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeNode {

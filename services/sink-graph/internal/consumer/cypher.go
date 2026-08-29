@@ -61,7 +61,7 @@ func mergeCodeNodeQuery(nodeType string) (string, error) {
 
 	query := "MERGE (n:CodeNode {id: $id})\n" +
 		"SET n:" + nodeType + ", n.domain = $domain, n.name = $name, n.ast_hash = $ast_hash,\n" +
-		"    n.repo = $repo, n.path = $path"
+		"    n.tenant_id = $tenant_id, n.repo = $repo, n.acl_group = $acl_group, n.path = $path"
 
 	if nodeType == "Method" {
 		// constraint method_symbol_unique (schema.cypher, D3): symbol_id =

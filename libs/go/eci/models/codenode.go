@@ -13,6 +13,8 @@ import (
 // Provenance rispecchia #/definitions/provenance di hybrid-graph.json.
 type Provenance struct {
 	Repo         string `json:"repo"`
+	TenantID     string `json:"tenant_id,omitempty"`
+	ACLGroup     string `json:"acl_group,omitempty"`
 	CommitSHA    string `json:"commit_sha"`
 	Path         string `json:"path"`
 	StartLine    *int   `json:"start_line,omitempty"`

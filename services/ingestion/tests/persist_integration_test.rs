@@ -31,7 +31,10 @@
 //! sarebbe stato semplicemente falso rispetto a quello che `parse_file`
 //! produce davvero.
 
-use ingestion::{parse_file, persist_parsed_file, CodeRelation, PersistSummary};
+use ingestion::{
+    parse_file, persist_parsed_file as persist_scoped, CodeNode, CodeRelation,
+    IngestionScope, PersistError, PersistSummary,
+};
 use postgres::{Client, NoTls};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, ImageExt};
@@ -40,6 +43,16 @@ use testcontainers_modules::postgres::Postgres as PostgresImage;
 const DB_USER: &str = "eci";
 const DB_PASSWORD: &str = "eci-test-password-1234";
 const DB_NAME: &str = "eci";
+
+fn persist_parsed_file(
+    client: &mut Client,
+    nodes: Vec<CodeNode>,
+    relations: Vec<CodeRelation>,
+    chunks: &[ingestion::chunking::CodeChunk],
+) -> Result<PersistSummary, PersistError> {
+    let scope = IngestionScope::new("tenant-test", "sample-repo", "developers").unwrap();
+    persist_scoped(client, &scope, nodes, relations, chunks)
+}
 
 /// Avvia `postgres:17` (stessa immagine di SPEC-005/SPEC-008, non il tag
 /// default `11-alpine` del modulo `testcontainers-modules`) e applica le

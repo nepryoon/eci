@@ -1,0 +1,11 @@
+---
+_meta:
+  type: rolesmapping
+  config_version: 2
+eci_query_reader:
+  reserved: false
+  hidden: false
+  backend_roles:
+    - eci-query-reader
+  users: []
+  hosts: []

@@ -14,6 +14,7 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 
 	"github.com/eci-project/eci/libs/go/eci/models"
+	"github.com/eci-project/eci/libs/go/eci/securitylabels"
 )
 
 // ConsumerName identifica questo consumer in processed_events.consumer_name
@@ -41,11 +42,6 @@ const eventIDHeaderKey = "event_id"
 type Deps struct {
 	DB    *sql.DB
 	Neo4j neo4j.DriverWithContext
-	// Repo è il valore placeholder per CodeNode.repo (SPEC-015 §2/§5 — T1.1
-	// non ha ancora un concetto di repository reale), risolto dal
-	// chiamante via config.EnvOrDefault (libs/go/eci/config), non da
-	// ProcessMessage stesso.
-	Repo string
 	// Logf riceve i log espliciti richiesti da §3 scenario 5/§4 (payload
 	// scartato) — iniettato per essere verificabile nei test senza
 	// dipendere dal package log globale.
@@ -167,6 +163,12 @@ func mergeCodeNode(ctx context.Context, deps Deps, value []byte, eventID string)
 		deps.Logf("sink-graph: CodeNode con domain non-'code' inatteso (event_id=%s, id=%s)", eventID, node.ID)
 		return OutcomeInvalidSkipped, nil
 	}
+	if !securitylabels.Valid(node.Provenance.TenantID, node.Provenance.Repo, node.Provenance.ACLGroup) {
+		securitylabels.Observe(ConsumerName, securitylabels.Outcome(node.Provenance.TenantID, node.Provenance.Repo, node.Provenance.ACLGroup))
+		deps.Logf("sink-graph: CodeNode senza security labels valide (event_id=%s, id=%s), scartato", eventID, node.ID)
+		return OutcomeInvalidSkipped, nil
+	}
+	securitylabels.Observe(ConsumerName, "accepted")
 
 	query, err := mergeCodeNodeQuery(ext.NodeType)
 	if err != nil {
@@ -175,12 +177,14 @@ func mergeCodeNode(ctx context.Context, deps Deps, value []byte, eventID string)
 	}
 
 	params := map[string]any{
-		"id":       node.ID,
-		"domain":   node.Domain,
-		"name":     node.Name,
-		"ast_hash": node.AstHash,
-		"repo":     deps.Repo,
-		"path":     node.Provenance.Path,
+		"id":        node.ID,
+		"domain":    node.Domain,
+		"name":      node.Name,
+		"ast_hash":  node.AstHash,
+		"tenant_id": node.Provenance.TenantID,
+		"repo":      node.Provenance.Repo,
+		"acl_group": node.Provenance.ACLGroup,
+		"path":      node.Provenance.Path,
 	}
 
 	if err := runWrite(ctx, deps.Neo4j, query, params); err != nil {

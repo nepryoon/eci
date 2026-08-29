@@ -1,0 +1,19 @@
+---
+_meta:
+  type: roles
+  config_version: 2
+eci_query_reader:
+  reserved: false
+  hidden: false
+  cluster_permissions: []
+  index_permissions:
+    - index_patterns:
+        - code_chunks
+      dls: >-
+        {"bool":{"filter":[{"term":{"tenant_id":"${attr.proxy.tenant_id}"}},{"terms":{"repo":[${attr.proxy.allowed_repos}]}},{"terms":{"acl_group":[${attr.proxy.acl_groups}]}}]}}
+      allowed_actions:
+        - indices:data/read/search
+        - indices:data/read/msearch
+        - indices:data/read/get
+  tenant_permissions: []
+  static: false

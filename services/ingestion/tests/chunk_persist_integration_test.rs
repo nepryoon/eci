@@ -10,7 +10,10 @@
 //! `cargo test --test chunk_persist_integration_test -- --ignored --test-threads=1`
 
 use ingestion::chunking::CodeChunk;
-use ingestion::{parse_file_full, persist_parsed_file};
+use ingestion::{
+    parse_file_full, persist_parsed_file as persist_scoped, CodeNode, CodeRelation,
+    IngestionScope, PersistError, PersistSummary,
+};
 use postgres::{Client, NoTls};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, ImageExt};
@@ -19,6 +22,16 @@ use testcontainers_modules::postgres::Postgres as PostgresImage;
 const DB_USER: &str = "eci";
 const DB_PASSWORD: &str = "eci-test-password-1234";
 const DB_NAME: &str = "eci";
+
+fn persist_parsed_file(
+    client: &mut Client,
+    nodes: Vec<CodeNode>,
+    relations: Vec<CodeRelation>,
+    chunks: &[CodeChunk],
+) -> Result<PersistSummary, PersistError> {
+    let scope = IngestionScope::new("tenant-test", "sample-repo", "developers").unwrap();
+    persist_scoped(client, &scope, nodes, relations, chunks)
+}
 
 fn start_migrated_postgres() -> (Container<PostgresImage>, Client) {
     if which("migrate").is_none() {
@@ -198,7 +211,12 @@ fn chunk_persist_scenarios_1_2_4_validate_single_chunk_and_outbox() {
         .get(0);
     assert_eq!(
         validate_chunk_payload.get("provenance"),
-        Some(&serde_json::json!({ "path": "order_service.go" })),
+        Some(&serde_json::json!({
+            "path": "order_service.go",
+            "tenant_id": "tenant-test",
+            "repo": "sample-repo",
+            "acl_group": "developers"
+        })),
         "SPEC-032 scenario 1: provenance del CodeChunk di Validate deve combaciare col path del suo CodeNode: {validate_chunk_payload:?}"
     );
 

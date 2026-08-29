@@ -43,7 +43,7 @@ const (
 )
 
 func TestHybridSearchGraphVectorDispatch(t *testing.T) {
-	ctx := context.Background()
+	ctx := authenticatedContext(context.Background(), "local")
 	driver := startDispatchNeo4j(t, ctx)
 	qc := startDispatchQdrant(t, ctx)
 	embedderBaseURL := startDispatchEmbedderFake(t)
@@ -102,8 +102,8 @@ func seedDispatchGraph(t *testing.T, ctx context.Context, driver neo4j.DriverWit
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session.Close(ctx)
 	_, err := session.Run(ctx, `
-		CREATE (seed:CodeNode {id: $seed_id, domain: 'code', repo: 'local', path: 'seed.go', name: 'Seed'})
-		CREATE (caller:CodeNode {id: $caller_id, domain: 'code', repo: 'local', path: 'caller.go', name: 'Caller'})
+		CREATE (seed:CodeNode {id: $seed_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', path: 'seed.go', name: 'Seed'})
+		CREATE (caller:CodeNode {id: $caller_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', path: 'caller.go', name: 'Caller'})
 		CREATE (caller)-[:CALLS {weight: 1}]->(seed)
 	`, map[string]any{"seed_id": dispatchSeedID, "caller_id": dispatchCallerID})
 	if err != nil {

@@ -535,6 +535,12 @@ func newReaderWithGroup(brokers []string, groupID string) *kafka.Reader {
 // per CodeChunk (SPEC-029/032: {id, entity_id, chunk_index, text,
 // char_count, provenance?}).
 func codeChunkPayload(id, entityID string, chunkIndex int, text string, provenance map[string]any) []byte {
+	if provenance == nil {
+		provenance = map[string]any{}
+	}
+	provenance["tenant_id"] = "tenant-test"
+	provenance["repo"] = "sample-repo"
+	provenance["acl_group"] = "developers"
 	m := map[string]any{
 		"id":          id,
 		"entity_id":   entityID,

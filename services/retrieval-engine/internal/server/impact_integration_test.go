@@ -40,7 +40,7 @@ const (
 )
 
 func TestImpactAnalysisStreamingDispatch(t *testing.T) {
-	ctx := context.Background()
+	ctx := authenticatedContext(context.Background(), "local")
 	driver := startImpactNeo4j(t, ctx)
 	seedImpactGraph(t, ctx, driver)
 	client := startImpactServer(t, driver)
@@ -141,10 +141,10 @@ func seedImpactGraph(t *testing.T, ctx context.Context, driver neo4j.DriverWithC
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session.Close(ctx)
 	_, err := session.Run(ctx, `
-		CREATE (seed:CodeNode {id: $seed_id, domain: 'code', repo: 'local'})
-		CREATE (lc:CodeNode {id: $l1_calls_id, domain: 'code', repo: 'local'})
-		CREATE (li:CodeNode {id: $l1_implements_id, domain: 'code', repo: 'local'})
-		CREATE (l2:CodeNode {id: $l2_id, domain: 'code', repo: 'local'})
+		CREATE (seed:CodeNode {id: $seed_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers'})
+		CREATE (lc:CodeNode {id: $l1_calls_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers'})
+		CREATE (li:CodeNode {id: $l1_implements_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers'})
+		CREATE (l2:CodeNode {id: $l2_id, domain: 'code', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers'})
 		CREATE (lc)-[:CALLS {weight: 1}]->(seed)
 		CREATE (li)-[:IMPLEMENTS {weight: 1}]->(seed)
 		CREATE (l2)-[:EXTENDS {weight: 1}]->(lc)

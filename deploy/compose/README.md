@@ -153,6 +153,10 @@ semplificazione deliberata per ridurre l'attrito in sviluppo locale. Il
 Modulo 3 dell'ADD richiede il Security plugin attivo in produzione per la
 Document-Level Security — questa disattivazione non va riprodotta in
 nessun ambiente non-dev.
+Le policy DLS production e l'extended-proxy contract sono versionati in
+`deploy/security/opensearch/`; anche con il plugin disattivato il Retrieval
+Engine applica il filtro pre-retrieval applicativo, ma questo non viene
+presentato come verifica della difesa nativa.
 
 ## Neo4j Community Edition
 
@@ -160,6 +164,15 @@ Il servizio `neo4j` usa `neo4j:5-community`, non Enterprise — vincolante
 per via di [ADR-0004](../../docs/decisions/ADR-0004-rimuovi-existence-constraint-neo4j.md)
 e [ADR-0005](../../docs/decisions/ADR-0005-rimuovi-emb-vector-type-constraint.md)
 (SPEC-004).
+I grant property-based Enterprise sono renderizzati in modo deterministico da
+`deploy/security/neo4j/provision_reader.py`; Community verifica soltanto i
+predicati Cypher applicativi obbligatori.
+
+## Scope di ingestion obbligatorio
+
+Prima di eseguire il binario ingestion esporta `ECI_TENANT_ID`,
+`ECI_REPOSITORY` ed `ECI_ACL_GROUP`. I valori vengono validati e persistiti
+nella stessa transazione dei dati; un valore assente non riceve un default.
 
 ## Kafka + Debezium (CDC outbox, SPEC-007)
 

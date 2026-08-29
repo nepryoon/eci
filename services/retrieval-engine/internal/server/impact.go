@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/eci-project/eci/libs/go/eci/accessscope"
 	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/impactanalysis"
 )
@@ -26,6 +27,9 @@ const defaultImpactMaxDepth = 4 // stesso default dichiarato dal commento proto 
 // (SPEC-042 §3 scenario 6, nessun default silenzioso — a differenza di
 // max_depth, questo cap non ha un valore "innocuo" da assumere).
 func (s *Server) ImpactAnalysis(req *retrievalv1.ImpactAnalysisRequest, stream retrievalv1.RetrievalEngine_ImpactAnalysisServer) error {
+	if _, err := accessscope.FromContext(stream.Context()); err != nil {
+		return status.Error(codes.PermissionDenied, "security scope non valido")
+	}
 	maxNodes := int(req.GetMaxNodes())
 	if maxNodes <= 0 {
 		return status.Errorf(codes.InvalidArgument, "max_nodes deve essere >= 1, ricevuto %d", maxNodes)

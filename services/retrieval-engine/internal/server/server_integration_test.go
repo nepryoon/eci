@@ -47,10 +47,11 @@ const (
 	processID  = "test-method-process"
 	validateID = "test-method-validate"
 	computeID  = "test-func-compute-total"
+	foreignID  = "test-foreign-tenant-node"
 )
 
 func TestRetrievalEngineServer(t *testing.T) {
-	ctx := context.Background()
+	ctx := authenticatedContext(context.Background(), "local")
 	driver := startNeo4j(t, ctx)
 	seedGraph(t, ctx, driver)
 	client := startServer(t, driver)
@@ -103,6 +104,9 @@ func TestRetrievalEngineServer(t *testing.T) {
 		}
 		var foundValidate bool
 		for _, n := range resp.GetNeighbors() {
+			if n.GetNodeId() == foreignID {
+				t.Fatalf("cross-tenant node leaked through traversal: %+v", n)
+			}
 			if n.GetNodeId() == validateID {
 				foundValidate = true
 			}
@@ -118,6 +122,13 @@ func TestRetrievalEngineServer(t *testing.T) {
 		}
 		if !hasCalls {
 			t.Errorf("TraversedEdgeTypes = %v, want include EDGE_TYPE_CALLS", resp.GetTraversedEdgeTypes())
+		}
+	})
+
+	t.Run("T6_3_CrossTenantGetIsIndistinguishableFromMissing", func(t *testing.T) {
+		_, err := client.GetNode(ctx, &retrievalv1.GetNodeRequest{NodeId: foreignID})
+		if status.Code(err) != codes.NotFound {
+			t.Fatalf("status=%v, want NotFound", err)
 		}
 	})
 
@@ -161,27 +172,19 @@ func TestRetrievalEngineServer(t *testing.T) {
 		}
 	})
 
-	t.Run("Scenario6_NoEnforcement", func(t *testing.T) {
-		sc := &retrievalv1.SecurityContext{AllowedRepos: []string{"some-other-repo-not-local"}}
-		data, err := proto.Marshal(sc)
-		if err != nil {
-			t.Fatalf("proto.Marshal(SecurityContext): %v", err)
+	t.Run("Scenario6_AuthenticatedScopeCannotBeExpandedByBody", func(t *testing.T) {
+		mdCtx := authenticatedContext(context.Background(), "some-other-repo-not-local")
+		forgedBody := &retrievalv1.SecurityContext{
+			TenantId: "tenant-test", UserId: "user-test",
+			AllowedRepos: []string{"local"}, AclGroups: []string{"developers"},
 		}
-		// Stessa chiave metadata di libs/go/eci/secctx (non esportata dal
-		// pacchetto: valore duplicato qui deliberatamente, è parte del
-		// contratto di wire documentato in secctx.go, non un dettaglio
-		// interno che potrebbe cambiare senza preavviso).
-		mdCtx := metadata.AppendToOutgoingContext(ctx, "eci-security-context-bin", string(data))
 
-		resp, err := client.GetNode(mdCtx, &retrievalv1.GetNodeRequest{
+		_, err := client.GetNode(mdCtx, &retrievalv1.GetNodeRequest{
 			NodeId:          processID,
-			SecurityContext: sc,
+			SecurityContext: forgedBody,
 		})
-		if err != nil {
-			t.Fatalf("GetNode con SecurityContext restrittivo: %v (atteso: nessun enforcement, richiesta soddisfatta comunque)", err)
-		}
-		if resp.GetNode().GetNodeId() != processID {
-			t.Errorf("NodeId = %q, want %q — la richiesta doveva procedere senza restrizioni", resp.GetNode().GetNodeId(), processID)
+		if status.Code(err) != codes.NotFound {
+			t.Fatalf("status=%v, want NotFound senza rivelare il nodo fuori scope", err)
 		}
 	})
 
@@ -214,6 +217,18 @@ func TestRetrievalEngineServer(t *testing.T) {
 			t.Errorf("FulltextLegHealthy = true, want false")
 		}
 	})
+}
+
+func authenticatedContext(ctx context.Context, repo string) context.Context {
+	sc := &retrievalv1.SecurityContext{
+		TenantId: "tenant-test", UserId: "user-test",
+		AllowedRepos: []string{repo}, AclGroups: []string{"developers"},
+	}
+	data, err := proto.Marshal(sc)
+	if err != nil {
+		panic(err)
+	}
+	return metadata.AppendToOutgoingContext(ctx, "eci-security-context-bin", string(data))
 }
 
 // ============================================================
@@ -270,21 +285,24 @@ func seedGraph(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext
 	defer session.Close(ctx)
 
 	_, err := session.Run(ctx, `
-		CREATE (f:CodeNode:File {id: $file_id, domain: 'code', name: 'order_service.go', ast_hash: 'hash-file', repo: 'local', path: 'order_service.go'})
-		CREATE (c:CodeNode:Class {id: $class_id, domain: 'code', name: 'OrderService', ast_hash: 'hash-class', repo: 'local', path: 'order_service.go'})
-		CREATE (p:CodeNode:Method {id: $process_id, domain: 'code', name: 'Process', ast_hash: 'hash-process', repo: 'local', path: 'order_service.go', symbol_id: $process_id})
-		CREATE (v:CodeNode:Method {id: $validate_id, domain: 'code', name: 'Validate', ast_hash: 'hash-validate', repo: 'local', path: 'order_service.go', symbol_id: $validate_id})
-		CREATE (ct:CodeNode:Function {id: $compute_id, domain: 'code', name: 'computeTotal', ast_hash: 'hash-compute', repo: 'local', path: 'util.go'})
+		CREATE (f:CodeNode:File {id: $file_id, domain: 'code', name: 'order_service.go', ast_hash: 'hash-file', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', path: 'order_service.go'})
+		CREATE (c:CodeNode:Class {id: $class_id, domain: 'code', name: 'OrderService', ast_hash: 'hash-class', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', path: 'order_service.go'})
+		CREATE (p:CodeNode:Method {id: $process_id, domain: 'code', name: 'Process', ast_hash: 'hash-process', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', path: 'order_service.go', symbol_id: $process_id})
+		CREATE (v:CodeNode:Method {id: $validate_id, domain: 'code', name: 'Validate', ast_hash: 'hash-validate', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', path: 'order_service.go', symbol_id: $validate_id})
+		CREATE (ct:CodeNode:Function {id: $compute_id, domain: 'code', name: 'computeTotal', ast_hash: 'hash-compute', tenant_id: 'tenant-test', repo: 'local', acl_group: 'developers', path: 'util.go'})
+		CREATE (foreign:CodeNode:Method {id: $foreign_id, domain: 'code', name: 'ForeignSecret', ast_hash: 'hash-foreign', tenant_id: 'tenant-b', repo: 'local', acl_group: 'developers', path: 'secret.go', symbol_id: $foreign_id})
 		CREATE (f)-[:CONTAINS {weight: 1}]->(c)
 		CREATE (f)-[:CONTAINS {weight: 1}]->(p)
 		CREATE (f)-[:CONTAINS {weight: 1}]->(v)
 		CREATE (p)-[:CALLS {weight: 1}]->(v)
+		CREATE (foreign)-[:CALLS {weight: 1}]->(p)
 	`, map[string]any{
 		"file_id":     fileID,
 		"class_id":    classID,
 		"process_id":  processID,
 		"validate_id": validateID,
 		"compute_id":  computeID,
+		"foreign_id":  foreignID,
 	})
 	if err != nil {
 		t.Fatalf("seed del grafo di test: %v", err)

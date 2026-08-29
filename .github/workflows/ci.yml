@@ -85,3 +85,24 @@ jobs:
         run: |
           task proto:gen
           git diff --exit-code -- libs/go libs/py
+
+  datastore-security-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.9'
+
+      - name: T6.3 sink materialization isolation
+        run: |
+          cd services/sink-graph && go test -tags=integration ./internal/consumer -run TestSinkGraphConsumer -v
+          cd ../sink-vector && go test -tags=integration ./internal/consumer -run TestSinkVectorConsumer -v
+          cd ../sink-search && go test -tags=integration ./internal/consumer -run TestSinkSearchConsumer -v
+
+      - name: T6.3 cross-store retrieval isolation
+        run: |
+          cd services/retrieval-engine
+          go test -tags=integration ./internal/server -run TestRetrievalEngineServer -v
+          go test -tags=integration ./internal/hybridsearch -run 'TestHybridSearchIntegration|TestHybridGraphVectorSearchContentHydration' -v

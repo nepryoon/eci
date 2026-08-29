@@ -4,6 +4,9 @@ import (
 	"context"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+
+	"github.com/eci-project/eci/libs/go/eci/accessscope"
+	"github.com/eci-project/eci/services/retrieval-engine/internal/securityfilter"
 )
 
 // levelCypher — STESSA struttura di GraphTraversal (T4.1, SPEC-041): stesso
@@ -16,8 +19,14 @@ import (
 // PRIMA di esplorare oltre.
 const levelCypher = `
 MATCH (n:CodeNode) WHERE n.id IN $frontier_ids
+  AND n.tenant_id = $tenant_id
+  AND n.repo IN $allowed_repos
+  AND n.acl_group IN $acl_groups
 MATCH (n)<-[r:CALLS|IMPLEMENTS|EXTENDS|OVERRIDES|DEPENDS_ON|IMPORTS]-(dep:CodeNode)
 WHERE NOT dep.id IN $visited_ids
+  AND dep.tenant_id = $tenant_id
+  AND dep.repo IN $allowed_repos
+  AND dep.acl_group IN $acl_groups
   AND ($domain IS NULL OR dep.domain = $domain)
   AND ($repo   IS NULL OR dep.repo   = $repo)
 WITH dep, min(type(r)) AS edge_type
@@ -38,6 +47,13 @@ ORDER BY node_id
 // GraphTraversal, T4.1).
 func neo4jLevelFetcher(driver neo4j.DriverWithContext, domain, repo *string) levelFetchFunc {
 	return func(ctx context.Context, frontierIDs []string, visited map[string]struct{}) ([]fetchedNode, error) {
+		ctx, observe := securityfilter.Observe(ctx, "neo4j")
+		outcome := "error"
+		defer func() { observe(outcome) }()
+		scope, err := accessscope.FromContext(ctx)
+		if err != nil {
+			return nil, err
+		}
 		visitedIDs := make([]string, 0, len(visited))
 		for id := range visited {
 			visitedIDs = append(visitedIDs, id)
@@ -46,12 +62,12 @@ func neo4jLevelFetcher(driver neo4j.DriverWithContext, domain, repo *string) lev
 		session := driver.NewSession(ctx, neo4j.SessionConfig{})
 		defer session.Close(ctx)
 
-		result, err := session.Run(ctx, levelCypher, map[string]any{
-			"frontier_ids": frontierIDs,
-			"visited_ids":  visitedIDs,
-			"domain":       derefOrNil(domain),
-			"repo":         derefOrNil(repo),
-		})
+		params := securityfilter.Neo4jParams(scope)
+		params["frontier_ids"] = frontierIDs
+		params["visited_ids"] = visitedIDs
+		params["domain"] = derefOrNil(domain)
+		params["repo"] = derefOrNil(repo)
+		result, err := session.Run(ctx, levelCypher, params)
 		if err != nil {
 			return nil, err
 		}
@@ -89,6 +105,11 @@ func neo4jLevelFetcher(driver neo4j.DriverWithContext, domain, repo *string) lev
 				EdgeType:   asString(edgeTypeVal),
 				Provenance: prov,
 			})
+		}
+		if len(out) == 0 {
+			outcome = "empty"
+		} else {
+			outcome = "allow"
 		}
 		return out, nil
 	}

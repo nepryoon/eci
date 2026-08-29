@@ -16,6 +16,8 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchutil"
 	kafka "github.com/segmentio/kafka-go"
+
+	"github.com/eci-project/eci/libs/go/eci/securitylabels"
 )
 
 // ConsumerName identifica questo consumer in processed_events.consumer_name
@@ -67,6 +69,12 @@ func EnsureIndex(ctx context.Context, client *opensearchapi.Client) error {
 	case existsResp == nil:
 		return fmt.Errorf("Indices.Exists(%s): %w", IndexName, err)
 	case existsResp.StatusCode == 200:
+		securityMapping := map[string]any{"properties": securityProperties()}
+		if _, err := client.Indices.Mapping.Put(ctx, opensearchapi.MappingPutReq{
+			Indices: []string{IndexName}, Body: opensearchutil.NewJSONReader(securityMapping),
+		}); err != nil {
+			return fmt.Errorf("Mapping.Put(%s): %w", IndexName, err)
+		}
 		return nil
 	case existsResp.StatusCode != 404:
 		return fmt.Errorf("Indices.Exists(%s): status inatteso %d: %w", IndexName, existsResp.StatusCode, err)
@@ -75,11 +83,11 @@ func EnsureIndex(ctx context.Context, client *opensearchapi.Client) error {
 
 	mapping := map[string]any{
 		"mappings": map[string]any{
-			"properties": map[string]any{
+			"properties": mergeProperties(map[string]any{
 				"text":        map[string]any{"type": "text"},
 				"entity_id":   map[string]any{"type": "keyword"},
 				"chunk_index": map[string]any{"type": "integer"},
-			},
+			}, securityProperties()),
 		},
 	}
 	if _, err := client.Indices.Create(ctx, opensearchapi.IndicesCreateReq{
@@ -89,6 +97,21 @@ func EnsureIndex(ctx context.Context, client *opensearchapi.Client) error {
 		return fmt.Errorf("Indices.Create(%s): %w", IndexName, err)
 	}
 	return nil
+}
+
+func securityProperties() map[string]any {
+	return map[string]any{
+		"tenant_id": map[string]any{"type": "keyword"},
+		"repo":      map[string]any{"type": "keyword"},
+		"acl_group": map[string]any{"type": "keyword"},
+	}
+}
+
+func mergeProperties(a, b map[string]any) map[string]any {
+	for key, value := range b {
+		a[key] = value
+	}
+	return a
 }
 
 // Deps sono le dipendenze di ProcessMessage — iniettate esplicitamente
@@ -124,6 +147,12 @@ type codeChunkPayload struct {
 	Provenance json.RawMessage `json:"provenance"`
 }
 
+type securityProvenance struct {
+	TenantID string `json:"tenant_id"`
+	Repo     string `json:"repo"`
+	ACLGroup string `json:"acl_group"`
+}
+
 // ProcessMessage elabora UN messaggio Kafka già fetchato (SPEC-034 §2/§3):
 //  1. estrae event_id dagli header;
 //  2. dedup via processed_events (stesso meccanismo di sink-graph/
@@ -157,6 +186,14 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 		deps.Logf("sink-search: payload CodeChunk senza id (event_id=%s)", eventID)
 		return OutcomeInvalidSkipped, nil
 	}
+	var security securityProvenance
+	if len(chunk.Provenance) == 0 || json.Unmarshal(chunk.Provenance, &security) != nil ||
+		!securitylabels.Valid(security.TenantID, security.Repo, security.ACLGroup) {
+		securitylabels.Observe(ConsumerName, securitylabels.Outcome(security.TenantID, security.Repo, security.ACLGroup))
+		deps.Logf("sink-search: payload CodeChunk senza security labels valide (event_id=%s), scartato", eventID)
+		return OutcomeInvalidSkipped, nil
+	}
+	securitylabels.Observe(ConsumerName, "accepted")
 
 	isNew, err := markProcessed(ctx, deps.DB, eventID)
 	if err != nil {
@@ -228,6 +265,11 @@ func indexDocument(ctx context.Context, client *opensearchapi.Client, chunk code
 			return fmt.Errorf("decodifica provenance: %w", err)
 		}
 		body["provenance"] = provenance
+		if p, ok := provenance.(map[string]any); ok {
+			body["tenant_id"] = p["tenant_id"]
+			body["repo"] = p["repo"]
+			body["acl_group"] = p["acl_group"]
+		}
 	}
 
 	_, err := client.Index(ctx, opensearchapi.IndexReq{

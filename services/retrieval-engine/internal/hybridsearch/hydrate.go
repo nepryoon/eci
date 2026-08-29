@@ -10,6 +10,9 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchutil"
+
+	"github.com/eci-project/eci/libs/go/eci/accessscope"
+	"github.com/eci-project/eci/services/retrieval-engine/internal/securityfilter"
 )
 
 // codeChunksIndex — nome dichiarato dell'indice OpenSearch scritto da
@@ -26,6 +29,10 @@ const codeChunksIndex = "code_chunks"
 // una proprietà base attesa sempre disponibile per un nodo :CodeNode
 // reale — un suo fallimento indica un problema di connessione).
 func hydrateNames(ctx context.Context, driver neo4j.DriverWithContext, nodes []RetrievedNode) error {
+	scope, err := accessscope.FromContext(ctx)
+	if err != nil {
+		return fmt.Errorf("security scope non valido: %w", err)
+	}
 	missing := make([]string, 0, len(nodes))
 	for _, n := range nodes {
 		if n.Name == "" {
@@ -39,11 +46,16 @@ func hydrateNames(ctx context.Context, driver neo4j.DriverWithContext, nodes []R
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session.Close(ctx)
 
+	params := securityfilter.Neo4jParams(scope)
+	params["node_ids"] = missing
 	result, err := session.Run(ctx, `
 		UNWIND $node_ids AS id
 		MATCH (n:CodeNode {id: id})
+		WHERE n.tenant_id = $tenant_id
+		  AND n.repo IN $allowed_repos
+		  AND n.acl_group IN $acl_groups
 		RETURN n.id AS node_id, n.name AS name
-	`, map[string]any{"node_ids": missing})
+	`, params)
 	if err != nil {
 		return fmt.Errorf("lookup batch name: %w", err)
 	}
@@ -88,10 +100,18 @@ type chunkHit struct {
 // irraggiungibile) è un errore esplicito (SPEC-045 §4: richiesto
 // esplicitamente dal client via include_source_text=true).
 func hydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes []RetrievedNode) error {
+	ctx, observe := securityfilter.Observe(ctx, "opensearch")
+	outcome := "error"
+	defer func() { observe(outcome) }()
+	scope, err := accessscope.FromContext(ctx)
+	if err != nil {
+		return fmt.Errorf("security scope non valido: %w", err)
+	}
 	if client == nil {
 		return fmt.Errorf("client OpenSearch non configurato (include_source_text=true richiede Deps.OpenSearch)")
 	}
 	if len(nodes) == 0 {
+		outcome = "empty"
 		return nil
 	}
 
@@ -101,9 +121,7 @@ func hydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes 
 	}
 
 	query := map[string]any{
-		"query": map[string]any{
-			"terms": map[string]any{"entity_id": ids},
-		},
+		"query": securityfilter.OpenSearchFilter(scope, ids),
 		// Limite esplicito generoso: il default OpenSearch (10 risultati)
 		// troncherebbe silenziosamente un'entità con molti chunk o un
 		// candidate set con molte entità — scelta dichiarata, non presunta
@@ -114,6 +132,7 @@ func hydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes 
 	resp, err := client.Search(ctx, &opensearchapi.SearchReq{
 		Indices: []string{codeChunksIndex},
 		Body:    opensearchutil.NewJSONReader(query),
+		Header:  securityfilter.OpenSearchHeaders(scope),
 	})
 	if err != nil {
 		return fmt.Errorf("ricerca batch code_chunks: %w", err)
@@ -142,5 +161,66 @@ func hydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes 
 		}
 		nodes[i].SourceText = strings.Join(texts, "\n")
 	}
+	outcome = "allow"
 	return nil
+}
+
+// recheckAuthorized applies the defense-in-depth ACL check after fusion and
+// before any hydration, reranking, or packing. It is not a substitute for the
+// mandatory pre-retrieval filters in each leg.
+func recheckAuthorized(ctx context.Context, driver neo4j.DriverWithContext, nodes []RetrievedNode) ([]RetrievedNode, error) {
+	ctx, observe := securityfilter.Observe(ctx, "neo4j")
+	outcome := "error"
+	defer func() { observe(outcome) }()
+	if len(nodes) == 0 {
+		outcome = "empty"
+		return nodes, nil
+	}
+	scope, err := accessscope.FromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("security scope non valido: %w", err)
+	}
+	ids := make([]string, len(nodes))
+	for i := range nodes {
+		ids[i] = nodes[i].NodeID
+	}
+	params := securityfilter.Neo4jParams(scope)
+	params["node_ids"] = ids
+	session := driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+	result, err := session.Run(ctx, `
+		UNWIND $node_ids AS id
+		MATCH (n:CodeNode {id: id})
+		WHERE n.tenant_id = $tenant_id
+		  AND n.repo IN $allowed_repos
+		  AND n.acl_group IN $acl_groups
+		RETURN n.id AS node_id
+	`, params)
+	if err != nil {
+		return nil, fmt.Errorf("ACL re-check: %w", err)
+	}
+	records, err := result.Collect(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ACL re-check risultati: %w", err)
+	}
+	allowed := make(map[string]struct{}, len(records))
+	for _, rec := range records {
+		value, _ := rec.Get("node_id")
+		if id, ok := value.(string); ok {
+			allowed[id] = struct{}{}
+		}
+	}
+	out := make([]RetrievedNode, 0, len(nodes))
+	for _, node := range nodes {
+		if _, ok := allowed[node.NodeID]; ok {
+			out = append(out, node)
+		}
+	}
+	securityfilter.AddRecheckRemoved(len(nodes) - len(out))
+	if len(out) == 0 {
+		outcome = "empty"
+	} else {
+		outcome = "allow"
+	}
+	return out, nil
 }

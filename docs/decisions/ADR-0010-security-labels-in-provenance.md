@@ -81,3 +81,8 @@ system; il query plane usa esclusivamente `SecurityContext` JWT-validato.
 Campi assenti, vuoti o malformati non equivalgono mai a wildcard. La migrazione
 non autorizza post-filtering e non modifica la regola fail-closed.
 
+## Evidenza di attuazione
+
+T6.3 implementa la decisione nel producer Rust, nei tre sink e nel query plane.
+Il JSON Schema resta additivo; i test di integrazione usano scope espliciti e
+inseriscono record cross-tenant che devono rimanere invisibili.
