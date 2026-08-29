@@ -260,4 +260,7 @@ def test_eci_command_fails_closed_without_gateway_authentication():
     )
     assert result.returncode == 1
     assert "authenticated securitycontext required" in result.stderr.lower()
-    assert result.stdout == ""
+    # The existing stdout OTel exporter emits the failed ask span; no answer or
+    # source payload may be produced before authentication.
+    assert "Fonti:" not in result.stdout
+    assert "[vllm-fake risposta deterministica]" not in result.stdout
