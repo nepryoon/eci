@@ -80,6 +80,9 @@ trusted upstream metadata:
    Then Envoy risponde 429 con `Retry-After`, non chiama l'upstream ed espone
    contatori bounded; il limite si ricarica deterministicamente e non consuma
    il bucket di un caller autenticato differente.
+   Given un flood di token invalidi, When supera il ceiling pre-auth condiviso,
+   Then Envoy restituisce 429 prima di ext_authz e riduce deterministicamente
+   le invocazioni del validatore, senza chiamare alcun backend.
 7. **Transcoder/config stretti.** Given metodo/query JSON sconosciuto, body
    malformato o >1 MiB, When passa dall'edge, Then 400/404/413 senza passthrough;
    descriptor e config Envoy validano con immagine pinned. Anche un metodo gRPC
@@ -129,13 +132,14 @@ trusted upstream metadata:
 - D7: `SecurityContext` esistente e RPC `ImpactAnalysis` server-streaming.
 
 **Minacce:** forged metadata/body, token replay/scaduto, header smuggling,
-ext_auth bypass/failure, intercettazione/replay del bearer in cleartext,
+ext_auth bypass/failure o resource exhaustion JWKS tramite token invalidi,
+intercettazione/replay del bearer in cleartext,
 replay/esposizione del bearer sull'hop interno, starvation cross-tenant, route
 passthrough, oversized body, slow stream, rate limit bypass, direct
 helper/backend exposure, prompt injection che tenta scope, error leakage.
-Controlli: TLS obbligatorio al listener, rimozione metadata forgiabili prima
-auth, stripping del bearer subito dopo ext_authz, bucket opaco derivato dal
-caller autenticato e poi rimosso, replace da validator T6.1, porte interne, strict
+Controlli: TLS obbligatorio al listener, rimozione metadata forgiabili e ceiling
+coarse prima di auth, stripping del bearer subito dopo ext_authz, bucket opaco
+derivato dal caller autenticato e poi rimosso, replace da validator T6.1, porte interne, strict
 route/transcoder, size/deadline cap, fail-closed, scope metadata-only T6.2/T6.3,
 error body allow-listed e test Envoy reale.
 

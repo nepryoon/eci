@@ -163,6 +163,30 @@ static_resources:
                           - remove: tracestate
                           - remove: baggage
                           - remove: x-eci-rate-limit-key
+                  # A coarse process-wide ceiling protects ext_authz/JWKS from
+                  # unauthenticated floods. Authenticated fairness is enforced
+                  # by the separate caller-partitioned limiter below.
+                  - name: eci.filters.http.pre_auth_local_ratelimit
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                      stat_prefix: eci_edge_pre_auth
+                      token_bucket:
+                        max_tokens: 100
+                        tokens_per_fill: 100
+                        fill_interval: 1s
+                      filter_enabled:
+                        default_value:
+                          numerator: 100
+                          denominator: HUNDRED
+                      filter_enforced:
+                        default_value:
+                          numerator: 100
+                          denominator: HUNDRED
+                      response_headers_to_add:
+                        - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                          header:
+                            key: retry-after
+                            value: "1"
                   - name: envoy.filters.http.ext_authz
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
