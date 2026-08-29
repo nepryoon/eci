@@ -1,5 +1,5 @@
 # SPEC-061 — Security adversarial suite e GDS per-ACL
-Stato: approved
+Stato: implemented
 Task-tree: T6.7 · Servizi: `tools/gds-impact`, `services/retrieval-engine`, `services/orchestrator`, suite security esistente · ADD: Modulo 3 §2.1–§2.6
 Contratti: `contracts/proto/eci/retrieval/v1/retrieval.proto` (sola lettura), `contracts/cypher/schema.cypher` (sola lettura)
 
@@ -192,14 +192,16 @@ applicativo e GDS Community con partizionamento esplicito.
 
 ## 9. Criteri di accettazione
 
-- [ ] Scenari §3 scritti red-before-green e verdi.
-- [ ] Nessuna query GDS senza filtro tenant/repo/ACL su seed e ogni endpoint.
-- [ ] Fixture reale prova che edge/nodi B non entrano nelle proiezioni di A.
-- [ ] Write-back porta provenance e score stale non influenza il reranker.
-- [ ] Prompt injection/tool sconosciuto non altera scope e non raggiunge rete.
-- [ ] Matrice nomina test reali per ogni superficie T6.7, senza skip/xfail.
+- [x] Scenari §3 scritti red-before-green e verdi.
+- [x] Nessuna query store-backed/proiezione GDS senza filtro tenant/repo/ACL
+      su seed e ogni endpoint; gli algoritmi operano solo sui graph name già
+      scoped.
+- [x] Fixture reale prova che edge/nodi B non entrano nelle proiezioni di A.
+- [x] Write-back porta provenance e score stale non influenza il reranker.
+- [x] Prompt injection/tool sconosciuto non altera scope e non raggiunge rete.
+- [x] Matrice nomina test reali per ogni superficie T6.7, senza skip/xfail.
 - [ ] JWT/forged metadata/PDP outage e audit WORM restano fail-closed in CI.
-- [ ] Baseline T5.6 e golden dataset byte-identici; nessuna GPU.
+- [x] Baseline T5.6 e golden dataset byte-identici; nessuna GPU.
 - [ ] `task build`, `task lint`, `task test`, `task test:integration`,
       `task guard` e job security CI verdi.
 - [ ] SPEC `implemented`, poi `verified` solo dopo review e merge evidence.
@@ -221,3 +223,27 @@ filtrata. Le alternative scartate sono proiezione globale con post-filter,
 score senza provenance e canonicalizzazione dello scope da prompt: tutte
 contraddicono l'ADD. Non emerge una decisione architetturale nuova che richieda
 ADR; è enforcement della regola GDS per-ACL già prescritta.
+
+## 11. Evidenza di implementazione
+
+Implementazione CPU-only completata il 2026-08-29. I test red sono nel commit
+`78f50ce`; prima della produzione fallivano per assenza di `ProjectionScope` e
+`ALLOWED_TOOL_NAMES`. La pipeline finale applica lo scope a discovery, seed,
+entrambe le proiezioni e write-back, sostituisce la vecchia stima globale con
+le `.stream.estimate` sui graph name autorizzati e verifica la provenance al
+consumo del reranker.
+
+Evidenza locale verde:
+
+- `task build`, `task lint`, `task test`, `task guard`;
+- `task test:integration`, inclusi GDS reale, stale-score e MinIO COMPLIANCE;
+- `go test -race ./...` nel modulo `tools/gds-impact`;
+- `go test -race ./internal/rerank` nel retrieval engine;
+- 24 test `orchestrator/test_graph.py`.
+
+Docker Desktop, inizialmente inattivo, è stato avviato per le integrazioni. Due
+tentativi preliminari del gate completo hanno incontrato failure di bootstrap
+Testcontainers (`PortNotExposed` PostgreSQL e timeout del mapped port Kafka);
+entrambi i test sono passati subito isolati senza modifiche. Una terza
+esecuzione integrale di `task test:integration` è verde. La verifica CI e la
+review restano necessarie prima dello stato `verified`.
