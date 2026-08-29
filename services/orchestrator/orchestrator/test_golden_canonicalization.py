@@ -43,6 +43,18 @@ def test_resolver_exact_unique_ambiguous_and_not_found_are_explicit():
     assert resolver.resolve("Missing", scope=SCOPE).status is ResolutionStatus.not_found
 
 
+def test_repository_symbol_loader_indexes_go_interface_methods():
+    resolver = load_sample_repo_symbols(REPO_ROOT)
+
+    assert (
+        resolver.resolve("Notifier.Notify", scope=SCOPE).status
+        is ResolutionStatus.exact
+    )
+    notify = resolver.resolve("Notify", scope=SCOPE)
+    assert notify.status is ResolutionStatus.ambiguous
+    assert notify.candidates == ("EmailNotifier.Notify", "Notifier.Notify")
+
+
 def test_canonicalizer_distinguishes_exact_unqualified_verbose_and_semantic_error():
     resolver = InMemorySymbolResolver(
         ["OrderService", "OrderService.Process", "OrderService.Validate", "main"]
@@ -232,13 +244,13 @@ def test_real_t56_replay_metrics_are_new_and_do_not_rewrite_baseline():
     assert historical_summary["pass_rate"] == 0.5
     assert historical_summary["fact_recall"] == 0.4
     assert exact / expected_count == pytest.approx(0.4)
-    assert semantic / expected_count == pytest.approx(14 / 15)
-    assert resolved / actual_count == pytest.approx(14 / 15)
+    assert semantic / expected_count == pytest.approx(13 / 15)
+    assert resolved / actual_count == pytest.approx(13 / 15)
     assert issue_counts == {
         "semantic_error": 1,
         "unqualified_symbol": 4,
         "verbose_fact": 4,
-        "missing_fact": 1,
+        "missing_fact": 2,
     }
 
 

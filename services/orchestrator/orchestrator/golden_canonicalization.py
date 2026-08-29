@@ -170,6 +170,10 @@ def load_sample_repo_symbols(repo_root: Path) -> InMemorySymbolResolver:
     function_pattern = re.compile(
         r"^\s*func\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.MULTILINE
     )
+    interface_start_pattern = re.compile(
+        r"^\s*type\s+([A-Za-z_][A-Za-z0-9_]*)\s+interface\s*\{"
+    )
+    interface_method_pattern = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
     source_files = sorted(fixture.glob("*.go"))
     if not source_files:
         raise FileNotFoundError(f"fixture repo mancante o vuoto: {fixture}")
@@ -181,6 +185,22 @@ def load_sample_repo_symbols(repo_root: Path) -> InMemorySymbolResolver:
             for receiver, method in method_pattern.findall(source)
         )
         symbols.update(function_pattern.findall(source))
+        interface_name: str | None = None
+        brace_depth = 0
+        for line in source.splitlines():
+            if interface_name is None:
+                start = interface_start_pattern.match(line)
+                if start is None:
+                    continue
+                interface_name = start.group(1)
+                brace_depth = line.count("{") - line.count("}")
+                continue
+            method = interface_method_pattern.match(line)
+            if method is not None:
+                symbols.add(f"{interface_name}.{method.group(1)}")
+            brace_depth += line.count("{") - line.count("}")
+            if brace_depth <= 0:
+                interface_name = None
     return InMemorySymbolResolver(symbols)
 
 

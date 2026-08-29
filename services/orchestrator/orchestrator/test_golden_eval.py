@@ -490,3 +490,34 @@ def test_raw_equality_cannot_credit_an_identifier_absent_from_symbol_table(tmp_p
     assert summary["fact_recall"] == 1.0
     assert summary["exact_canonical_fact_recall"] == 0.0
     assert summary["semantic_entity_recall"] == 0.0
+
+
+def test_resolver_outage_marks_semantic_metric_unavailable(tmp_path, server):
+    class FailingResolver:
+        def resolve(self, identifier, *, scope):
+            raise ConnectionError(f"unavailable: {identifier} {scope.repository}")
+
+    url, _ = server
+    output = tmp_path / "resolver-outage.jsonl"
+    summary = run_golden_eval(
+        dataset(tmp_path), url, "real", output, symbols=FailingResolver()
+    )
+    records = [json.loads(line) for line in output.read_text().splitlines()]
+
+    assert records[0]["error"] == "CanonicalizationError"
+    assert records[0]["semantic_entity_recall"] is None
+    assert records[0]["semantic_metric_limitations"] == [
+        {
+            "code": "symbol_resolver_unavailable",
+            "query_id": "g1",
+            "detail": "symbol resolver failed for B",
+        }
+    ]
+    assert summary["semantic_entity_recall"] is None
+    assert summary["semantic_metric_limitations"] == [
+        {
+            "code": "symbol_resolver_unavailable",
+            "query_id": "g1",
+            "detail": "symbol resolver failed for B",
+        }
+    ]

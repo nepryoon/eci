@@ -306,12 +306,15 @@ facts/citations. Il fingerprint della logica è
 `576a17cd3e98c43bd230bb8da3add6f2d3fd22405498cb293b355e6db1c52689`.
 
 Il replay CPU-only degli output storici produce, come **nuove metriche T5.7**,
-`exact_canonical_fact_recall=0.40`, `semantic_entity_recall=14/15` e coverage
-resolver `14/15`. Questi valori sono evidenza di regressione deterministica,
+`exact_canonical_fact_recall=0.40`, `semantic_entity_recall=13/15` e coverage
+resolver `13/15`. `Notify` è intenzionalmente ambiguo tra
+`Notifier.Notify` ed `EmailNotifier.Notify`: il testo verboso sul receiver non
+partecipa alla risoluzione e quindi non riceve credito semantico. Questi valori
+sono evidenza di regressione deterministica,
 non sostituiscono né modificano la baseline ufficiale T5.6 (`pass_rate=0.50`,
 `fact_recall=0.40`). Taxonomy del replay: un `semantic_error`, quattro
-`unqualified_symbol`, quattro `verbose_fact` e un `missing_fact` conseguente al
-failure g01; nessun match fuzzy o probabilistico.
+`unqualified_symbol`, quattro `verbose_fact` e due `missing_fact` (g01 e il
+metodo ambiguo di g07); nessun match fuzzy o probabilistico.
 
 Nessuna deviazione da ADD o contratti condivisi. Il formato resta interno
 all'harness; non è stato modificato alcun file sotto `contracts/`.

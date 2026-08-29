@@ -15,6 +15,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from .golden_canonicalization import (
+    CanonicalizationError,
     CanonicalizedFact,
     DeterministicCanonicalizer,
     EvaluationIssue,
@@ -49,6 +50,13 @@ class GoldenEntry(BaseModel):
     scope_note: str = Field(min_length=1)
 
 
+class SemanticMetricLimitation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    code: str
+    query_id: str
+    detail: str
+
+
 class EvalRecord(BaseModel):
     query_id: str
     model: str
@@ -72,6 +80,7 @@ class EvalRecord(BaseModel):
     missing_facts: tuple[str, ...] = ()
     exact_canonical_fact_recall: float = 0.0
     semantic_entity_recall: float | None = None
+    semantic_metric_limitations: tuple[SemanticMetricLimitation, ...] = ()
     canonicalization_coverage: float = 0.0
     prompt_contract_version: str = PROMPT_CONTRACT_VERSION
     logic_fingerprint: str = LOGIC_FINGERPRINT
@@ -139,7 +148,7 @@ def run_golden_eval(
     require_real: bool = False,
     timeout: float = 30.0,
     symbols: SymbolResolver | None = None,
-) -> dict[str, float | int | bool | str | None | dict[str, int] | list[str]]:
+) -> dict[str, object]:
     entries = TypeAdapter(list[GoldenEntry]).validate_json(dataset.read_bytes())
     if len({entry.id for entry in entries}) != len(entries):
         raise ValueError("duplicate golden id")
@@ -214,6 +223,22 @@ def run_golden_eval(
                     semantic_entity_recall=comparison.semantic_entity_recall,
                     canonicalization_coverage=comparison.canonicalization_coverage,
                 )
+            except CanonicalizationError as exc:
+                limitation = SemanticMetricLimitation(
+                    code="symbol_resolver_unavailable",
+                    query_id=entry.id,
+                    detail=str(exc),
+                )
+                record = EvalRecord(
+                    query_id=entry.id,
+                    model=model,
+                    is_real=is_real,
+                    expected_facts=facts,
+                    context_files=context_files,
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                    error=type(exc).__name__,
+                    semantic_metric_limitations=(limitation,),
+                )
             except (
                 httpx.HTTPError,
                 ValidationError,
@@ -266,7 +291,12 @@ def run_golden_eval(
     for record in records:
         for issue in record.evaluation_issues:
             taxonomy_counts[issue.code.value] += 1
-    summary: dict[str, float | int | bool | str | None | dict[str, int] | list[str]] = {
+    semantic_limitations = tuple(
+        limitation
+        for record in records
+        for limitation in record.semantic_metric_limitations
+    )
+    summary: dict[str, object] = {
         "is_real": is_real,
         "query_count": len(records),
         "success_count": successful,
@@ -276,8 +306,16 @@ def run_golden_eval(
         "exact_canonical_fact_recall": exact_canonical_matched / expected
         if expected
         else 1.0,
-        "semantic_entity_recall": semantic_matched / expected if expected else 1.0,
-        "semantic_metric_limitations": [],
+        "semantic_entity_recall": (
+            None
+            if semantic_limitations
+            else semantic_matched / expected
+            if expected
+            else 1.0
+        ),
+        "semantic_metric_limitations": [
+            limitation.model_dump(mode="json") for limitation in semantic_limitations
+        ],
         "canonicalization_coverage": resolved_actual / actual_count
         if actual_count
         else 1.0,
