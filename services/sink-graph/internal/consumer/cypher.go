@@ -42,6 +42,13 @@ var allowedRelTypes = map[string]bool{
 	"CITES":        true,
 }
 
+// impactProperties raccoglie tutti i valori derivati dal job GDS e la relativa
+// provenance. Devono essere rimossi insieme: conservare un valore senza la sua
+// provenance (o viceversa) renderebbe impossibile il controllo fail-closed del
+// reranker.
+const impactProperties = "stale.impact_score, stale.community_id, stale.impact_kind,\n" +
+	"       stale.impact_tenant_id, stale.impact_repo, stale.impact_acl_group"
+
 // mergeCodeNodeQuery costruisce la query di MERGE per un CodeNode (SPEC-015
 // §2). I tre frammenti Cypher illustrativi della SPEC (query base + "SOLO
 // per Method" + "SOLO per File") sono unificati qui in una singola query
@@ -59,7 +66,14 @@ func mergeCodeNodeQuery(nodeType string) (string, error) {
 		)
 	}
 
-	query := "MERGE (n:CodeNode {id: $id})\n" +
+	// Il punteggio di ogni nodo dipende dall'intera proiezione ACL. Catturare lo
+	// scope prima del MERGE permette quindi di invalidare atomicamente sia la
+	// vecchia partizione sia la nuova quando cambia ownership. L'invalidazione
+	// limitata al solo nodo aggiornato lascerebbe score degli altri nodi derivati
+	// da una topologia ormai obsoleta (SPEC-061 §2/§6).
+	query := "OPTIONAL MATCH (existing:CodeNode {id: $id})\n" +
+		"WITH existing.tenant_id AS old_tenant_id, existing.repo AS old_repo, existing.acl_group AS old_acl_group\n" +
+		"MERGE (n:CodeNode {id: $id})\n" +
 		"SET n:" + nodeType + ", n.domain = $domain, n.name = $name, n.ast_hash = $ast_hash,\n" +
 		"    n.tenant_id = $tenant_id, n.repo = $repo, n.acl_group = $acl_group, n.path = $path"
 
@@ -70,6 +84,12 @@ func mergeCodeNodeQuery(nodeType string) (string, error) {
 		query += "\nSET n.symbol_id = $id"
 	}
 
+	query += "\nWITH n, old_tenant_id, old_repo, old_acl_group\n" +
+		"MATCH (stale:CodeNode)\n" +
+		"WHERE (old_tenant_id IS NOT NULL AND stale.tenant_id = old_tenant_id AND stale.repo = old_repo AND stale.acl_group = old_acl_group)\n" +
+		"   OR (stale.tenant_id = n.tenant_id AND stale.repo = n.repo AND stale.acl_group = n.acl_group)\n" +
+		"REMOVE " + impactProperties
+
 	return query, nil
 }
 
@@ -78,6 +98,9 @@ func mergeCodeNodeQuery(nodeType string) (string, error) {
 // :CodeNode (mai una label specifica — non è garantito sapere il tipo
 // reale a questo punto del consumo, vedi commento in §2), weight
 // aggregato con lo stesso pattern del Cypher di riferimento D3 (SPEC-004).
+// Ogni mutazione della topologia invalida inoltre i risultati GDS di entrambe
+// le partizioni endpoint: un singolo edge può cambiare lo score di qualunque
+// nodo della proiezione, non soltanto dei suoi estremi (SPEC-061 §2/§6).
 func mergeCodeRelationQuery(relType string) (string, error) {
 	if !allowedRelTypes[relType] {
 		return "", fmt.Errorf(
@@ -90,7 +113,12 @@ func mergeCodeRelationQuery(relType string) (string, error) {
 		"MERGE (to:CodeNode {id: $to_id})\n" +
 		"MERGE (from)-[r:" + relType + "]->(to)\n" +
 		"ON CREATE SET r.weight = coalesce($weight, 1)\n" +
-		"ON MATCH SET r.weight = coalesce(r.weight, 0) + coalesce($weight, 1)"
+		"ON MATCH SET r.weight = coalesce(r.weight, 0) + coalesce($weight, 1)\n" +
+		"WITH from, to\n" +
+		"MATCH (stale:CodeNode)\n" +
+		"WHERE (from.tenant_id IS NOT NULL AND stale.tenant_id = from.tenant_id AND stale.repo = from.repo AND stale.acl_group = from.acl_group)\n" +
+		"   OR (to.tenant_id IS NOT NULL AND stale.tenant_id = to.tenant_id AND stale.repo = to.repo AND stale.acl_group = to.acl_group)\n" +
+		"REMOVE " + impactProperties
 
 	return query, nil
 }

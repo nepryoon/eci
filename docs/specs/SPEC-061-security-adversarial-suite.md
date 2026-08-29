@@ -88,10 +88,13 @@ non è mai derivato da `query`, argomenti tool, risposta LLM o stato del grafo.
    cross-boundary, When il job gira per la partizione A, Then seed, BFS, due
    proiezioni GDS, algoritmi e write-back contengono solo A; B non riceve
    proprietà e nessuna cardinalità/nome di B compare nel risultato o log.
-3. **Revoca/ownership change.** Given un punteggio GDS scritto per A, When il
-   nodo cambia repo o ACL senza un nuovo run, Then il reranker autenticato non
-   usa il punteggio stale; dopo un run nella nuova partizione usa soltanto la
-   nuova provenance di calcolo.
+3. **Revoca/ownership e mutazioni topologiche.** Given punteggi GDS scritti per
+   una partizione A, When un nodo cambia tenant/repo/ACL, Then lo stesso write
+   invalida atomicamente score, community, kind e provenance su tutti i nodi
+   della vecchia e nuova partizione. When viene materializzata o aggiornata una
+   relazione, Then lo stesso write invalida entrambe le partizioni endpoint.
+   Fino a un nuovo run il reranker usa `0.0`; dopo il run usa soltanto la nuova
+   provenance. L'invalidazione non attraversa partizioni non coinvolte.
 4. **Prompt/tool isolation.** Given testo che ordina di usare shell, cambiare
    `allowed_repos`/`acl_groups` o chiamare un tool inventato, When l'agente
    esegue, Then la sequenza contiene soltanto nomi allow-listed e ogni client
@@ -123,6 +126,8 @@ non è mai derivato da `query`, argomenti tool, risposta LLM o stato del grafo.
 | arco verso nodo fuori partizione | traversal arrestata; nodo/arco non proiettato |
 | proiezione/algoritmo/write-back fallisce | errore esplicito; drop delle proiezioni sempre tentato |
 | score con provenance mancante o non coincidente | ignorato deterministicamente (`0.0`) |
+| nodo cambia ownership | invalida nello stesso write l'intera partizione vecchia e nuova |
+| relazione creata/aggiornata | invalida nello stesso write le partizioni dei due endpoint |
 | azione tool sconosciuta | `ValueError` prima di qualunque client/store |
 | query tenta di serializzare scope | testo trattato solo come query; context invariato |
 | JWT/metadata/OPA invalidi o backend auth non disponibile | deny bounded; zero store call |
@@ -140,8 +145,9 @@ body, metadata client e valori expected/eval non sono autorità. **Attacchi:**
 cross-tenant/repo, confused deputy, forged metadata, prompt-to-tool escalation,
 GDS globale, score stale dopo revoca, not-found oracle, PDP fail-open.
 **Mitigazioni:** allow-list chiusa, scope immutabile, predicati positivi su ogni
-nodo GDS, provenance del calcolo, re-check prima del consumo, deny uniforme,
-test reali e osservabilità senza label identitarie.
+nodo GDS, provenance del calcolo, invalidazione atomica delle partizioni su
+mutazioni di nodo/relazione, re-check prima del consumo, deny uniforme, test
+reali e osservabilità senza label identitarie.
 
 Non-goals: nessuna nuova policy prodotto, modifica ADD/contratti, LLM judge,
 embedding/fuzzy matching, GPU, nuovo datastore, mTLS/Kubernetes (T7.1),
@@ -166,7 +172,9 @@ applicativo e GDS Community con partizionamento esplicito.
 - Unit Go GDS: validazione `ProjectionScope` e presenza parametri/predicati in
   discovery/projection/write-back; `Run` rifiuta config costruita a mano.
 - Integration Neo4j+GDS reale: fixture A/B, edge cross-boundary, write-back e
-  catalog cleanup; cambio ACL rende score stale invisibile al reranker.
+  catalog cleanup; cambio ACL e mutazione di relazione invalidano tutti i
+  risultati derivati nelle sole partizioni coinvolte; il reranker ignora anche
+  qualunque score con provenance stale.
 - Unit Python orchestrator: registry esatto, tool ignoto pre-network, prompt
   injection non modifica azioni ammesse né l'oggetto `SecurityContext`.
 - Regression matrix versionata: riferimenti test esistenti per gateway JWT,
@@ -198,6 +206,8 @@ applicativo e GDS Community con partizionamento esplicito.
       scoped.
 - [x] Fixture reale prova che edge/nodi B non entrano nelle proiezioni di A.
 - [x] Write-back porta provenance e score stale non influenza il reranker.
+- [x] Mutazioni di ownership e topologia invalidano atomicamente l'intera
+      partizione derivata, non soltanto il nodo aggiornato.
 - [x] Prompt injection/tool sconosciuto non altera scope e non raggiunge rete.
 - [x] Matrice nomina test reali per ogni superficie T6.7, senza skip/xfail.
 - [ ] JWT/forged metadata/PDP outage e audit WORM restano fail-closed in CI.
@@ -218,9 +228,11 @@ garanzie deterministiche e valutazione probabilistica resta intatta.
 L'attacco più pericoloso individuato nel secondo passaggio è la revoca ACL dopo
 il write-back: filtrare soltanto il nodo non basta perché un vecchio score può
 codificare topologia non più autorizzata. Per questo la SPEC richiede provenance
-tenant/repo/ACL del calcolo e la verifica al consumo, non solo una proiezione
-filtrata. Le alternative scartate sono proiezione globale con post-filter,
-score senza provenance e canonicalizzazione dello scope da prompt: tutte
+tenant/repo/ACL del calcolo, verifica al consumo e invalidazione dell'intera
+partizione derivata a ogni mutazione di ownership o topologia. Le alternative
+scartate sono invalidare solo il nodo mutato, invalidare globalmente tutte le
+partizioni, proiezione globale con post-filter, score senza provenance e
+canonicalizzazione dello scope da prompt: tutte lasciano dati derivati stale o
 contraddicono l'ADD. Non emerge una decisione architetturale nuova che richieda
 ADR; è enforcement della regola GDS per-ACL già prescritta.
 
@@ -232,6 +244,15 @@ Implementazione CPU-only completata il 2026-08-29. I test red sono nel commit
 entrambe le proiezioni e write-back, sostituisce la vecchia stima globale con
 le `.stream.estimate` sui graph name autorizzati e verifica la provenance al
 consumo del reranker.
+
+La review automatizzata ha poi riprodotto un caso più forte: il punteggio di un
+nodo invariato può incorporare la topologia di un altro nodo che cambia scope.
+Il test integration `T6_7_GDSPartitionInvalidatedOnScopeAndTopologyMutation`,
+aggiunto red nel commit `a655fe3`, falliva perché quei valori restavano nel
+grafo. Il sink graph ora cattura lo scope precedente e invalida nello stesso
+Cypher vecchia e nuova partizione; una mutazione di relazione invalida le
+partizioni di entrambi gli endpoint. La regressione è verde senza rerun GPU e
+senza modifiche a baseline o golden.
 
 Evidenza locale verde:
 
