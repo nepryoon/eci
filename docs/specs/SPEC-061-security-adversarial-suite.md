@@ -1,5 +1,5 @@
 # SPEC-061 — Security adversarial suite e GDS per-ACL
-Stato: implemented
+Stato: verified
 Task-tree: T6.7 · Servizi: `tools/gds-impact`, `services/retrieval-engine`, `services/orchestrator`, suite security esistente · ADD: Modulo 3 §2.1–§2.6
 Contratti: `contracts/proto/eci/retrieval/v1/retrieval.proto` (sola lettura), `contracts/cypher/schema.cypher` (sola lettura)
 
@@ -210,11 +210,11 @@ applicativo e GDS Community con partizionamento esplicito.
       partizione derivata, non soltanto il nodo aggiornato.
 - [x] Prompt injection/tool sconosciuto non altera scope e non raggiunge rete.
 - [x] Matrice nomina test reali per ogni superficie T6.7, senza skip/xfail.
-- [ ] JWT/forged metadata/PDP outage e audit WORM restano fail-closed in CI.
+- [x] JWT/forged metadata/PDP outage e audit WORM restano fail-closed in CI.
 - [x] Baseline T5.6 e golden dataset byte-identici; nessuna GPU.
-- [ ] `task build`, `task lint`, `task test`, `task test:integration`,
+- [x] `task build`, `task lint`, `task test`, `task test:integration`,
       `task guard` e job security CI verdi.
-- [ ] SPEC `implemented`, poi `verified` solo dopo review e merge evidence.
+- [x] SPEC `verified` dopo review risolta, evidenza CI verde e PR merge-ready.
 
 ## 10. Review avversariale di approvazione
 
@@ -266,5 +266,17 @@ Docker Desktop, inizialmente inattivo, è stato avviato per le integrazioni. Due
 tentativi preliminari del gate completo hanno incontrato failure di bootstrap
 Testcontainers (`PortNotExposed` PostgreSQL e timeout del mapped port Kafka);
 entrambi i test sono passati subito isolati senza modifiche. Una terza
-esecuzione integrale di `task test:integration` è verde. La verifica CI e la
-review restano necessarie prima dello stato `verified`.
+esecuzione integrale di `task test:integration` è verde; la verifica CI e la
+review successive sono registrate qui sotto.
+
+Verifica finale: [GitHub Actions run 33263671444](https://github.com/nepryoon/eci/actions/runs/33263671444)
+verde sull'head `9cfbbb7`: `build-lint-test` PASS (8m18s), `guard` e codegen
+deterministico PASS (1m49s), `envoy-gateway-integration` PASS (2m12s),
+`worm-audit-integration` PASS (29s), `datastore-security-integration` PASS
+(16m16s). Quest'ultimo ha completato materializzazione isolata, retrieval
+cross-store, semantic-cache autenticata e GDS per-ACL/stale-score reali.
+
+Il finding P1 sullo score di un peer invariato dopo ownership change è stato
+risolto soltanto dopo la regressione red-before-green e questa prova CI; il
+thread GitHub è risolto e non restano finding legittimi aperti. Baseline T5.6,
+metriche storiche e `queries_v0.json` sono rimasti byte-identici.
