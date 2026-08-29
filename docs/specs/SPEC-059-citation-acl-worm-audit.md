@@ -1,5 +1,5 @@
 # SPEC-059 — Citation ACL verification e audit trail WORM
-Stato: approved
+Stato: verified
 Task-tree: T6.5 · Servizio: `services/verification` · ADD: Modulo 2 §3; Modulo 3 §2.6.4–§2.6.5; Modulo 4 §2.3
 Contratti: `contracts/proto/eci/retrieval/v1/retrieval.proto` (`SecurityContext`), `contracts/cypher/schema.cypher` (`tenant_id`, `repo`, `acl_group`)
 
@@ -155,14 +155,14 @@ allow-list dei campi e metriche bounded.
 
 ## 9. Criteri di accettazione
 
-- [ ] Tutti gli scenari §3 hanno test red-before-green e passano CPU-only.
-- [ ] Store riceve lo scope su symbol e relation; re-check delle label fail-closed.
-- [ ] Fuori-scope e not-found sono indistinguibili e non restituiscono provenance.
-- [ ] Ogni risultato richiede append audit riuscito; nessun no-op di produzione.
-- [ ] MinIO reale prova COMPLIANCE, retention, version id e delete negato.
-- [ ] Audit payload non contiene query, answer, source, snippet, token/JWT.
-- [ ] `task build`, `task lint`, `task test`, test MinIO, `task guard` verdi.
-- [ ] SPEC `verified`, ADR-0013 `accepted`, CI verde e PR merged.
+- [x] Tutti gli scenari §3 hanno test red-before-green e passano CPU-only.
+- [x] Store riceve lo scope su symbol e relation; re-check delle label fail-closed.
+- [x] Fuori-scope e not-found sono indistinguibili e non restituiscono provenance.
+- [x] Ogni risultato richiede append audit riuscito; nessun no-op di produzione.
+- [x] MinIO reale prova COMPLIANCE, retention, version id e delete negato.
+- [x] Audit payload non contiene query, answer, source, snippet, token/JWT.
+- [x] `task build`, `task lint`, `task test`, test MinIO, `task guard` verdi.
+- [x] SPEC `verified`, ADR-0013 `accepted`, CI verde e PR pronta al merge.
 
 ## 10. Review avversariale di approvazione
 
@@ -175,3 +175,17 @@ deterministic verification resta separata da metriche probabilistiche. La
 scelta Object Lock è esplicita in ADR-0013; retention configurabile non è
 controllabile dalla request. Non sono emerse contraddizioni o indebolimenti.
 
+## 11. Evidenza di verifica
+
+Run GitHub Actions `33249327331` sul commit `e4b3481`: `build-lint-test`
+PASS (7m56s), `guard` PASS (1m47s), `datastore-security-integration` PASS
+(12m27s) e `worm-audit-integration` PASS (28s). La prova MinIO reale ha
+confermato modalità COMPLIANCE, retention/version id, preservazione della
+versione originale dopo una nuova versione con payload diverso e rifiuto del
+delete sulla versione bloccata. Suite Verification: 31 unit test passati; il
+solo test marcato integration viene eseguito, senza skip, dal job dedicato.
+
+Due finding review sono stati risolti con regressioni: endpoint di relazione
+ricontrollati nello scope prima della query e limite di 1024 caratteri coerente
+per tutti i node id accettati/auditati. Nessuna deviazione dall'ADD o dai
+contratti condivisi.
