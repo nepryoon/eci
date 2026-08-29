@@ -81,26 +81,6 @@ def canonical_event_bytes(event: VerificationAuditEvent) -> bytes:
     ).encode("utf-8")
 
 
-class InMemoryAuditSink:
-    """Observable unit-test sink; production wiring must use a WORM sink."""
-
-    def __init__(self) -> None:
-        self.events: list[VerificationAuditEvent] = []
-        self.serialized_events: list[str] = []
-
-    def append(self, event: VerificationAuditEvent) -> AuditReceipt:
-        payload = canonical_event_bytes(event)
-        digest = sha256(payload).hexdigest()
-        self.events.append(event)
-        self.serialized_events.append(payload.decode("utf-8"))
-        return AuditReceipt(
-            object_name=f"memory/{event.event_id}-{digest}.json",
-            version_id="memory-v1",
-            payload_sha256=digest,
-            retain_until=event.recorded_at + timedelta(days=1),
-        )
-
-
 class MinioWormAuditSink:
     """Append canonical events under S3 Object Lock COMPLIANCE retention."""
 

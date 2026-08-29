@@ -7,7 +7,10 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import ValidationError
 
-from verification.audit import InMemoryAuditSink, VerificationAuditError
+from verification.audit import (
+    VerificationAuditError,
+    canonical_event_bytes,
+)
 from verification.verifier import (
     AuthorizationScope,
     CandidateAnswer,
@@ -76,6 +79,16 @@ class Store:
         self.scopes.append(scope)
         self.depths.append(max_depth)
         return (source_id, target_id, edge_type) in self.relations
+
+
+class InMemoryAuditSink:
+    def __init__(self):
+        self.events = []
+        self.serialized_events = []
+
+    def append(self, event):
+        self.events.append(event)
+        self.serialized_events.append(canonical_event_bytes(event).decode("utf-8"))
 
 
 def candidate(**overrides):
