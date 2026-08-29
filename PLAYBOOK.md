@@ -241,6 +241,12 @@ Legenda delega: 🟢 = delega ~90% (review leggera) · 🟡 = delega con review 
 
 **Milestone B** — risposta verificata deterministicamente con LLM reale.
 
+**Follow-up di quality hardening (non modifica retroattivamente T5.6 o Milestone B):**
+
+| ID | Task | Dip. | Delega |
+|---|---|---|---|
+| T5.7 | Deterministic output canonicalization & eval hardening | T5.6 | 🟡 |
+
 ### Fase 6 — Security (ADD M3) — *human-in-the-loop di default*
 
 | ID | Task | Dip. | Delega |

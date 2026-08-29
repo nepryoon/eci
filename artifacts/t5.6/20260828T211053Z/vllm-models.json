@@ -1,0 +1,30 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "eci-qwen3-coder-30b-a3b-fp8",
+      "object": "model",
+      "created": 1787951591,
+      "owned_by": "vllm",
+      "root": "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8",
+      "parent": null,
+      "max_model_len": 4096,
+      "permission": [
+        {
+          "id": "modelperm-bc4be5f7f5c3563c",
+          "object": "model_permission",
+          "created": 1787951591,
+          "allow_create_engine": false,
+          "allow_sampling": true,
+          "allow_logprobs": true,
+          "allow_search_indices": false,
+          "allow_view": true,
+          "allow_fine_tuning": false,
+          "organization": "*",
+          "group": null,
+          "is_blocking": false
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+Reusing validated vLLM environment
+vllm=0.28.0
+torch=2.13.0+cu129
+cuda=12.9

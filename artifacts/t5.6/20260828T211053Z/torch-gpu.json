@@ -1,0 +1,12 @@
+{
+  "compute_capability": [
+    8,
+    9
+  ],
+  "cuda_available": true,
+  "device_count": 1,
+  "device_name": "NVIDIA L40S",
+  "torch_cuda_version": "12.9",
+  "torch_version": "2.13.0+cu129",
+  "total_memory_bytes": 47803596800
+}

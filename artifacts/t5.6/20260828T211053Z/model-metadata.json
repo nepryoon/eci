@@ -1,0 +1,11 @@
+{
+  "author": "Qwen",
+  "declared_file_bytes": 0,
+  "gated": false,
+  "id": "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8",
+  "last_modified": "2025-12-03T08:20:23+00:00",
+  "library_name": "transformers",
+  "pipeline_tag": "text-generation",
+  "private": false,
+  "sha": "dcaee4d4dfc5ee71ad501f01f530e5652438fde0"
+}

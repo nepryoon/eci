@@ -1,0 +1,9 @@
+commit 32cd8e17643358a7a4307c92dfb3a025d59045f4
+Author:     Luca Lillo <lilloluca@gmail.com>
+AuthorDate: Wed Aug 26 19:20:05 2026 +0200
+Commit:     GitHub <noreply@github.com>
+CommitDate: Wed Aug 26 19:20:05 2026 +0200
+
+    docs: verify SPEC-047 through SPEC-052 (#65)
+    
+    Verify SPEC-047 through SPEC-052 and add direct HTTP-boundary evidence that LangGraph visited state is not serialized into vllm-fake prompts.

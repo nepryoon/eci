@@ -1,0 +1,2 @@
+Filesystem           Size  Used Avail Use% Mounted on
+/dev/mapper/vg0-lv0   60G   43G   18G  71% /workspace

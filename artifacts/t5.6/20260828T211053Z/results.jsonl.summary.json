@@ -1,0 +1,10 @@
+{
+  "error_count": 0,
+  "fact_recall": 0.4,
+  "is_real": true,
+  "latency_p50_ms": 1799.4427140802145,
+  "latency_p95_ms": 3604.616958182305,
+  "pass_rate": 0.5,
+  "query_count": 10,
+  "success_count": 10
+}

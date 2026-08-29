@@ -1,0 +1,13 @@
+Resolved 71 packages in 81ms
+   Building eci-core @ file:///workspace/eci/libs/py
+   Building orchestrator @ file:///workspace/eci/services/orchestrator
+      Built orchestrator @ file:///workspace/eci/services/orchestrator
+      Built eci-core @ file:///workspace/eci/libs/py
+Prepared 2 packages in 590ms
+Uninstalled 2 packages in 1ms
+warning: Failed to hardlink files; falling back to full copy. This may lead to degraded performance.
+         If the cache and target directories are on different filesystems, hardlinking may not be supported.
+         If this is intentional, set `export UV_LINK_MODE=copy` or use `--link-mode=copy` to suppress this warning.
+Installed 2 packages in 6ms
+ ~ eci-core==0.1.0 (from file:///workspace/eci/libs/py)
+ ~ orchestrator==0.1.0 (from file:///workspace/eci/services/orchestrator)

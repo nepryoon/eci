@@ -1,0 +1,11 @@
+{
+  "model": "eci-qwen3-coder-30b-a3b-fp8",
+  "temperature": 0,
+  "max_tokens": 64,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Return only this JSON object: {\"ok\":true}"
+    }
+  ]
+}

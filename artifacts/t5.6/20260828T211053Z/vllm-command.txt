@@ -1,0 +1,13 @@
+/workspace/venvs/vllm/bin/vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 \
+  --revision dcaee4d4dfc5ee71ad501f01f530e5652438fde0 \
+  --served-model-name eci-qwen3-coder-30b-a3b-fp8 \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --dtype auto \
+  --tensor-parallel-size 1 \
+  --max-model-len 4096 \
+  --max-num-seqs 1 \
+  --gpu-memory-utilization 0.90 \
+  --generation-config vllm \
+  --enforce-eager \
+  --no-enable-log-requests
