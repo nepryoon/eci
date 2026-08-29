@@ -81,6 +81,37 @@ func TestSinkGraphConsumer(t *testing.T) {
 	t.Run("Scenario5_InvalidEnumDiscardedNoNeo4jWrite", func(t *testing.T) {
 		scenario5InvalidEnumDiscardedNoNeo4jWrite(t, ctx, st)
 	})
+	t.Run("T6_7_GDSPartitionInvalidatedOnScopeAndTopologyMutation", func(t *testing.T) {
+		t67GDSPartitionInvalidatedOnScopeAndTopologyMutation(t, ctx, st)
+	})
+}
+
+func t67GDSPartitionInvalidatedOnScopeAndTopologyMutation(t *testing.T, ctx context.Context, st *stack) {
+	oldPeer := uniqueID(t, "gds-old-peer")
+	moving := uniqueID(t, "gds-moving")
+	newPeer := uniqueID(t, "gds-new-peer")
+	relationPeer := uniqueID(t, "gds-relation-peer")
+	seedImpactPartition(t, ctx, st.driver, oldPeer, moving, newPeer, relationPeer)
+
+	movePayload := codeNodePayloadWithScope(
+		moving, "Moved", "Function", "go", "moved.go",
+		tenantPlaceholder, repoPlaceholder, "admins",
+	)
+	outcome, err := consumer.ProcessMessage(ctx, newDeps(st), consumer.TopicCodeNode, movePayload,
+		[]kafka.Header{{Key: "event_id", Value: []byte(uniqueEventID(t))}})
+	if err != nil || outcome != consumer.OutcomeMerged {
+		t.Fatalf("scope move outcome=%v err=%v", outcome, err)
+	}
+	assertImpactInvalidated(t, ctx, st.driver, oldPeer, moving, newPeer)
+
+	setImpactProperties(t, ctx, st.driver, oldPeer, relationPeer)
+	relationPayload := codeRelationPayload(oldPeer, relationPeer, "CALLS", intPtr(1))
+	outcome, err = consumer.ProcessMessage(ctx, newDeps(st), consumer.TopicCodeRelation, relationPayload,
+		[]kafka.Header{{Key: "event_id", Value: []byte(uniqueEventID(t))}})
+	if err != nil || outcome != consumer.OutcomeMerged {
+		t.Fatalf("relation mutation outcome=%v err=%v", outcome, err)
+	}
+	assertImpactInvalidated(t, ctx, st.driver, oldPeer, relationPeer)
 }
 
 // ============================================================
@@ -797,14 +828,21 @@ func newReaderWithGroup(brokers []string, groupID string) *kafka.Reader {
 // ============================================================
 
 func codeNodePayload(id, name, nodeType, language, path string) []byte {
+	return codeNodePayloadWithScope(
+		id, name, nodeType, language, path,
+		tenantPlaceholder, repoPlaceholder, aclPlaceholder,
+	)
+}
+
+func codeNodePayloadWithScope(id, name, nodeType, language, path, tenant, repo, acl string) []byte {
 	payload := map[string]any{
 		"id":       id,
 		"domain":   "code",
 		"name":     name,
 		"ast_hash": language, // valore placeholder qualunque, non verificato dal consumer
 		"provenance": map[string]any{
-			"path": path, "tenant_id": tenantPlaceholder,
-			"repo": repoPlaceholder, "acl_group": aclPlaceholder,
+			"path": path, "tenant_id": tenant,
+			"repo": repo, "acl_group": acl,
 		},
 		"ext": map[string]any{
 			"node_type": nodeType,
@@ -858,6 +896,59 @@ func readNode(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext,
 		t.Fatalf("readNode id=%s: campo props: %v", id, err)
 	}
 	return labels, rawProps
+}
+
+func seedImpactPartition(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, oldPeer, moving, newPeer, relationPeer string) {
+	t.Helper()
+	session := driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+	_, err := session.Run(ctx, `
+		UNWIND [
+		  {id: $old_peer, acl: 'developers'},
+		  {id: $moving, acl: 'developers'},
+		  {id: $new_peer, acl: 'admins'},
+		  {id: $relation_peer, acl: 'developers'}
+		] AS row
+		MERGE (n:CodeNode {id: row.id})
+		SET n.tenant_id = $tenant, n.repo = $repo, n.acl_group = row.acl,
+		    n.impact_score = 0.9, n.community_id = 7, n.impact_kind = 'behavioral',
+		    n.impact_tenant_id = $tenant, n.impact_repo = $repo, n.impact_acl_group = row.acl
+	`, map[string]any{
+		"old_peer": oldPeer, "moving": moving, "new_peer": newPeer, "relation_peer": relationPeer,
+		"tenant": tenantPlaceholder, "repo": repoPlaceholder,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setImpactProperties(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, ids ...string) {
+	t.Helper()
+	session := driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+	_, err := session.Run(ctx, `
+		MATCH (n:CodeNode) WHERE n.id IN $ids
+		SET n.impact_score = 0.8, n.community_id = 8, n.impact_kind = 'syntactic',
+		    n.impact_tenant_id = n.tenant_id, n.impact_repo = n.repo, n.impact_acl_group = n.acl_group
+	`, map[string]any{"ids": ids})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertImpactInvalidated(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		_, props := readNode(t, ctx, driver, id)
+		for _, property := range []string{
+			"impact_score", "community_id", "impact_kind",
+			"impact_tenant_id", "impact_repo", "impact_acl_group",
+		} {
+			if _, exists := props[property]; exists {
+				t.Errorf("node %s retained stale %s=%v", id, property, props[property])
+			}
+		}
+	}
 }
 
 func countNodesWithID(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, id string) int64 {
