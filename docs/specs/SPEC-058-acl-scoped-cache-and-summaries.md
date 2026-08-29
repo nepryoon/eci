@@ -1,5 +1,5 @@
 # SPEC-058 — Cache ACL-scoped e summary chiusi sui figli autorizzati
-Stato: implemented
+Stato: verified
 Task-tree: T6.4 · Servizio: `services/semantic-cache`, `services/summarization`, `libs/go/eci/accessscope` · ADD: Modulo 3 §2.6.3
 Contratti: `contracts/proto/eci/semanticcache/v1/semanticcache.proto` (semantica del campo esistente, ADR-0012)
 
@@ -207,10 +207,10 @@ nodi non esistono.
 - [x] ACL-only change invalida deterministicamente l'aggregate ristretto.
 - [x] Source/id/summary negati non raggiungono modello, cache, output o log.
 - [x] Telemetria bounded senza identità o contenuto.
-- [ ] Test SPEC-022/051 e nuove regressioni verdi CPU-only/container CI.
+- [x] Test SPEC-022/051 e nuove regressioni verdi CPU-only/container CI.
 - [x] T5.6 baseline e `queries_v0.json` byte-identici.
-- [ ] `task build`, `task lint`, `task test`, `task guard` verdi.
-- [ ] Stato `implemented`, poi `verified` soltanto con CI/PR reale.
+- [x] `task build`, `task lint`, `task test`, `task guard` verdi.
+- [x] Stato `implemented`, poi `verified` soltanto con CI/PR reale.
 
 ## 10. Review avversariale di approvazione
 
@@ -268,3 +268,25 @@ security o contratto è stato indebolito.
 
 Nessuna deviazione dall'ADD. Il cambio comportamentale del proto esistente è
 quello approvato da ADR-0012; forma wire e tag restano invariati.
+
+Verifica finale PR [#71](https://github.com/nepryoon/eci/pull/71), commit
+funzionale `f42f9d6`:
+
+- GitHub Actions run
+  [33247429667](https://github.com/nepryoon/eci/actions/runs/33247429667):
+  `build-lint-test` verde in 7m40s, `guard`/proto verde in 1m55s e
+  `datastore-security-integration` verde in 12m25s.
+- Lo step T6.4 avvia Redis 7 reale e un server gRPC reale con interceptor
+  `secctx`; verifica hit same-scope, miss con un altro scope autenticato,
+  diniego dello scope forgiato, TTL e backend indisponibile.
+- Il finding P1 della review è stato prima riprodotto nel commit `5b9a016`:
+  un method direttamente autorizzato sotto una class negata veniva elaborato
+  in post-order. Il fix `f42f9d6` costruisce la projection top-down e scende
+  soltanto attraverso antenati autorizzati; la regressione richiede zero
+  model/cache/output per quel subtree. Il thread è stato risolto solo dopo la
+  CI verde.
+- Tutti i 15 test Summarization sono verdi; il test ACL-only prova che una
+  closure modificata cambia view hash senza modificare gli hash AST originali.
+
+Esito T6.4: `verified`; nessun servizio esterno o GPU è necessario per
+verificare la PR.
