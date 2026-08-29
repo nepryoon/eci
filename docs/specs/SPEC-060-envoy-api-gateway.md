@@ -81,9 +81,11 @@ trusted upstream metadata:
    Then Envoy risponde 429 con `Retry-After`, non chiama l'upstream ed espone
    contatori bounded; il limite si ricarica deterministicamente e non consuma
    il bucket di un caller autenticato differente.
-   Given un flood di token invalidi, When supera il ceiling pre-auth condiviso,
-   Then Envoy restituisce 429 prima di ext_authz e riduce deterministicamente
-   le invocazioni del validatore, senza chiamare alcun backend.
+   Given un flood di token invalidi, When supera il ceiling pre-auth per
+   indirizzo remoto trusted, Then Envoy restituisce 429 prima di ext_authz e
+   riduce deterministicamente le invocazioni del validatore, senza chiamare
+   alcun backend e senza consumare il bucket di un indirizzo differente. Un
+   ceiling aggregato più alto resta come load-shedding d'emergenza.
 7. **Transcoder/config stretti.** Given metodo/query JSON sconosciuto, body
    malformato o >1 MiB, When passa dall'edge, Then 400/404/413 senza passthrough;
    descriptor e config Envoy validano con immagine pinned. Anche un metodo gRPC

@@ -94,8 +94,12 @@ il valore opaco non proviene dal client, ha cardinalità massima bounded ed è
 rimosso prima dell'upstream. Un bucket condiviso più ampio resta come
 load-shedding per istanza. I limiti producono 429 e `Retry-After`. È un limite
 edge di protezione;
-un ulteriore bucket condiviso da 100 richieste/s per istanza precede ext_authz
-e protegge validatore/JWKS anche da token non autenticabili e route catch-all.
+un ulteriore bucket dinamico da 100 richieste/s per indirizzo remoto trusted
+precede ext_authz e protegge validatore/JWKS anche da token non autenticabili e
+route catch-all. La sorgente deriva dal remote address con zero hop proxy
+trusted, mai da XFF client. Un ceiling aggregato separato e più alto da 1000
+richieste/s per istanza resta come load-shedding d'emergenza senza consentire a
+una sola sorgente di esaurire ordinariamente il budget delle altre.
 Il listener impone inoltre un timeout di 5 secondi per completare gli header,
 così connessioni Slowloris incomplete vengono chiuse prima di ext_authz.
 quota globale per user/team/model del LLM Gateway resta responsabilità del
