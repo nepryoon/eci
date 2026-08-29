@@ -59,8 +59,8 @@ trusted upstream metadata:
 
 1. **JSON→gRPC autenticato.** Given JWT valido, When il client invia JSON a un
    metodo auto-mapped, Then Envoy chiama ext_authz, sovrascrive metadata
-   riservati, transcodifica e il backend riceve body corretto più
-   `SecurityContext` autenticato.
+   riservati, rimuove il bearer prima dell'hop interno, transcodifica e il
+   backend riceve body corretto più `SecurityContext` autenticato.
 2. **Header/body forgiati.** Given `eci-security-context-bin`, `traceparent` o
    `securityContext` controllati dal client, When la richiesta attraversa il
    gateway, Then gli header vengono rimossi/sostituiti e lo scope backend
@@ -83,7 +83,10 @@ trusted upstream metadata:
    descriptor e config Envoy validano con immagine pinned.
 8. **Compatibilità gRPC e deadline.** Given client gRPC diretto all'edge, When
    invoca unary/server-stream con JWT metadata, Then Envoy preserva HTTP/2,
-   autenticazione, status/cancellazione e deadline massima 30s.
+   autenticazione, status/cancellazione e deadline massima 30s. Per SSE il
+   helper possiede la deadline assoluta di 30s; Envoy disabilita il route
+   timeout dello stream ma applica un idle timeout di 35s, lasciando margine
+   per il frame terminale senza consentire stream bloccati indefinitamente.
 
 ## 4. Errori & edge case
 
@@ -116,11 +119,13 @@ trusted upstream metadata:
 - D7: `SecurityContext` esistente e RPC `ImpactAnalysis` server-streaming.
 
 **Minacce:** forged metadata/body, token replay/scaduto, header smuggling,
-ext_auth bypass/failure, route passthrough, oversized body, slow stream, rate
-limit bypass, direct helper/backend exposure, prompt injection che tenta scope,
-error leakage. Controlli: rimozione header prima auth, replace da validator
-T6.1, porte interne, strict route/transcoder, size/deadline cap, fail-closed,
-scope metadata-only T6.2/T6.3, error body allow-listed e test Envoy reale.
+ext_auth bypass/failure, replay/esposizione del bearer sull'hop interno, route
+passthrough, oversized body, slow stream, rate limit bypass, direct
+helper/backend exposure, prompt injection che tenta scope, error leakage.
+Controlli: rimozione metadata forgiabili prima auth, stripping del bearer subito
+dopo ext_authz, replace da validator T6.1, porte interne, strict
+route/transcoder, size/deadline cap, fail-closed, scope metadata-only T6.2/T6.3,
+error body allow-listed e test Envoy reale.
 
 ## 7. Test plan
 

@@ -40,7 +40,7 @@ rottura wire/semantica non richiesta dal task.
 Envoy è l'unico listener pubblico. La catena HTTP è:
 
 ```text
-header sanitization → ext_authz (fail closed) → local rate limit
+header sanitization → ext_authz (fail closed) → bearer stripping → local rate limit
 → grpc_json_transcoder (route JSON/gRPC) → router
 ```
 
