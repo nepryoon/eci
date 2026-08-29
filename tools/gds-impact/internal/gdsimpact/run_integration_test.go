@@ -130,6 +130,32 @@ func TestGDSImpact(t *testing.T) {
 		assertNoProperty(t, ctx, driver, n1ID, "impact_score")
 	})
 
+	t.Run("T6_7_RejectsWriteBackAfterInterveningPartitionMutation", func(t *testing.T) {
+		driver := startNeo4jWithGDS(t, ctx)
+		seedChainFixture(t, ctx, driver)
+		cfg := mustConfig(t, "--entry-node-id", entryID, "--max-depth", "4")
+		hooks := gdsimpact.Hooks{AfterProject: func() error {
+			session := driver.NewSession(ctx, neo4j.SessionConfig{})
+			defer session.Close(ctx)
+			result, err := session.Run(ctx, `
+				MATCH (p:GDSPartition {tenant_id: $tenant, repo: $repo, acl_group: $acl})
+				SET p.generation = p.generation + 1
+			`, map[string]any{"tenant": testTenant, "repo": testRepo, "acl": testACL})
+			if err != nil {
+				return err
+			}
+			_, err = result.Consume(ctx)
+			return err
+		}}
+
+		_, err := gdsimpact.Run(ctx, driver, cfg, func(string, ...any) {}, hooks)
+		if err == nil || !strings.Contains(err.Error(), "generation") {
+			t.Fatalf("Run err=%v, want explicit stale partition generation error", err)
+		}
+		assertNoProperty(t, ctx, driver, n1ID, "impact_score")
+		assertNoResidualProjections(t, ctx, driver)
+	})
+
 	t.Run("Scenario4_UnknownEntryNodeNoErrorNoWrite", func(t *testing.T) {
 		driver := startNeo4jWithGDS(t, ctx)
 		seedChainFixture(t, ctx, driver)

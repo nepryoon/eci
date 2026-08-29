@@ -102,7 +102,10 @@ func t67GDSPartitionInvalidatedOnScopeAndTopologyMutation(t *testing.T, ctx cont
 	if err != nil || outcome != consumer.OutcomeMerged {
 		t.Fatalf("scope move outcome=%v err=%v", outcome, err)
 	}
-	assertImpactInvalidated(t, ctx, st.driver, oldPeer, moving, newPeer)
+	assertPartitionGeneration(t, ctx, st.driver, "developers", 42)
+	assertPartitionGeneration(t, ctx, st.driver, "admins", 8)
+	assertImpactGenerationStale(t, ctx, st.driver, oldPeer, moving, newPeer)
+	assertImpactPropertiesRetained(t, ctx, st.driver, oldPeer, newPeer)
 
 	setImpactProperties(t, ctx, st.driver, oldPeer, relationPeer)
 	relationPayload := codeRelationPayload(oldPeer, relationPeer, "CALLS", intPtr(1))
@@ -111,7 +114,9 @@ func t67GDSPartitionInvalidatedOnScopeAndTopologyMutation(t *testing.T, ctx cont
 	if err != nil || outcome != consumer.OutcomeMerged {
 		t.Fatalf("relation mutation outcome=%v err=%v", outcome, err)
 	}
-	assertImpactInvalidated(t, ctx, st.driver, oldPeer, relationPeer)
+	assertPartitionGeneration(t, ctx, st.driver, "developers", 43)
+	assertImpactGenerationStale(t, ctx, st.driver, oldPeer, relationPeer)
+	assertImpactPropertiesRetained(t, ctx, st.driver, oldPeer, relationPeer)
 }
 
 // ============================================================
@@ -903,6 +908,11 @@ func seedImpactPartition(t *testing.T, ctx context.Context, driver neo4j.DriverW
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session.Close(ctx)
 	_, err := session.Run(ctx, `
+		MERGE (developers:GDSPartition {tenant_id: $tenant, repo: $repo, acl_group: 'developers'})
+		SET developers.generation = 41, developers.write_lock = 0
+		MERGE (admins:GDSPartition {tenant_id: $tenant, repo: $repo, acl_group: 'admins'})
+		SET admins.generation = 7, admins.write_lock = 0
+		WITH developers, admins
 		UNWIND [
 		  {id: $old_peer, acl: 'developers'},
 		  {id: $moving, acl: 'developers'},
@@ -912,7 +922,8 @@ func seedImpactPartition(t *testing.T, ctx context.Context, driver neo4j.DriverW
 		MERGE (n:CodeNode {id: row.id})
 		SET n.tenant_id = $tenant, n.repo = $repo, n.acl_group = row.acl,
 		    n.impact_score = 0.9, n.community_id = 7, n.impact_kind = 'behavioral',
-		    n.impact_tenant_id = $tenant, n.impact_repo = $repo, n.impact_acl_group = row.acl
+		    n.impact_tenant_id = $tenant, n.impact_repo = $repo, n.impact_acl_group = row.acl,
+		    n.impact_generation = CASE row.acl WHEN 'developers' THEN developers.generation ELSE admins.generation END
 	`, map[string]any{
 		"old_peer": oldPeer, "moving": moving, "new_peer": newPeer, "relation_peer": relationPeer,
 		"tenant": tenantPlaceholder, "repo": repoPlaceholder,
@@ -928,25 +939,68 @@ func setImpactProperties(t *testing.T, ctx context.Context, driver neo4j.DriverW
 	defer session.Close(ctx)
 	_, err := session.Run(ctx, `
 		MATCH (n:CodeNode) WHERE n.id IN $ids
+		MATCH (p:GDSPartition {tenant_id: n.tenant_id, repo: n.repo, acl_group: n.acl_group})
 		SET n.impact_score = 0.8, n.community_id = 8, n.impact_kind = 'syntactic',
-		    n.impact_tenant_id = n.tenant_id, n.impact_repo = n.repo, n.impact_acl_group = n.acl_group
+		    n.impact_tenant_id = n.tenant_id, n.impact_repo = n.repo, n.impact_acl_group = n.acl_group,
+		    n.impact_generation = p.generation
 	`, map[string]any{"ids": ids})
 	if err != nil {
 		t.Fatal(err)
 	}
 }
 
-func assertImpactInvalidated(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, ids ...string) {
+func assertPartitionGeneration(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, acl string, want int64) {
+	t.Helper()
+	current := readPartitionGeneration(t, ctx, driver, acl)
+	if current != want {
+		t.Fatalf("partition acl=%s generation=%d, want %d", acl, current, want)
+	}
+}
+
+func assertImpactGenerationStale(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, ids ...string) {
 	t.Helper()
 	for _, id := range ids {
 		_, props := readNode(t, ctx, driver, id)
-		for _, property := range []string{
-			"impact_score", "community_id", "impact_kind",
-			"impact_tenant_id", "impact_repo", "impact_acl_group",
-		} {
-			if _, exists := props[property]; exists {
-				t.Errorf("node %s retained stale %s=%v", id, property, props[property])
-			}
+		generation, ok := props["impact_generation"].(int64)
+		if !ok {
+			t.Errorf("node %s missing impact_generation", id)
+			continue
+		}
+		acl, _ := props["acl_group"].(string)
+		if current := readPartitionGeneration(t, ctx, driver, acl); current == generation {
+			t.Errorf("partition acl=%s still accepts stale generation %d", acl, generation)
+		}
+	}
+}
+
+func readPartitionGeneration(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, acl string) int64 {
+	t.Helper()
+	session := driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+	result, err := session.Run(ctx, `
+		MATCH (p:GDSPartition {tenant_id: $tenant, repo: $repo, acl_group: $acl})
+		RETURN p.generation AS generation
+	`, map[string]any{"tenant": tenantPlaceholder, "repo": repoPlaceholder, "acl": acl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := result.Single(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, _, err := neo4j.GetRecordValue[int64](record, "generation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return current
+}
+
+func assertImpactPropertiesRetained(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		_, props := readNode(t, ctx, driver, id)
+		if _, exists := props["impact_score"]; !exists {
+			t.Errorf("node %s was eagerly rewritten instead of O(1) generation invalidation", id)
 		}
 	}
 }
