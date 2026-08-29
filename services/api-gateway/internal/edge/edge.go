@@ -36,7 +36,7 @@ const (
 	SSEPath                    = "/v1/impact-analysis:stream"
 	defaultMaxJSONBodyBytes    = 1 << 20
 	defaultRequestTimeout      = 30 * time.Second
-	maxScopeValues             = 128
+	maxScopeValues             = 256
 	maxScopeValueBytes         = 256
 )
 
@@ -176,7 +176,16 @@ func (h *handler) identifiers() (string, string, error) {
 }
 
 func (h *handler) sse(w http.ResponseWriter, r *http.Request) {
-	ctx, span := h.tracer.Start(r.Context(), "eci.gateway.sse")
+	rawContext, securityContext, metadataOK := decodeSecurityContext(r.Header.Get(SecurityContextHeader))
+	parentContext := r.Context()
+	if metadataOK {
+		parent, ok := trustedTraceparent(r.Header.Get("traceparent"), securityContext.GetTraceId())
+		metadataOK = ok
+		if ok {
+			parentContext = trace.ContextWithRemoteSpanContext(parentContext, parent)
+		}
+	}
+	ctx, span := h.tracer.Start(parentContext, "eci.gateway.sse")
 	defer span.End()
 	outcome := "error"
 	defer func() { h.record(span, "sse", outcome) }()
@@ -187,8 +196,7 @@ func (h *handler) sse(w http.ResponseWriter, r *http.Request) {
 		outcome = "invalid"
 		return
 	}
-	rawContext, _, ok := decodeSecurityContext(r.Header.Get(SecurityContextHeader))
-	if !ok {
+	if !metadataOK {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		outcome = "denied"
 		return
@@ -216,7 +224,8 @@ func (h *handler) sse(w http.ResponseWriter, r *http.Request) {
 	// sole scope input for downstream PEP/query enforcement.
 	request.SecurityContext = nil
 
-	ctx, cancel := context.WithTimeout(ctx, h.timeout)
+	requestContext := ctx
+	ctx, cancel := context.WithTimeout(requestContext, h.timeout)
 	defer cancel()
 	ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs(
 		SecurityContextMetadataKey, string(rawContext),
@@ -265,7 +274,7 @@ func (h *handler) sse(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			span.SetAttributes(attribute.Int("rpc.grpc.status_code", int(status.Code(err))))
-			if ctx.Err() == nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) || requestContext.Err() == nil {
 				_, _ = io.WriteString(w, "event: error\ndata: {\"code\":\"stream_error\"}\n\n")
 				flusher.Flush()
 				outcome = "upstream_error"
@@ -306,13 +315,39 @@ func decodeSecurityContext(encoded string) ([]byte, *retrievalv1.SecurityContext
 	return raw, securityContext, true
 }
 
+func trustedTraceparent(header, expectedTraceID string) (trace.SpanContext, bool) {
+	if header != strings.ToLower(header) || len(header) != 55 {
+		return trace.SpanContext{}, false
+	}
+	parts := strings.Split(header, "-")
+	if len(parts) != 4 || parts[0] != "00" || parts[1] != expectedTraceID || len(parts[3]) != 2 {
+		return trace.SpanContext{}, false
+	}
+	traceID, err := trace.TraceIDFromHex(parts[1])
+	if err != nil {
+		return trace.SpanContext{}, false
+	}
+	spanID, err := trace.SpanIDFromHex(parts[2])
+	if err != nil {
+		return trace.SpanContext{}, false
+	}
+	flags, err := hex.DecodeString(parts[3])
+	if err != nil || len(flags) != 1 {
+		return trace.SpanContext{}, false
+	}
+	spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: traceID, SpanID: spanID, TraceFlags: trace.TraceFlags(flags[0]), Remote: true,
+	})
+	return spanContext, spanContext.IsValid()
+}
+
 func validSecurityContext(sc *retrievalv1.SecurityContext) bool {
 	return sc != nil && validValue(sc.GetTenantId()) && validValue(sc.GetUserId()) &&
 		validTraceID(sc.GetTraceId()) && validList(sc.GetAllowedRepos()) && validList(sc.GetAclGroups())
 }
 
 func validList(values []string) bool {
-	if len(values) == 0 || len(values) > maxScopeValues {
+	if len(values) > maxScopeValues {
 		return false
 	}
 	for _, value := range values {

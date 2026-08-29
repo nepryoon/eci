@@ -128,6 +128,8 @@ static_resources:
                         request_mutations:
                           - remove: eci-security-context-bin
                           - remove: traceparent
+                          - remove: tracestate
+                          - remove: baggage
                   - name: envoy.filters.http.ext_authz
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz

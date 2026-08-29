@@ -24,6 +24,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -52,6 +55,8 @@ type observedCall struct {
 	securityContext *retrievalv1.SecurityContext
 	bodyContext     *retrievalv1.SecurityContext
 	traceparent     string
+	tracestate      string
+	baggage         string
 }
 
 type integrationBackend struct {
@@ -66,6 +71,8 @@ type integrationBackend struct {
 func (b *integrationBackend) observe(ctx context.Context, method string, bodyContext *retrievalv1.SecurityContext) {
 	var trusted *retrievalv1.SecurityContext
 	var traceparent string
+	var tracestate string
+	var baggage string
 	if incoming, ok := metadata.FromIncomingContext(ctx); ok {
 		values := incoming.Get(SecurityContextMetadataKey)
 		if len(values) == 1 {
@@ -77,13 +84,22 @@ func (b *integrationBackend) observe(ctx context.Context, method string, bodyCon
 		if values := incoming.Get("traceparent"); len(values) == 1 {
 			traceparent = values[0]
 		}
+		if values := incoming.Get("tracestate"); len(values) == 1 {
+			tracestate = values[0]
+		}
+		if values := incoming.Get("baggage"); len(values) == 1 {
+			baggage = values[0]
+		}
 	}
 	var clonedBody *retrievalv1.SecurityContext
 	if bodyContext != nil {
 		clonedBody = proto.Clone(bodyContext).(*retrievalv1.SecurityContext)
 	}
 	b.mu.Lock()
-	b.calls = append(b.calls, observedCall{method: method, securityContext: trusted, bodyContext: clonedBody, traceparent: traceparent})
+	b.calls = append(b.calls, observedCall{
+		method: method, securityContext: trusted, bodyContext: clonedBody,
+		traceparent: traceparent, tracestate: tracestate, baggage: baggage,
+	})
 	b.mu.Unlock()
 }
 
@@ -164,6 +180,8 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 		request.Header.Set("Authorization", "Bearer integration-valid")
 		request.Header.Set(SecurityContextHeader, base64.StdEncoding.EncodeToString([]byte("forged")))
 		request.Header.Set("traceparent", "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01")
+		request.Header.Set("tracestate", "attacker=value")
+		request.Header.Set("baggage", "tenant=tenant-forged")
 		response, err := http.DefaultClient.Do(request)
 		if err != nil {
 			t.Fatal(err)
@@ -176,6 +194,9 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 		call := lastCall(t, backend, "GetNode")
 		assertTrustedContext(t, call.securityContext)
 		assertTrustedTraceparent(t, call)
+		if call.tracestate != "" || call.baggage != "" {
+			t.Fatalf("untrusted propagation state reached backend: tracestate=%q baggage=%q", call.tracestate, call.baggage)
+		}
 		if call.bodyContext.GetTenantId() != "tenant-forged" {
 			t.Fatalf("expected body provenance to remain distinguishable, got %v", call.bodyContext)
 		}
@@ -230,6 +251,7 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 		}
 		call := lastCall(t, backend, "ImpactAnalysis")
 		assertTrustedContext(t, call.securityContext)
+		assertTrustedTraceparent(t, call)
 		if call.bodyContext != nil {
 			t.Fatalf("SSE forwarded body SecurityContext: %v", call.bodyContext)
 		}
@@ -338,13 +360,23 @@ func startIntegrationGRPC(t *testing.T, backend *integrationBackend) (net.Listen
 
 func startIntegrationHelper(t *testing.T, retrievalAddress string) (net.Listener, *http.Server) {
 	t.Helper()
-	connection, err := grpc.NewClient(retrievalAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	connection, err := grpc.NewClient(
+		retrievalAddress,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler(
+			otelgrpc.WithTracerProvider(provider),
+			otelgrpc.WithPropagators(propagation.TraceContext{}),
+		)),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = connection.Close() })
 	handler, err := NewEdgeHandler(integrationAuthenticator{}, retrievalv1.NewRetrievalEngineClient(connection), EdgeConfig{
 		Registerer: prometheus.NewRegistry(),
+		Tracer:     provider.Tracer("integration"),
 	})
 	if err != nil {
 		t.Fatal(err)
