@@ -95,6 +95,9 @@ jobs:
         with:
           go-version: '1.25.9'
 
+      - name: Install golang-migrate
+        run: go install -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.19.1
+
       - name: T6.3 sink materialization isolation
         run: |
           cd services/sink-graph && go test -tags=integration ./internal/consumer -run TestSinkGraphConsumer -v
