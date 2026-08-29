@@ -149,6 +149,13 @@ func (b *integrationBackend) GetNode(ctx context.Context, request *retrievalv1.G
 	if request.GetNodeId() == "timeout-control" {
 		time.Sleep(30 * time.Millisecond)
 	}
+	if request.GetNodeId() == "direct-deadline-budget" {
+		select {
+		case <-time.After(100 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	return &retrievalv1.GetNodeResponse{Node: &retrievalv1.RetrievedNode{NodeId: request.GetNodeId(), Name: "OrderService.Process"}}, nil
 }
 
@@ -449,6 +456,43 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 		}
 		if len(backend.snapshot()) != before {
 			t.Fatal("slow body reached gRPC backend after absolute deadline")
+		}
+	})
+
+	t.Run("direct retrieval deadline includes body buffering and upstream time", func(t *testing.T) {
+		before := len(backend.snapshot())
+		connection, err := tls.Dial("tcp", gatewayAddress, &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    roots,
+			ServerName: "localhost",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connection.Close()
+		if err := connection.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"nodeId":"direct-deadline-budget"}`
+		headers := fmt.Sprintf("POST /eci.retrieval.v1.RetrievalEngine/GetNode HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer integration-valid\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", len(body))
+		if _, err := io.WriteString(connection, headers+body[:1]); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(150 * time.Millisecond)
+		if _, err := io.WriteString(connection, body[1:]); err != nil {
+			t.Fatal(err)
+		}
+		response, err := http.ReadResponse(bufio.NewReader(connection), &http.Request{Method: http.MethodPost})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusGatewayTimeout {
+			payload, _ := io.ReadAll(response.Body)
+			t.Fatalf("status=%d body=%q", response.StatusCode, payload)
+		}
+		if delta := len(backend.snapshot()) - before; delta > 1 {
+			t.Fatalf("direct deadline produced %d upstream attempts", delta)
 		}
 	})
 
