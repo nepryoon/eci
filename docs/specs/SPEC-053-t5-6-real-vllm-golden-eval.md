@@ -131,6 +131,14 @@ esecuzione. Il `.tar.gz` duplicato, checkpoint, cache modello, secret e token no
 sono versionati. La scansione degli artefatti non ha rilevato credenziali; il
 solo indicatore relativo a Hugging Face registra `false`, non un token.
 
+`run_t56_gpu.sh` dentro l'archivio è la copia **storica e byte-immutabile** dello
+script effettivamente eseguito; non è il punto di ingresso supportato per nuove
+esecuzioni ed è versionato senza bit eseguibile. Il wrapper mantenuto
+`scripts/run-t56-gpu.sh` ammette esclusivamente vLLM `0.28.0` e rifiuta prima di
+qualsiasi operazione GPU ogni override di `VLLM_VERSION`. Questa separazione
+impedisce che un riuso futuro registri una versione richiesta diversa da quella
+runtime senza riscrivere la provenienza del run del 28 agosto 2026.
+
 Verifica integrità:
 
 ```bash
@@ -176,6 +184,7 @@ Nessun test della PR contatta vLLM, Runpod o servizi esterni.
 - [x] `pass_rate=0.50` e `fact_recall=0.40` registrati senza modifica.
 - [x] Cinque failure riportati; analisi manuale marcata post-hoc.
 - [x] Evidenze integre e auditabili; nessun secret versionato.
+- [x] Runner storico byte-identico; wrapper mantenuto fail-fast su versioni vLLM non supportate.
 - [x] Golden dataset, harness, ADD e contratti invariati.
 - [x] `task build`, `task lint`, `task test`, `task guard` verdi sul branch PR.
 
