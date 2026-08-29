@@ -359,3 +359,44 @@ fn persist_parsed_file_scenario4_rollback_on_forced_mid_transaction_failure() {
         "scenario 4: rollback completo, nessuna riga outbox residua (nemmeno quelle scritte per i CodeNode, PRIMA del fallimento sulla relazione)"
     );
 }
+
+// T6.3 regression: parser identities are repository-local. Persisting the
+// same logical file for two authenticated ownership scopes must not let the
+// second writer relabel or delete the first scope's canonical rows.
+#[test]
+#[ignore = "richiede Docker + 'migrate' sul PATH (SPEC-057); esclusa da cargo test di default"]
+fn same_parser_ids_remain_isolated_across_tenants() {
+    let (_container, mut client) = start_migrated_postgres();
+    let source = read_fixture("order_service.go");
+    let (nodes, relations) = parse_file("order_service.go", &source);
+    let tenant_a = IngestionScope::new("tenant-a", "shared-repo", "developers").unwrap();
+    let tenant_b = IngestionScope::new("tenant-b", "shared-repo", "developers").unwrap();
+
+    persist_scoped(&mut client, &tenant_a, nodes.clone(), relations.clone(), &[])
+        .expect("persist tenant-a");
+    persist_scoped(&mut client, &tenant_b, nodes, relations, &[])
+        .expect("persist tenant-b");
+
+    assert_eq!(count(&mut client, "code_node"), 8, "four nodes per tenant");
+    assert_eq!(count(&mut client, "code_relation"), 8, "four relations per tenant");
+
+    let rows = client
+        .query(
+            "SELECT id, provenance->>'tenant_id' FROM code_node ORDER BY id, provenance->>'tenant_id'",
+            &[],
+        )
+        .expect("read scoped nodes");
+    let tenant_a_ids: std::collections::HashSet<String> = rows
+        .iter()
+        .filter(|row| row.get::<_, String>(1) == "tenant-a")
+        .map(|row| row.get(0))
+        .collect();
+    let tenant_b_ids: std::collections::HashSet<String> = rows
+        .iter()
+        .filter(|row| row.get::<_, String>(1) == "tenant-b")
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(tenant_a_ids.len(), 4);
+    assert_eq!(tenant_b_ids.len(), 4);
+    assert!(tenant_a_ids.is_disjoint(&tenant_b_ids));
+}
