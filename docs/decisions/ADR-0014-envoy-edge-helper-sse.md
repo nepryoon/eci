@@ -59,6 +59,9 @@ esistente, `auto_mapping=true`, `reject_unknown_method=true` e request
 validation stretta. Non vengono aggiunte annotations o modifiche al contratto:
 gli endpoint JSON unari usano il mapping canonico
 `POST /eci.retrieval.v1.RetrievalEngine/<Method>`.
+Il passthrough gRPC nativo usa una regex RE2 ancorata ai soli quattro RPC
+dichiarati nel descriptor; un metodo sconosciuto o aggiunto in futuro non viene
+inoltrato finché l'allow-list edge non è aggiornata esplicitamente.
 
 `POST /v1/impact-analysis:stream` è escluso dal transcoder e instradato
 all'adapter Go. L'adapter rifiuta metadata assenti/malformati, ignora/azzera

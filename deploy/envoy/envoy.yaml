@@ -103,7 +103,8 @@ static_resources:
                               proto_descriptor: /etc/envoy/retrieval.pb
                               services: []
                         - match:
-                            prefix: /eci.retrieval.v1.RetrievalEngine/
+                            safe_regex:
+                              regex: ^/eci\.retrieval\.v1\.RetrievalEngine/(HybridSearch|GetNode|ExpandNeighbors|ImpactAnalysis)$
                           route:
                             cluster: retrieval_engine
                             timeout: 30s

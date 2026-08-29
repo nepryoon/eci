@@ -82,7 +82,9 @@ trusted upstream metadata:
    il bucket di un caller autenticato differente.
 7. **Transcoder/config stretti.** Given metodo/query JSON sconosciuto, body
    malformato o >1 MiB, When passa dall'edge, Then 400/404/413 senza passthrough;
-   descriptor e config Envoy validano con immagine pinned.
+   descriptor e config Envoy validano con immagine pinned. Anche un metodo gRPC
+   nativo non presente nell'allow-list esatta dei quattro RPC dichiarati viene
+   respinto all'edge e non raggiunge l'unknown-service handler del backend.
 8. **Compatibilità gRPC e deadline.** Given client gRPC diretto all'edge, When
    invoca unary/server-stream con JWT metadata, Then Envoy preserva HTTP/2,
    autenticazione, status/cancellazione e deadline massima 30s. Per SSE il
