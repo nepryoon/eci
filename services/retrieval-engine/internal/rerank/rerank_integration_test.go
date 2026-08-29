@@ -98,6 +98,23 @@ func TestRerankIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("T6_7_StaleImpactScopeDefaultsToZero", func(t *testing.T) {
+		seedNodeWithImpactScore(t, ctx, driver, "stale-score", 0.9)
+		session := driver.NewSession(ctx, neo4j.SessionConfig{})
+		_, err := session.Run(ctx, `MATCH (n:CodeNode {id: 'stale-score'}) SET n.impact_acl_group = 'admins'`, nil)
+		_ = session.Close(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ranked, err := rerank.Rerank(ctx, client, driver, "query", []hybridsearch.RetrievedNode{{NodeID: "stale-score", HopDistance: hop(1)}}, 10, 0.5, 0.5, 0.5)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ranked) != 1 || ranked[0].ImpactScoreNorm != 0 {
+			t.Fatalf("stale scoped score was consumed: %+v", ranked)
+		}
+	})
+
 	t.Run("EdgeCase_RerankerUnreachableFailsExplicitly", func(t *testing.T) {
 		unreachable := rerankclient.New("http://127.0.0.1:1")
 		candidates := []hybridsearch.RetrievedNode{{NodeID: "n1", HopDistance: hop(1)}}
@@ -147,7 +164,8 @@ func seedNodeWithImpactScore(t *testing.T, ctx context.Context, driver neo4j.Dri
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session.Close(ctx)
 	_, err := session.Run(ctx, `MERGE (n:CodeNode {id: $id})
-		SET n.impact_score = $score, n.tenant_id = 'tenant-test', n.repo = 'local', n.acl_group = 'developers'`, map[string]any{"id": id, "score": score})
+		SET n.impact_score = $score, n.tenant_id = 'tenant-test', n.repo = 'local', n.acl_group = 'developers',
+		    n.impact_tenant_id = 'tenant-test', n.impact_repo = 'local', n.impact_acl_group = 'developers'`, map[string]any{"id": id, "score": score})
 	if err != nil {
 		t.Fatalf("seed nodo %s con impact_score: %v", id, err)
 	}

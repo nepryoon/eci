@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
@@ -27,10 +28,14 @@ const neo4jAdminPassword = "eci-test-password-1234"
 // diversi"): entry <- n1 (CALLS, hop1) <- n2 (IMPLEMENTS, hop2) <- n3
 // (IMPORTS, hop3) — copre i tre impact_kind di scenario 2 in un colpo solo.
 const (
-	entryID = "gds-entry"
-	n1ID    = "gds-n1-calls"
-	n2ID    = "gds-n2-implements"
-	n3ID    = "gds-n3-imports"
+	entryID    = "gds-entry"
+	n1ID       = "gds-n1-calls"
+	n2ID       = "gds-n2-implements"
+	n3ID       = "gds-n3-imports"
+	foreignID  = "gds-foreign"
+	testTenant = "tenant-a"
+	testRepo   = "repo-a"
+	testACL    = "developers"
 )
 
 func TestGDSImpact(t *testing.T) {
@@ -48,6 +53,10 @@ func TestGDSImpact(t *testing.T) {
 		}
 		if len(result.Scores) != 3 {
 			t.Fatalf("len(Scores) = %d, want 3\n%+v", len(result.Scores), result.Scores)
+		}
+		assertNoProperty(t, ctx, driver, foreignID, "impact_score")
+		if strings.Contains(joinLogs(logs), foreignID) {
+			t.Fatal("foreign node id leaked through GDS logs")
 		}
 
 		byID := map[string]gdsimpact.NodeScore{}
@@ -91,6 +100,7 @@ func TestGDSImpact(t *testing.T) {
 			if gotKind != s.ImpactKind {
 				t.Errorf("%s: n.impact_kind su Neo4j = %q, want %q", id, gotKind, s.ImpactKind)
 			}
+			assertImpactScope(t, ctx, driver, id, testTenant, testRepo, testACL)
 		}
 
 		// entry stesso non riceve MAI un impact_score (§2: la
@@ -155,7 +165,7 @@ func TestGDSImpact(t *testing.T) {
 
 	t.Run("EdgeCase_MaxDepthZeroFailsExplicitlyBeforeAnyQuery", func(t *testing.T) {
 		driver := startNeo4jWithGDS(t, ctx)
-		cfg := gdsimpact.Config{EntryNodeID: entryID, MaxDepth: 0, WPPR: 0.5, WProx: 0.3, WBC: 0.2}
+		cfg := gdsimpact.Config{EntryNodeID: entryID, Scope: gdsimpact.ProjectionScope{TenantID: testTenant, Repo: testRepo, ACLGroup: testACL}, MaxDepth: 0, WPPR: 0.5, WProx: 0.3, WBC: 0.2}
 
 		_, err := gdsimpact.Run(ctx, driver, cfg, func(string, ...any) {}, gdsimpact.Hooks{})
 		if err == nil {
@@ -180,6 +190,7 @@ func TestGDSImpact(t *testing.T) {
 
 func mustConfig(t *testing.T, args ...string) gdsimpact.Config {
 	t.Helper()
+	args = append(args, "--tenant-id", testTenant, "--repo", testRepo, "--acl-group", testACL)
 	cfg, err := gdsimpact.ParseConfig(args)
 	if err != nil {
 		t.Fatalf("ParseConfig(%v): %v", args, err)
@@ -208,16 +219,38 @@ func seedChainFixture(t *testing.T, ctx context.Context, driver neo4j.DriverWith
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session.Close(ctx)
 	_, err := session.Run(ctx, `
-		CREATE (entry:CodeNode {id: $entry_id, domain: 'code', repo: 'local'})
-		CREATE (n1:CodeNode {id: $n1_id, domain: 'code', repo: 'local'})
-		CREATE (n2:CodeNode {id: $n2_id, domain: 'code', repo: 'local'})
-		CREATE (n3:CodeNode {id: $n3_id, domain: 'code', repo: 'local'})
+		CREATE (entry:CodeNode {id: $entry_id, domain: 'code', tenant_id: $tenant, repo: $repo, acl_group: $acl})
+		CREATE (n1:CodeNode {id: $n1_id, domain: 'code', tenant_id: $tenant, repo: $repo, acl_group: $acl})
+		CREATE (n2:CodeNode {id: $n2_id, domain: 'code', tenant_id: $tenant, repo: $repo, acl_group: $acl})
+		CREATE (n3:CodeNode {id: $n3_id, domain: 'code', tenant_id: $tenant, repo: $repo, acl_group: $acl})
+		CREATE (foreign:CodeNode {id: $foreign_id, domain: 'code', tenant_id: 'tenant-b', repo: 'repo-b', acl_group: 'admins'})
 		CREATE (n1)-[:CALLS {weight: 1}]->(entry)
 		CREATE (n2)-[:IMPLEMENTS {weight: 1}]->(n1)
 		CREATE (n3)-[:IMPORTS {weight: 1}]->(n2)
-	`, map[string]any{"entry_id": entryID, "n1_id": n1ID, "n2_id": n2ID, "n3_id": n3ID})
+		CREATE (foreign)-[:CALLS {weight: 1}]->(entry)
+	`, map[string]any{"entry_id": entryID, "n1_id": n1ID, "n2_id": n2ID, "n3_id": n3ID, "foreign_id": foreignID, "tenant": testTenant, "repo": testRepo, "acl": testACL})
 	if err != nil {
 		t.Fatalf("seed fixture a catena: %v", err)
+	}
+}
+
+func assertImpactScope(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, id, tenant, repo, acl string) {
+	t.Helper()
+	session := driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+	record, err := session.Run(ctx, `MATCH (n:CodeNode {id: $id}) RETURN n.impact_tenant_id AS tenant, n.impact_repo AS repo, n.impact_acl_group AS acl`, map[string]any{"id": id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	single, err := record.Single(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotTenant, _ := single.Get("tenant")
+	gotRepo, _ := single.Get("repo")
+	gotACL, _ := single.Get("acl")
+	if gotTenant != tenant || gotRepo != repo || gotACL != acl {
+		t.Fatalf("impact scope for %s = (%v,%v,%v), want (%s,%s,%s)", id, gotTenant, gotRepo, gotACL, tenant, repo, acl)
 	}
 }
 
