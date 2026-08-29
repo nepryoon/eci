@@ -1,5 +1,5 @@
 # SPEC-054 — Deterministic output canonicalization & eval hardening
-Stato: implemented
+Stato: verified
 Task-tree: T5.7 · Servizio: services/orchestrator · ADD: Modulo 1 §1.4, Modulo 2 §3.1-3.4, Modulo 4 §3.3
 Contratti: nessun nuovo contratto condiviso; formato interno dell'harness golden; `contracts/` invariati
 
@@ -288,7 +288,7 @@ già previsto dall'harness.
 - [x] `baseline-v1` e `tests/golden/queries_v0.json` byte-identici.
 - [x] Nessun LLM judge, fuzzy matching, embedding similarity o GPU.
 - [x] Prompt versionato e `logic_fingerprint` aggiornato.
-- [ ] `task build`, `task lint`, `task test`, `task guard` verdi.
+- [x] `task build`, `task lint`, `task test`, `task guard` verdi.
 
 ## 12. Implementazione e deviazioni
 
@@ -318,3 +318,13 @@ metodo ambiguo di g07); nessun match fuzzy o probabilistico.
 
 Nessuna deviazione da ADD o contratti condivisi. Il formato resta interno
 all'harness; non è stato modificato alcun file sotto `contracts/`.
+
+## 13. Evidenza di verifica
+
+Il commit funzionale `2af98f8c8408e13de974149aeccc93fca4105250` è stato
+verificato dal run GitHub Actions
+[`33237072907`](https://github.com/nepryoon/eci/actions/runs/33237072907):
+`build-lint-test` PASS (inclusi i test Docker-backed) e `guard` PASS. In locale
+sono inoltre risultati verdi `task build`, `task lint`, `task guard` e i 22 test
+CPU-only mirati a canonicalizzazione ed evaluation. Nessuna GPU è stata usata e
+gli hash byte-level di `baseline-v1` e `queries_v0.json` restano invariati.
