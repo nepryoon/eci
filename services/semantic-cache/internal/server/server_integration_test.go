@@ -21,15 +21,29 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/eci-project/eci/libs/go/eci/accessscope"
+	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
+	"github.com/eci-project/eci/libs/go/eci/secctx"
 	semanticcachev1 "github.com/eci-project/eci/libs/go/eci/semanticcache/v1"
 	"github.com/eci-project/eci/services/semantic-cache/internal/server"
 )
 
 func TestSemanticCacheServer(t *testing.T) {
-	ctx := context.Background()
+	securityContext := &retrievalv1.SecurityContext{
+		TenantId:     "tenant-a",
+		UserId:       "user-a",
+		AllowedRepos: []string{"repo-b", "repo-a"},
+		AclGroups:    []string{"readers", "engineering"},
+	}
+	ctx := outgoingSecurityContext(t, securityContext)
+	aclScope := accessscope.Fingerprint(accessscope.Scope{
+		TenantID: securityContext.GetTenantId(), UserID: securityContext.GetUserId(),
+		AllowedRepos: securityContext.GetAllowedRepos(), ACLGroups: securityContext.GetAclGroups(),
+	})
 	rdb := startRedis(t, ctx)
 	client := startServer(t, rdb)
 
@@ -37,7 +51,7 @@ func TestSemanticCacheServer(t *testing.T) {
 		EntityId:         "test-entity-1",
 		AstHash:          "test-ast-hash-1",
 		LogicFingerprint: "fp-v1",
-		AclScope:         "default",
+		AclScope:         aclScope,
 	}
 	baseValue := &semanticcachev1.CacheValue{
 		EmbeddingRef: "qdrant:points/abc123",
@@ -54,7 +68,7 @@ func TestSemanticCacheServer(t *testing.T) {
 			EntityId:         "never-written",
 			AstHash:          "never-written",
 			LogicFingerprint: "never-written",
-			AclScope:         "default",
+			AclScope:         aclScope,
 		})
 		if err != nil {
 			t.Fatalf("Get: %v", err)
@@ -122,15 +136,26 @@ func TestSemanticCacheServer(t *testing.T) {
 			t.Fatalf("Put: %v", err)
 		}
 
+		differentSecurityContext := &retrievalv1.SecurityContext{
+			TenantId: "tenant-a", UserId: "user-b",
+			AllowedRepos: []string{"repo-a", "repo-b"}, AclGroups: []string{"auditors"},
+		}
+		differentCtx := outgoingSecurityContext(t, differentSecurityContext)
 		differentAcl := proto.Clone(key).(*semanticcachev1.CacheKey)
-		differentAcl.AclScope = "tenant-b"
+		differentAcl.AclScope = accessscope.Fingerprint(accessscope.Scope{
+			TenantID: differentSecurityContext.GetTenantId(), UserID: differentSecurityContext.GetUserId(),
+			AllowedRepos: differentSecurityContext.GetAllowedRepos(), ACLGroups: differentSecurityContext.GetAclGroups(),
+		})
 
-		resp, err := client.Get(ctx, differentAcl)
+		resp, err := client.Get(differentCtx, differentAcl)
 		if err != nil {
 			t.Fatalf("Get: %v", err)
 		}
 		if resp.GetHit() {
 			t.Errorf("Hit = true, want false: acl_scope diverso deve produrre un miss (isolamento cross-ACL)")
+		}
+		if _, err := client.Get(ctx, differentAcl); status.Code(err) != codes.PermissionDenied {
+			t.Errorf("scope forgiato: status = %v, want PermissionDenied", status.Code(err))
 		}
 	})
 
@@ -198,7 +223,7 @@ func TestSemanticCacheServer(t *testing.T) {
 			EntityId:         "edge-empty-field",
 			AstHash:          "edge-empty-field",
 			LogicFingerprint: "",
-			AclScope:         "default",
+			AclScope:         aclScope,
 		}
 		if _, err := client.Put(ctx, &semanticcachev1.PutRequest{Key: key, Value: baseValue}); err != nil {
 			t.Fatalf("Put: %v", err)
@@ -229,7 +254,7 @@ func TestSemanticCacheServer(t *testing.T) {
 			EntityId:         "edge-max-ttl",
 			AstHash:          "edge-max-ttl",
 			LogicFingerprint: "edge-max-ttl",
-			AclScope:         "default",
+			AclScope:         aclScope,
 		}
 		hugeTTL := proto.Clone(baseValue).(*semanticcachev1.CacheValue)
 		hugeTTL.TtlSeconds = math.MaxUint32
@@ -258,7 +283,7 @@ func TestSemanticCacheServer(t *testing.T) {
 		defer badRDB.Close()
 		badClient := startServer(t, badRDB)
 
-		key := &semanticcachev1.CacheKey{EntityId: "x", AstHash: "x", LogicFingerprint: "x", AclScope: "x"}
+		key := &semanticcachev1.CacheKey{EntityId: "x", AstHash: "x", LogicFingerprint: "x", AclScope: aclScope}
 
 		getCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
@@ -315,6 +340,7 @@ func startServer(t *testing.T, rdb *goredis.Client) semanticcachev1.SemanticCach
 	}
 
 	srv := grpc.NewServer(
+		grpc.UnaryInterceptor(secctx.UnaryServerInterceptor()),
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 	)
 	semanticcachev1.RegisterSemanticCacheServer(srv, &server.Server{Redis: rdb})
@@ -331,4 +357,15 @@ func startServer(t *testing.T, rdb *goredis.Client) semanticcachev1.SemanticCach
 	t.Cleanup(func() { _ = conn.Close() })
 
 	return semanticcachev1.NewSemanticCacheClient(conn)
+}
+
+func outgoingSecurityContext(t *testing.T, sc *retrievalv1.SecurityContext) context.Context {
+	t.Helper()
+	encoded, err := proto.Marshal(sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return metadata.AppendToOutgoingContext(
+		context.Background(), "eci-security-context-bin", string(encoded),
+	)
 }

@@ -45,10 +45,12 @@ const (
 type SemanticCacheClient interface {
 	// Lookup per chiave esatta. hit=false (nessun errore) su cache miss
 	// genuino; Redis irraggiungibile è un errore gRPC Unavailable esplicito,
-	// mai un hit=false silenzioso (SPEC-022 §4).
+	// mai un hit=false silenzioso. Scope assente/diverso è PermissionDenied
+	// prima di Redis (SPEC-058).
 	Get(ctx context.Context, in *CacheKey, opts ...grpc.CallOption) (*GetResponse, error)
 	// Scrittura idempotente (stessa chiave -> sovrascrive il valore
-	// precedente). TTL applicato nativamente da Redis (SET ... EX).
+	// precedente). TTL applicato nativamente da Redis (SET ... EX); acl_scope
+	// è verificato contro i metadata autenticati prima della write.
 	Put(ctx context.Context, in *PutRequest, opts ...grpc.CallOption) (*PutResponse, error)
 }
 
@@ -93,10 +95,12 @@ func (c *semanticCacheClient) Put(ctx context.Context, in *PutRequest, opts ...g
 type SemanticCacheServer interface {
 	// Lookup per chiave esatta. hit=false (nessun errore) su cache miss
 	// genuino; Redis irraggiungibile è un errore gRPC Unavailable esplicito,
-	// mai un hit=false silenzioso (SPEC-022 §4).
+	// mai un hit=false silenzioso. Scope assente/diverso è PermissionDenied
+	// prima di Redis (SPEC-058).
 	Get(context.Context, *CacheKey) (*GetResponse, error)
 	// Scrittura idempotente (stessa chiave -> sovrascrive il valore
-	// precedente). TTL applicato nativamente da Redis (SET ... EX).
+	// precedente). TTL applicato nativamente da Redis (SET ... EX); acl_scope
+	// è verificato contro i metadata autenticati prima della write.
 	Put(context.Context, *PutRequest) (*PutResponse, error)
 	mustEmbedUnimplementedSemanticCacheServer()
 }

@@ -91,3 +91,12 @@ func TestRedisKeyV2IsTupleCollisionSafeAndOpaque(t *testing.T) {
 		t.Fatalf("physical key exposes raw logical fields: %q", gotA)
 	}
 }
+
+func TestScopeTelemetryLabelsAreBounded(t *testing.T) {
+	if got := boundedOperation("attacker-controlled"); got != "get" {
+		t.Fatalf("boundedOperation = %q, want get", got)
+	}
+	if got := boundedScopeOutcome("tenant-a"); got != "error" {
+		t.Fatalf("boundedScopeOutcome = %q, want error", got)
+	}
+}

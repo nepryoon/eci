@@ -3,6 +3,11 @@ Stato: verified
 Task-tree: T5.5 · Servizio: services/summarization · ADD: Modulo 2 §2.2, Modulo 3 §1.2
 Contratti: nessun nuovo contratto; `contracts/` invariati
 
+> Nota Fase 6: l'interfaccia senza ACL documenta la baseline T5.5 ed è
+> superata da SPEC-058. T6.4 richiede label security su ogni `SummaryNode`,
+> `SecurityContext` autenticato e `acl_scope` in ogni cache key; la closure
+> non autorizzata non viene passata al modello né riusata dalla cache.
+
 ## 1. Obiettivo
 Implementare il core stateless che genera summary lungo la gerarchia CPG method→class→module→repo. Ogni nodo riusa la Semantic Cache con chiave `ast_hash + logic_fingerprint`, evitando chiamate LLM per sottoalberi invariati.
 
