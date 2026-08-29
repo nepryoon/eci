@@ -70,3 +70,23 @@ func TestWriteBackUsesGenerationFenceAndSinglePartitionLock(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteBackLocksTargetsInStableOrderBeforePartitionFence(t *testing.T) {
+	previous := -1
+	for _, fragment := range []string{
+		"ORDER BY row.id",
+		"SET n._eci_write_lock = coalesce(n._eci_write_lock, 0) + 1",
+		"MATCH (p:GDSPartition",
+		"SET p.write_lock = coalesce(p.write_lock, 0) + 1",
+	} {
+		position := strings.Index(writeBackQuery, fragment)
+		if position < 0 {
+			t.Errorf("write-back query is missing ordered lock step %q", fragment)
+			continue
+		}
+		if position <= previous {
+			t.Errorf("write-back lock step %q is out of order", fragment)
+		}
+		previous = position
+	}
+}
