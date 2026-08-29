@@ -143,6 +143,12 @@ func (b *integrationBackend) observe(ctx context.Context, method string, bodyCon
 
 func (b *integrationBackend) GetNode(ctx context.Context, request *retrievalv1.GetNodeRequest) (*retrievalv1.GetNodeResponse, error) {
 	b.observe(ctx, "GetNode", request.GetSecurityContext())
+	if request.GetNodeId() == "retry-control" {
+		return nil, status.Error(codes.Unavailable, "retry control")
+	}
+	if request.GetNodeId() == "timeout-control" {
+		time.Sleep(30 * time.Millisecond)
+	}
 	return &retrievalv1.GetNodeResponse{Node: &retrievalv1.RetrievedNode{NodeId: request.GetNodeId(), Name: "OrderService.Process"}}, nil
 }
 
@@ -361,6 +367,39 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 			t.Fatalf("first stream event=%v err=%v", first, err)
 		}
 		cancelStream()
+	})
+
+	t.Run("forged proxy and router controls cannot amplify upstream", func(t *testing.T) {
+		before := len(backend.snapshot())
+		request, _ := http.NewRequest(http.MethodPost, baseURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", strings.NewReader(`{"nodeId":"retry-control"}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer integration-valid")
+		request.Header.Set("X-Forwarded-For", "127.0.0.1")
+		request.Header.Set("X-Envoy-Retry-On", "5xx")
+		request.Header.Set("X-Envoy-Max-Retries", "3")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if got := len(backend.snapshot()) - before; got != 1 {
+			t.Fatalf("forged retry controls produced %d upstream attempts", got)
+		}
+
+		before = len(backend.snapshot())
+		request, _ = http.NewRequest(http.MethodPost, baseURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", strings.NewReader(`{"nodeId":"timeout-control"}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer integration-valid")
+		request.Header.Set("X-Forwarded-For", "127.0.0.1")
+		request.Header.Set("X-Envoy-Upstream-Rq-Timeout-Ms", "1")
+		response, err = http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK || len(backend.snapshot())-before != 1 {
+			t.Fatalf("forged timeout changed request: status=%d attempts=%d", response.StatusCode, len(backend.snapshot())-before)
+		}
 	})
 
 	t.Run("SSE helper deadline emits bounded terminal frame through Envoy", func(t *testing.T) {

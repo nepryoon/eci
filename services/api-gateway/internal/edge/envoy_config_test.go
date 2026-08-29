@@ -60,6 +60,20 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 		"timeout: 0s",
 		"idle_timeout: 35s",
 		"request_headers_timeout: 5s",
+		"use_remote_address: true",
+		"xff_num_trusted_hops: 0",
+		"remove: x-forwarded-for",
+		"remove: x-envoy-retry-on",
+		"remove: x-envoy-retry-grpc-on",
+		"remove: x-envoy-max-retries",
+		"remove: x-envoy-retriable-header-names",
+		"remove: x-envoy-retriable-status-codes",
+		"remove: x-envoy-upstream-rq-timeout-ms",
+		"remove: x-envoy-upstream-rq-per-try-timeout-ms",
+		"remove: x-envoy-upstream-rq-timeout-alt-response",
+		"remove: x-envoy-hedge-on-per-try-timeout",
+		"remove: x-envoy-upstream-alt-stat-name",
+		"remove: x-envoy-decorator-operation",
 		"exact: x-eci-request-deadline-unix-ms",
 		"name: envoy.transport_sockets.tls",
 		`alpn_protocols: ["h2", "http/1.1"]`,
@@ -76,6 +90,9 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 	}
 	if strings.Contains(config, "prefix: /eci.retrieval.v1.RetrievalEngine/") {
 		t.Fatal("native gRPC route is a prefix rather than a method allow-list")
+	}
+	if strings.Contains(config, "xff_num_trusted_hops: 1") {
+		t.Fatal("public listener trusts an undeclared proxy hop")
 	}
 }
 
