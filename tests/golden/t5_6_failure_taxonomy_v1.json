@@ -1,0 +1,7 @@
+{
+  "g01": ["semantic_error"],
+  "g04": ["unqualified_symbol", "unqualified_symbol"],
+  "g06": ["unqualified_symbol", "unqualified_symbol"],
+  "g07": ["verbose_fact", "verbose_fact", "verbose_fact"],
+  "g09": ["verbose_fact"]
+}
