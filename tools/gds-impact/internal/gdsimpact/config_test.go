@@ -37,3 +37,23 @@ func TestRunRejectsManuallyConstructedMissingScopeBeforeDriverUse(t *testing.T) 
 		t.Fatal("Run accepted missing projection scope")
 	}
 }
+
+func TestStoreBackedQueriesCarryFullProjectionScope(t *testing.T) {
+	queries := []struct {
+		name  string
+		query string
+	}{
+		{name: "discovery", query: levelCypher},
+		{name: "reverse projection", query: projectReverseQuery},
+		{name: "undirected projection", query: projectUndirectedQuery},
+		{name: "page rank seed", query: pageRankQuery},
+		{name: "write-back", query: writeBackQuery},
+	}
+	for _, item := range queries {
+		for _, parameter := range []string{"$tenant_id", "$repo", "$acl_group"} {
+			if !strings.Contains(item.query, parameter) {
+				t.Errorf("%s query is missing mandatory scope parameter %s", item.name, parameter)
+			}
+		}
+	}
+}

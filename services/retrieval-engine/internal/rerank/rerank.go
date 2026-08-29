@@ -121,6 +121,9 @@ func neo4jImpactScoreFetcher(driver neo4j.DriverWithContext) impactScoreFetchFun
 			WHERE n.tenant_id = $tenant_id
 			  AND n.repo IN $allowed_repos
 			  AND n.acl_group IN $acl_groups
+			  AND n.impact_tenant_id = n.tenant_id
+			  AND n.impact_repo = n.repo
+			  AND n.impact_acl_group = n.acl_group
 			RETURN id AS node_id, n.impact_score AS impact_score
 		`, params)
 		if err != nil {

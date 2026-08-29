@@ -25,7 +25,9 @@ type depInfo struct {
 const levelCypher = `
 MATCH (n:CodeNode) WHERE n.id IN $frontier_ids
 MATCH (n)<-[r:CALLS|IMPLEMENTS|EXTENDS|OVERRIDES|DEPENDS_ON|IMPORTS]-(dep:CodeNode)
-WHERE NOT dep.id IN $visited_ids
+WHERE n.tenant_id = $tenant_id AND n.repo = $repo AND n.acl_group = $acl_group
+  AND dep.tenant_id = $tenant_id AND dep.repo = $repo AND dep.acl_group = $acl_group
+  AND NOT dep.id IN $visited_ids
 WITH dep, min(type(r)) AS edge_type
 RETURN dep.id AS node_id, edge_type
 ORDER BY node_id
@@ -35,7 +37,7 @@ ORDER BY node_id
 // maxDepth, ritornando SOLO i dipendenti scoperti (mai entryNodeID stesso).
 // entryNodeID inesistente o senza dipendenti -> mappa vuota, nessun errore
 // (SPEC-043 §3 scenario 4, stesso principio già stabilito in T4.1/T4.2).
-func discoverSubgraph(ctx context.Context, driver neo4j.DriverWithContext, entryNodeID string, maxDepth int) (map[string]depInfo, error) {
+func discoverSubgraph(ctx context.Context, driver neo4j.DriverWithContext, entryNodeID string, scope ProjectionScope, maxDepth int) (map[string]depInfo, error) {
 	visited := map[string]struct{}{entryNodeID: {}}
 	frontier := []string{entryNodeID}
 	deps := make(map[string]depInfo)
@@ -56,6 +58,9 @@ func discoverSubgraph(ctx context.Context, driver neo4j.DriverWithContext, entry
 		result, err := session.Run(ctx, levelCypher, map[string]any{
 			"frontier_ids": frontier,
 			"visited_ids":  visitedIDs,
+			"tenant_id":    scope.TenantID,
+			"repo":         scope.Repo,
+			"acl_group":    scope.ACLGroup,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("gdsimpact: discovery livello %d: %w", depth, err)

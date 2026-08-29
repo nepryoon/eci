@@ -28,6 +28,8 @@ const projectionRelPattern = "CALLS|IMPLEMENTS|EXTENDS|OVERRIDES|DEPENDS_ON|IMPO
 const projectReverseQuery = `
 MATCH (n:CodeNode)-[r:` + projectionRelPattern + `]->(m:CodeNode)
 WHERE n.id IN $node_ids AND m.id IN $node_ids
+  AND n.tenant_id = $tenant_id AND n.repo = $repo AND n.acl_group = $acl_group
+  AND m.tenant_id = $tenant_id AND m.repo = $repo AND m.acl_group = $acl_group
 WITH gds.graph.project($graph_name, m, n) AS g
 RETURN g.graphName AS graphName, g.nodeCount AS nodeCount, g.relationshipCount AS relationshipCount
 `
@@ -42,6 +44,8 @@ RETURN g.graphName AS graphName, g.nodeCount AS nodeCount, g.relationshipCount A
 const projectUndirectedQuery = `
 MATCH (n:CodeNode)-[r:` + projectionRelPattern + `]->(m:CodeNode)
 WHERE n.id IN $node_ids AND m.id IN $node_ids
+  AND n.tenant_id = $tenant_id AND n.repo = $repo AND n.acl_group = $acl_group
+  AND m.tenant_id = $tenant_id AND m.repo = $repo AND m.acl_group = $acl_group
 WITH gds.graph.project($graph_name, n, m, {}, {undirectedRelationshipTypes: ['*']}) AS g
 RETURN g.graphName AS graphName, g.nodeCount AS nodeCount, g.relationshipCount AS relationshipCount
 `
@@ -61,7 +65,7 @@ type projection struct {
 // (REVERSE, UNDIRECTED). graphName univoco per invocazione (suffisso
 // casuale): invocazioni concorrenti su entry_node_id diversi non
 // collidono nel catalogo GDS.
-func createProjections(ctx context.Context, driver neo4j.DriverWithContext, entryNodeID string, deps map[string]depInfo) (projection, error) {
+func createProjections(ctx context.Context, driver neo4j.DriverWithContext, entryNodeID string, scope ProjectionScope, deps map[string]depInfo) (projection, error) {
 	nodeIDs := make([]string, 0, len(deps)+1)
 	nodeIDs = append(nodeIDs, entryNodeID)
 	for id := range deps {
@@ -81,6 +85,9 @@ func createProjections(ctx context.Context, driver neo4j.DriverWithContext, entr
 	revResult, err := session.Run(ctx, projectReverseQuery, map[string]any{
 		"node_ids":   nodeIDs,
 		"graph_name": revName,
+		"tenant_id":  scope.TenantID,
+		"repo":       scope.Repo,
+		"acl_group":  scope.ACLGroup,
 	})
 	if err != nil {
 		return projection{}, fmt.Errorf("gdsimpact: proiezione REVERSE: %w", err)
@@ -95,6 +102,9 @@ func createProjections(ctx context.Context, driver neo4j.DriverWithContext, entr
 	undirResult, err := session.Run(ctx, projectUndirectedQuery, map[string]any{
 		"node_ids":   nodeIDs,
 		"graph_name": undirName,
+		"tenant_id":  scope.TenantID,
+		"repo":       scope.Repo,
+		"acl_group":  scope.ACLGroup,
 	})
 	if err != nil {
 		// La proiezione REVERSE è già stata creata: propaghiamo l'errore,
