@@ -1,5 +1,5 @@
 # SPEC-055 — IdP dev Keycloak e JWT → SecurityContext al gateway
-Stato: implemented
+Stato: verified
 Task-tree: T6.1 · Servizio: services/api-gateway + deploy/compose · ADD: Modulo 3 §1.1, §2.1 e D7 `SecurityContext`
 Contratti: contracts/proto/eci/retrieval/v1/retrieval.proto (letto, non modificato)
 
@@ -209,7 +209,7 @@ issuer arbitrario, testo utente o dettagli degli errori crittografici.
 
 ## 10. Criteri di accettazione
 
-- [ ] Keycloak dev pin-nato importa un realm riproducibile e rilascia un token
+- [x] Keycloak dev pin-nato importa un realm riproducibile e rilascia un token
   reale con audience e claim richiesti.
 - [x] Nessun secret o password è versionato; compose richiede env esplicite.
 - [x] JWT access token validato per `typ=Bearer`, `RS256`, issuer, audience,
@@ -218,8 +218,8 @@ issuer arbitrario, testo utente o dettagli degli errori crittografici.
 - [x] Solo claim verificati possono costruire tenant/repo/gruppi del contesto.
 - [x] Il protobuf D7 è riusato senza modificare `contracts/`.
 - [x] Metriche/span non contengono dati sensibili o cardinalità non limitata.
-- [ ] Unit, OIDC crypto/JWKS rotation e Keycloak integration test verdi.
-- [ ] `task build`, `task lint`, `task test`, `task guard` verdi.
+- [x] Unit, OIDC crypto/JWKS rotation e Keycloak integration test verdi.
+- [x] `task build`, `task lint`, `task test`, `task guard` verdi.
 
 ## 11. Review avversaria per approvazione
 
@@ -254,7 +254,11 @@ Implementazione in `services/api-gateway/internal/authn`, con
 `github.com/coreos/go-oidc/v3` v3.20.0 per discovery, JWKS e verifica JWT,
 Prometheus client v1.24.1 e OTel v1.44.0. La libreria OIDC viene configurata
 esplicitamente con il solo `RS256`; i claim applicativi vengono decodificati
-soltanto dopo la verifica crittografica.
+soltanto dopo la verifica crittografica. In risposta al finding P2 della
+review, `New` effettua inoltre un preflight reale e bounded del `jwks_uri`:
+rifiuta redirect, status non-200, payload oltre 1 MiB, set vuoti/malformati e
+set senza una chiave pubblica RSA utilizzabile per `RS256`. Discovery sana ma
+JWKS inutilizzabile non può quindi produrre una readiness falsa.
 
 Il realm dev è importato dal compose con Keycloak `26.7.2`. La password
 bootstrap e quella dell'utente `eci-dev` sono env obbligatorie; l'integration
@@ -275,3 +279,19 @@ flag configurabile: è accettato esclusivamente per issuer loopback. Il servizio
 non espone ancora un listener, intenzionalmente: Envoy/transcoding/SSE/rate
 limiting appartengono a T6.6; T6.1 consegna il boundary interno autenticante che
 T6.6 comporrà.
+
+## 13. Evidenza di verifica
+
+Il commit funzionale `7450cf1` è stato verificato dal run GitHub Actions
+[`33238726705`](https://github.com/nepryoon/eci/actions/runs/33238726705):
+`build-lint-test` PASS in 7m51s e `guard`/proto checks PASS in 1m24s. Nel job
+completo `go test` su `services/api-gateway/internal/authn` è PASS in 34.479s;
+questo include il container `quay.io/keycloak/keycloak:26.7.2`, import reale
+del realm, emissione di un access token con password effimere generate a
+runtime e autenticazione tramite lo stesso `Authenticator` di produzione.
+
+Il finding JWKS è coperto da regressioni che fallivano sul comportamento
+precedente e ora dimostrano il rifiuto all'avvio sia per HTTP 503 sia per un
+key set vuoto. Il thread di review è stato risposto e risolto soltanto dopo il
+push del fix. Nessun file in `contracts/` o nell'ADD è stato modificato e la
+scansione dei file T6.1 non rileva chiavi private, token o client secret.
