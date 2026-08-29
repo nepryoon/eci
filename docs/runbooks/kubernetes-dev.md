@@ -61,9 +61,39 @@ Each application namespace receives `eci-runtime-routing` with concrete
 cluster DNS names for OPA, retrieval, Neo4j, Qdrant, OpenSearch, Redis, Kafka,
 embedding/reranking and vLLM. The separately managed `eci-runtime` Secret must
 contain at least `POSTGRES_DSN`, `NEO4J_USER`, `NEO4J_PASSWORD`,
-`ECI_OIDC_ISSUER`, and `ECI_OIDC_AUDIENCE` in addition to datastore bootstrap
-keys. Missing values are deployment errors; do not restore localhost defaults
-in Helm values.
+`ECI_OIDC_ISSUER`, `ECI_OIDC_AUDIENCE`, `OPENSEARCH_USERNAME`, and
+`OPENSEARCH_PASSWORD` in addition to datastore bootstrap keys. Missing values
+are deployment errors; do not restore localhost defaults in Helm values.
+
+Application enablement is a two-phase operation because the Strimzi and
+OpenSearch operators create their CAs only after the infrastructure CRs exist.
+After the infrastructure release is Ready, copy only the public `ca.crt` key
+to the consumer namespaces through the platform secret manager. The expected
+targets are `eci-kafka-client-ca` in `ingestion-plane` and
+`eci-opensearch-client-ca` in both `query-plane` and `ingestion-plane`.
+Never copy `ca.key`, `ca.password`, or an entire operator Secret. A local
+one-off equivalent is:
+
+```bash
+work_dir="$(mktemp -d)"
+trap 'rm -f "$work_dir/ca.crt"; rmdir "$work_dir"' EXIT
+kubectl -n data-plane get secret eci-kafka-cluster-ca-cert \
+  -o jsonpath='{.data.ca\.crt}' | base64 --decode >"$work_dir/ca.crt"
+kubectl -n ingestion-plane create secret generic eci-kafka-client-ca \
+  --from-file=ca.crt="$work_dir/ca.crt" --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n data-plane get secret eci-opensearch-ca \
+  -o jsonpath='{.data.ca\.crt}' | base64 --decode >"$work_dir/ca.crt"
+for namespace in query-plane ingestion-plane; do
+  kubectl -n "$namespace" create secret generic eci-opensearch-client-ca \
+    --from-file=ca.crt="$work_dir/ca.crt" --dry-run=client -o yaml | kubectl apply -f -
+done
+```
+
+The workloads mount those Secrets read-only. `KAFKA_TLS_ENABLED=true` requires
+the CA on both kafka-go readers and writers; HTTPS OpenSearch requires CA,
+username and password. Redis is deployed with `requirepass`, so Semantic Cache
+also requires the explicit `redis-password` mapping. Each client fails before
+serving/consuming if its trust or credential input is absent.
 
 OpenSearch Operator 2.8.0 still defaults its metrics proxy to the removed
 `gcr.io/kubebuilder` location. The installer keeps version 0.15.0 byte lineage

@@ -11,7 +11,7 @@ metadata:
 data:
   OPA_URL: {{ $.Values.routing.opaURL | quote }}
   OPA_ALLOW_INSECURE_HTTP: "true"
-  RETRIEVAL_ENGINE_ADDR: {{ $.Values.routing.retrievalAddress | quote }}
+  RETRIEVAL_ENGINE_ADDR: {{ ternary ":50053" $.Values.routing.retrievalAddress (eq $namespace "query-plane") | quote }}
   ORCHESTRATOR_RETRIEVAL_ADDR: {{ $.Values.routing.retrievalAddress | quote }}
   ORCHESTRATOR_VLLM_URL: {{ $.Values.routing.vllmURL | quote }}
   NEO4J_URI: {{ $.Values.routing.neo4jURI | quote }}
@@ -21,6 +21,10 @@ data:
   RERANKER_SERVICE_URL: {{ $.Values.routing.rerankerServiceURL | quote }}
   OPENSEARCH_URL: {{ $.Values.routing.openSearchURL | quote }}
   REDIS_ADDR: {{ $.Values.routing.redisAddress | quote }}
+  REDIS_REQUIRE_AUTH: "true"
   KAFKA_BROKERS: {{ $.Values.routing.kafkaBrokers | quote }}
+  KAFKA_TLS_ENABLED: "true"
+  KAFKA_TLS_CA_FILE: /etc/eci/kafka/ca.crt
+  OPENSEARCH_CA_FILE: /etc/eci/opensearch/ca.crt
 {{- end }}
 {{- end }}

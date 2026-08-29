@@ -8,9 +8,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -30,6 +33,21 @@ const defaultMetricsPort = "9106"
 
 func newMetricsHandler(gatherer prometheus.Gatherer) http.Handler {
 	return promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{})
+}
+
+func redisOptionsFromEnvironment() (*redis.Options, error) {
+	requireAuth, err := strconv.ParseBool(config.EnvOrDefault("REDIS_REQUIRE_AUTH", "false"))
+	if err != nil {
+		return nil, fmt.Errorf("REDIS_REQUIRE_AUTH must be a boolean: %w", err)
+	}
+	password := os.Getenv("REDIS_PASSWORD")
+	if requireAuth && password == "" {
+		return nil, fmt.Errorf("REDIS_PASSWORD is required when Redis authentication is enabled")
+	}
+	return &redis.Options{
+		Addr:     config.EnvOrDefault("REDIS_ADDR", "localhost:6379"),
+		Password: password,
+	}, nil
 }
 
 func main() {
@@ -59,8 +77,12 @@ func main() {
 		}
 	}()
 
-	redisAddr := config.EnvOrDefault("REDIS_ADDR", "localhost:6379")
-	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
+	redisOptions, err := redisOptionsFromEnvironment()
+	if err != nil {
+		log.Fatalf("semantic-cache: configurazione Redis: %v", err)
+	}
+	redisAddr := redisOptions.Addr
+	rdb := redis.NewClient(redisOptions)
 	defer rdb.Close()
 
 	addr := config.EnvOrDefault("SEMANTIC_CACHE_ADDR", ":50054")

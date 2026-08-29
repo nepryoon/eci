@@ -64,6 +64,8 @@ routing:
   openSearchURL: https://eci-opensearch.data-plane.svc.cluster.local:9200
   redisAddress: redis.data-plane.svc.cluster.local:6379
   kafkaBrokers: eci-kafka-kafka-bootstrap.data-plane.svc.cluster.local:9092
+  kafkaTLSSecret: eci-kafka-client-ca
+  openSearchTLSSecret: eci-opensearch-client-ca
   vllmURL: http://vllm.gpu-plane.svc.cluster.local:8000/v1
 
 resources:

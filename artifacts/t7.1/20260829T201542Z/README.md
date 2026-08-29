@@ -29,6 +29,9 @@ Results:
 - registry-resolved SHA-256 pins for every rendered third-party container:
   PASS; no non-existent ECI image is a default;
 - CloudNativePG webhook ingress on the operator-only selector/TCP 9443: PASS;
+- application datastore transport contracts: retrieval bind/client address
+  separation, Kafka reader/writer TLS with public CA, OpenSearch HTTPS with
+  public CA and Basic Auth, and Redis `requirepass` propagation: PASS;
 - immutable Qdrant bootstrap Job upgrade: the first atomic upgrade failed and
   rolled back as designed; the hook lifecycle fix then upgraded successfully
   at revision 6 and the full smoke remained green.

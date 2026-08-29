@@ -20,8 +20,10 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 
 	"github.com/eci-project/eci/libs/go/eci/config"
+	"github.com/eci-project/eci/libs/go/eci/kafkaconfig"
 	"github.com/eci-project/eci/libs/go/eci/metrics"
 	"github.com/eci-project/eci/libs/go/eci/observability"
+	"github.com/eci-project/eci/libs/go/eci/opensearchconfig"
 	"github.com/eci-project/eci/libs/go/eci/resilience"
 	"github.com/eci-project/eci/services/sink-search/internal/consumer"
 )
@@ -59,8 +61,17 @@ func main() {
 	}
 
 	openSearchURL := config.EnvOrDefault("OPENSEARCH_URL", "http://localhost:9200")
+	openSearchTransport, err := opensearchconfig.FromEnvironment(openSearchURL)
+	if err != nil {
+		log.Fatalf("sink-search: configurazione OpenSearch: %v", err)
+	}
 	osClient, err := opensearchapi.NewClient(opensearchapi.Config{
-		Client: opensearch.Config{Addresses: []string{openSearchURL}},
+		Client: opensearch.Config{
+			Addresses: []string{openSearchURL},
+			Username:  openSearchTransport.Username,
+			Password:  openSearchTransport.Password,
+			CACert:    openSearchTransport.CACert,
+		},
 	})
 	if err != nil {
 		log.Fatalf("sink-search: creazione client OpenSearch (url=%s): %v", openSearchURL, err)
@@ -74,10 +85,15 @@ func main() {
 	}
 
 	brokers := strings.Split(config.EnvOrDefault("KAFKA_BROKERS", "localhost:9094"), ",")
+	kafkaTransport, err := kafkaconfig.FromEnvironment()
+	if err != nil {
+		log.Fatalf("sink-search: configurazione Kafka: %v", err)
+	}
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     brokers,
 		GroupID:     consumer.ConsumerName,
 		GroupTopics: []string{consumer.TopicCodeChunk},
+		Dialer:      kafkaTransport.Dialer,
 	})
 	defer reader.Close()
 
@@ -92,6 +108,7 @@ func main() {
 	// su Topic/BatchTimeout del producer.
 	retryProducer := &kafka.Writer{
 		Addr:                   kafka.TCP(brokers...),
+		Transport:              kafkaTransport.Transport,
 		AllowAutoTopicCreation: true,
 		BatchTimeout:           10 * time.Millisecond,
 	}

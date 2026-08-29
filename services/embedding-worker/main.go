@@ -17,6 +17,7 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 
 	"github.com/eci-project/eci/libs/go/eci/config"
+	"github.com/eci-project/eci/libs/go/eci/kafkaconfig"
 	"github.com/eci-project/eci/libs/go/eci/metrics"
 	"github.com/eci-project/eci/libs/go/eci/observability"
 	"github.com/eci-project/eci/libs/go/eci/resilience"
@@ -64,10 +65,15 @@ func main() {
 	modelID := config.EnvOrDefault("EMBEDDING_MODEL_ID", "jina-code-embeddings-1.5b")
 
 	brokers := strings.Split(config.EnvOrDefault("KAFKA_BROKERS", "localhost:9094"), ",")
+	kafkaTransport, err := kafkaconfig.FromEnvironment()
+	if err != nil {
+		log.Fatalf("embedding-worker: configurazione Kafka: %v", err)
+	}
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     brokers,
 		GroupID:     consumer.ConsumerName,
 		GroupTopics: []string{consumer.TopicCodeChunk},
+		Dialer:      kafkaTransport.Dialer,
 	})
 	defer reader.Close()
 
@@ -83,6 +89,7 @@ func main() {
 	// su Topic/BatchTimeout del producer.
 	retryProducer := &kafka.Writer{
 		Addr:                   kafka.TCP(brokers...),
+		Transport:              kafkaTransport.Transport,
 		AllowAutoTopicCreation: true,
 		BatchTimeout:           10 * time.Millisecond,
 	}

@@ -75,6 +75,14 @@ spec:
                 name: eci-runtime-routing
             - secretRef:
                 name: {{ $.Values.global.existingSecret }}
+          {{- if eq $workload.name "semantic-cache" }}
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.global.existingSecret }}
+                  key: redis-password
+          {{- end }}
           readinessProbe:
             tcpSocket: {port: service}
             periodSeconds: 5
@@ -89,9 +97,27 @@ spec:
             {{- toYaml (index $.Values.resources $workload.profile) | nindent 12 }}
           volumeMounts:
             - {name: tmp, mountPath: /tmp}
+            {{- if eq $workload.namespace "ingestion-plane" }}
+            - {name: kafka-ca, mountPath: /etc/eci/kafka, readOnly: true}
+            {{- end }}
+            {{- if or (eq $workload.name "retrieval-engine") (eq $workload.name "sink-search") }}
+            - {name: opensearch-ca, mountPath: /etc/eci/opensearch, readOnly: true}
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if eq $workload.namespace "ingestion-plane" }}
+        - name: kafka-ca
+          secret:
+            secretName: {{ $.Values.routing.kafkaTLSSecret }}
+            items: [{key: ca.crt, path: ca.crt}]
+        {{- end }}
+        {{- if or (eq $workload.name "retrieval-engine") (eq $workload.name "sink-search") }}
+        - name: opensearch-ca
+          secret:
+            secretName: {{ $.Values.routing.openSearchTLSSecret }}
+            items: [{key: ca.crt, path: ca.crt}]
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

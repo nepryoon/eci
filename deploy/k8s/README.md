@@ -33,7 +33,11 @@ namespace-local `eci-runtime-routing` ConfigMap; addresses never default to
 localhost. `eci-runtime` must additionally provide service-specific
 credentials and trusted identity configuration, including `POSTGRES_DSN`,
 `NEO4J_USER`, `NEO4J_PASSWORD`, `ECI_OIDC_ISSUER`, and
-`ECI_OIDC_AUDIENCE`. Missing keys remain a fail-closed rollout failure.
+`ECI_OIDC_AUDIENCE`, `OPENSEARCH_USERNAME`, and `OPENSEARCH_PASSWORD`.
+Kafka consumers mount only the Strimzi public cluster CA and always use TLS;
+OpenSearch clients mount only the generated public HTTP CA and require Basic
+Auth. Semantic Cache maps `redis-password` explicitly to `REDIS_PASSWORD`.
+Missing keys or CA files remain a fail-closed rollout failure.
 
 Envoy is not a generic application pod. When enabled it mounts the externally
 provisioned `eci-envoy-config` ConfigMap (`envoy.yaml` and binary

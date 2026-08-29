@@ -114,6 +114,11 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    NetworkPolicy non identifica un apiserver esterno, la sorgente portabile è
    `0.0.0.0/0` ma il selector resta limitato ai soli pod operator e il CIDR è
    restringibile per cluster.
+   I consumer Kafka usano TLS con la sola CA pubblica Strimzi montata
+   read-only; reader e writer falliscono se il trust manca. Retrieval e
+   sink-search richiedono CA HTTP e credenziali OpenSearch, mentre Semantic
+   Cache riceve esplicitamente la password del Redis `requirepass`. Nessuna CA
+   privata viene copiata fra namespace.
 5. **Overlay dev onesto.** Given `values-dev.yaml`, When il bootstrap gira su
    kind, Then usa repliche/storage/resource ridotti e Neo4j Community come
    previsto dagli ADR dev esistenti. I workload ECI senza immagini pubblicate
@@ -148,6 +153,9 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
 | immagine vuota, tag-only, `latest` o non pin-nata per digest | policy check non-zero |
 | applicazioni abilitate senza tutti i digest first-party | render Helm non-zero, nessun Deployment parziale |
 | ConfigMap bootstrap Envoy o Secret TLS assente | Envoy non schedula/avvia; nessun fallback cleartext |
+| CA Kafka assente/non PEM con TLS abilitato | sink/worker terminano prima del consume-loop |
+| CA o credenziali OpenSearch assenti su HTTPS | retrieval/sink-search terminano prima di servire/consumare |
+| password Redis assente con auth richiesta | semantic-cache termina prima di aprire il listener |
 | CRD operatore assente | apply dei CR attende/fallisce bounded; non passa a readiness dati |
 | store non Ready | verifica non-zero con namespace/kind/nome; nessun retry infinito |
 | cluster con risorse insufficienti | stato non verificato; raccoglie describe/events senza ridurre soglie standard |
@@ -245,6 +253,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
 - [x] Nessun Secret/credenziale/tag mutable versionato; Envoy monta config,
       descriptor e TLS esterni sulla porta 8080 reale; NetworkPolicy e pod
       security passano i check fail-closed.
+- [x] Kafka reader/writer usano TLS+CA; OpenSearch usa HTTPS+CA+Basic Auth;
+      Redis `requirepass` è propagato esplicitamente, con unit test fail-closed.
 - [x] Kubeconform valida built-in e CRD contro schemi pinned.
 - [x] Cluster dev realmente creato; operatori/store Ready e connettività
       in-cluster verificata, oppure eventuale limite esterno/risorse è riportato

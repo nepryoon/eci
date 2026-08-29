@@ -318,10 +318,19 @@ class PlatformChartTests(unittest.TestCase):
     def test_review_runtime_routes_and_envoy_are_fail_closed(self) -> None:
         routing = self.by_key[("ConfigMap", "query-plane", "eci-runtime-routing")]["data"]
         self.assertEqual(routing["OPA_URL"], "http://opa.query-plane.svc.cluster.local:8181")
-        self.assertEqual(routing["RETRIEVAL_ENGINE_ADDR"], "retrieval-engine.query-plane.svc.cluster.local:50053")
+        self.assertEqual(routing["RETRIEVAL_ENGINE_ADDR"], ":50053")
+        ingress_routing = self.by_key[("ConfigMap", "ingress", "eci-runtime-routing")]["data"]
+        self.assertEqual(
+            ingress_routing["RETRIEVAL_ENGINE_ADDR"],
+            "retrieval-engine.query-plane.svc.cluster.local:50053",
+        )
         self.assertEqual(routing["NEO4J_URI"], "bolt://neo4j.data-plane.svc.cluster.local:7687")
         self.assertEqual(routing["QDRANT_HOST"], "qdrant.data-plane.svc.cluster.local")
         self.assertEqual(routing["OPENSEARCH_URL"], "https://eci-opensearch.data-plane.svc.cluster.local:9200")
+        self.assertEqual(routing["KAFKA_TLS_ENABLED"], "true")
+        self.assertEqual(routing["KAFKA_TLS_CA_FILE"], "/etc/eci/kafka/ca.crt")
+        self.assertEqual(routing["OPENSEARCH_CA_FILE"], "/etc/eci/opensearch/ca.crt")
+        self.assertEqual(routing["REDIS_REQUIRE_AUTH"], "true")
         self.assertNotIn("localhost", "\n".join(routing.values()))
 
         for obj in self.standard:
@@ -332,6 +341,33 @@ class PlatformChartTests(unittest.TestCase):
             refs = obj["spec"]["template"]["spec"]["containers"][0].get("envFrom", [])
             self.assertIn({"configMapRef": {"name": "eci-runtime-routing"}}, refs)
             self.assertIn({"secretRef": {"name": "eci-runtime"}}, refs)
+            if obj["metadata"]["namespace"] == "ingestion-plane":
+                mounts = obj["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+                self.assertIn(
+                    {"name": "kafka-ca", "mountPath": "/etc/eci/kafka", "readOnly": True},
+                    mounts,
+                )
+                volumes = {item["name"]: item for item in obj["spec"]["template"]["spec"]["volumes"]}
+                self.assertEqual(volumes["kafka-ca"]["secret"]["secretName"], "eci-kafka-client-ca")
+                self.assertEqual(volumes["kafka-ca"]["secret"]["items"], [{"key": "ca.crt", "path": "ca.crt"}])
+            if obj["metadata"]["name"] in {"retrieval-engine", "sink-search"}:
+                mounts = obj["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+                self.assertIn(
+                    {"name": "opensearch-ca", "mountPath": "/etc/eci/opensearch", "readOnly": True},
+                    mounts,
+                )
+                volumes = {item["name"]: item for item in obj["spec"]["template"]["spec"]["volumes"]}
+                self.assertEqual(
+                    volumes["opensearch-ca"]["secret"],
+                    {"secretName": "eci-opensearch-client-ca", "items": [{"key": "ca.crt", "path": "ca.crt"}]},
+                )
+
+        semantic_cache = self.by_key[("Deployment", "query-plane", "semantic-cache")]
+        cache_env = semantic_cache["spec"]["template"]["spec"]["containers"][0]["env"]
+        self.assertIn(
+            {"name": "REDIS_PASSWORD", "valueFrom": {"secretKeyRef": {"name": "eci-runtime", "key": "redis-password"}}},
+            cache_env,
+        )
 
         envoy = self.by_key[("Deployment", "ingress", "envoy")]
         container = envoy["spec"]["template"]["spec"]["containers"][0]
@@ -349,6 +385,7 @@ class PlatformChartTests(unittest.TestCase):
         runbook = (ROOT / "docs/runbooks/kubernetes-dev.md").read_text()
         self.assertIn("--from-file=envoy.yaml=deploy/envoy/envoy.yaml", runbook)
         self.assertIn("--from-file=retrieval.pb=deploy/envoy/retrieval.pb", runbook)
+        self.assertIn("Never copy `ca.key`", runbook)
 
     def test_review_application_enablement_requires_real_release_digests(self) -> None:
         result = subprocess.run(

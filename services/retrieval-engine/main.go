@@ -25,6 +25,7 @@ import (
 	"github.com/eci-project/eci/libs/go/eci/authz"
 	"github.com/eci-project/eci/libs/go/eci/config"
 	"github.com/eci-project/eci/libs/go/eci/observability"
+	"github.com/eci-project/eci/libs/go/eci/opensearchconfig"
 	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
 	"github.com/eci-project/eci/libs/go/eci/secctx"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/embedclient"
@@ -108,8 +109,17 @@ func main() {
 	// retrieval-engine, stessa convenzione OPENSEARCH_URL già usata da
 	// tools/reconcile.
 	openSearchURL := config.EnvOrDefault("OPENSEARCH_URL", "http://localhost:9200")
+	openSearchTransport, err := opensearchconfig.FromEnvironment(openSearchURL)
+	if err != nil {
+		log.Fatalf("retrieval-engine: configurazione OpenSearch: %v", err)
+	}
 	openSearchClient, err := opensearchapi.NewClient(opensearchapi.Config{
-		Client: opensearch.Config{Addresses: []string{openSearchURL}},
+		Client: opensearch.Config{
+			Addresses: []string{openSearchURL},
+			Username:  openSearchTransport.Username,
+			Password:  openSearchTransport.Password,
+			CACert:    openSearchTransport.CACert,
+		},
 	})
 	if err != nil {
 		log.Fatalf("retrieval-engine: creazione client OpenSearch (url=%s): %v", openSearchURL, err)
