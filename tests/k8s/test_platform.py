@@ -79,7 +79,6 @@ class PlatformChartTests(unittest.TestCase):
             ("query-plane", "summarization"),
             ("query-plane", "semantic-cache"),
             ("ingestion-plane", "embedding-worker"),
-            ("ingestion-plane", "ingestion"),
             ("ingestion-plane", "sink-graph"),
             ("ingestion-plane", "sink-vector"),
             ("ingestion-plane", "sink-search"),
@@ -90,7 +89,19 @@ class PlatformChartTests(unittest.TestCase):
         }
         self.assertTrue(expected.issubset(deployments), expected - deployments)
         cronjobs = {obj["metadata"]["name"] for obj in self.standard if obj.get("kind") == "CronJob"}
-        self.assertEqual(cronjobs, {"gds-impact"})
+        self.assertEqual(cronjobs, {"gds-impact", "ingestion-template"})
+        ingestion = self.by_key[("CronJob", "ingestion-plane", "ingestion-template")]
+        self.assertTrue(ingestion["spec"]["suspend"])
+        ingestion_pod = ingestion["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+        self.assertEqual(ingestion_pod["containers"][0]["args"], ["/input/source"])
+        self.assertEqual(
+            {item["name"] for item in ingestion_pod["containers"][0]["env"]},
+            {"POSTGRES_DSN", "ECI_TENANT_ID", "ECI_REPOSITORY", "ECI_ACL_GROUP"},
+        )
+        self.assertEqual(
+            ingestion_pod["volumes"][1]["persistentVolumeClaim"],
+            {"claimName": "eci-ingestion-source", "readOnly": True},
+        )
         connector = self.by_key[("ConfigMap", "data-plane", "eci-debezium-connector")]
         connector_config = connector["data"]["connector.json"]
         self.assertIn("io.debezium.connector.postgresql.PostgresConnector", connector_config)
@@ -104,6 +115,12 @@ class PlatformChartTests(unittest.TestCase):
         postgres = self.by_key[("Cluster", "data-plane", "eci-postgres")]
         opensearch = self.by_key[("OpenSearchCluster", "data-plane", "eci-opensearch")]
         self.assertEqual(kafka["apiVersion"], "kafka.strimzi.io/v1")
+        self.assertEqual(kafka["spec"]["kafka"]["authorization"], {"type": "simple"})
+        self.assertEqual(
+            kafka["spec"]["kafka"]["listeners"],
+            [{"name": "clients", "port": 9093, "type": "internal", "tls": True,
+              "authentication": {"type": "tls"}}],
+        )
         self.assertEqual(pool["spec"]["replicas"], 3)
         self.assertEqual(set(pool["spec"]["roles"]), {"broker", "controller"})
         self.assertEqual(pool["spec"]["storage"]["type"], "persistent-claim")
@@ -132,6 +149,52 @@ class PlatformChartTests(unittest.TestCase):
         self.assertEqual(env["CONNECT_CONFIG_PROVIDERS"]["value"], "env")
         self.assertIn("secretKeyRef", env["POSTGRES_PASSWORD"]["valueFrom"])
         self.assertEqual(connect_container["securityContext"]["readOnlyRootFilesystem"], True)
+        self.assertEqual(env["BOOTSTRAP_SERVERS"]["value"], "eci-kafka-kafka-bootstrap.data-plane.svc:9093")
+        self.assertEqual(env["CONNECT_SSL_KEYSTORE_TYPE"]["value"], "PKCS12")
+        self.assertEqual(env["CONNECT_SSL_KEYSTORE_LOCATION"]["value"], "/etc/kafka-user/user.p12")
+        self.assertEqual(
+            env["CONNECT_SSL_KEYSTORE_PASSWORD"]["valueFrom"]["secretKeyRef"],
+            {"name": "eci-kafka-kafka-connect", "key": "user.password"},
+        )
+
+        topics = {obj["spec"]["topicName"]: obj for obj in self.standard if obj.get("kind") == "KafkaTopic"}
+        expected_topics = {
+            "outbox.event.CodeNode", "outbox.event.CodeRelation", "outbox.event.CodeChunk",
+            "outbox.event.CodeEmbedding", "outbox.event.CodeNode.DLQ",
+            "outbox.event.CodeRelation.DLQ", "outbox.event.CodeChunk.DLQ",
+            "outbox.event.CodeEmbedding.DLQ", "eci_connect_configs", "eci_connect_offsets",
+            "eci_connect_status",
+        }
+        self.assertEqual(set(topics), expected_topics)
+        self.assertTrue(all(topic["spec"]["replicas"] == 3 for topic in topics.values()))
+        self.assertEqual(topics["eci_connect_offsets"]["spec"]["partitions"], 25)
+        self.assertEqual(topics["eci_connect_status"]["spec"]["partitions"], 5)
+        self.assertFalse(kafka["spec"]["kafka"]["config"]["auto.create.topics.enable"])
+
+        users = {obj["metadata"]["name"]: obj for obj in self.standard if obj.get("kind") == "KafkaUser"}
+        self.assertEqual(
+            set(users),
+            {
+                "eci-kafka-kafka-connect", "eci-kafka-embedding-worker", "eci-kafka-sink-graph",
+                "eci-kafka-sink-vector", "eci-kafka-sink-search",
+            },
+        )
+        for name, user in users.items():
+            with self.subTest(kafka_user=name):
+                self.assertEqual(user["spec"]["authentication"], {"type": "tls"})
+                self.assertEqual(user["spec"]["authorization"]["type"], "simple")
+                for acl in user["spec"]["authorization"]["acls"]:
+                    resource = acl["resource"]
+                    if resource["type"] in {"topic", "group"}:
+                        self.assertEqual(resource["patternType"], "literal")
+                        self.assertNotEqual(resource["name"], "*")
+
+        graph_resources = {
+            (acl["resource"]["type"], acl["resource"].get("name"))
+            for acl in users["eci-kafka-sink-graph"]["spec"]["authorization"]["acls"]
+        }
+        self.assertIn(("group", "sink-graph"), graph_resources)
+        self.assertNotIn(("topic", "outbox.event.CodeChunk"), graph_resources)
 
         qdrant_values = yaml.safe_load((ROOT / "deploy/k8s/vendor-values/qdrant.yaml").read_text())
         self.assertEqual(qdrant_values["replicaCount"], 3)
@@ -182,6 +245,26 @@ class PlatformChartTests(unittest.TestCase):
                     self.assertTrue(container.get("resources", {}).get("limits"))
                     self.assertIn("readinessProbe", container)
                     self.assertIn("livenessProbe", container)
+
+        gpu_models = {
+            "vllm": ("/models/qwen3-coder-30b-a3b-instruct-fp8", "eci-qwen3-coder-30b-a3b-fp8"),
+            "embedder": ("/models/jina-code-embeddings-1.5b", None),
+            "reranker": ("/models/bge-reranker-v2-m3", None),
+        }
+        for name, (model_path, served_name) in gpu_models.items():
+            deployment = self.by_key[("Deployment", "gpu-plane", name)]
+            pod = deployment["spec"]["template"]["spec"]
+            container = pod["containers"][0]
+            self.assertIn(model_path, container["args"])
+            if served_name:
+                self.assertIn(served_name, container["args"])
+            self.assertIn("startupProbe", container)
+            self.assertIn({"name": "models", "mountPath": "/models", "readOnly": True}, container["volumeMounts"])
+            volumes = {item["name"]: item for item in pod["volumes"]}
+            self.assertEqual(
+                volumes["models"]["persistentVolumeClaim"],
+                {"claimName": "eci-gpu-models", "readOnly": True},
+            )
 
     def test_scenario_4_pod_security_secret_refs_and_network_policy(self) -> None:
         self.assertFalse(any(obj.get("kind") == "Secret" for obj in self.standard))
@@ -331,11 +414,19 @@ class PlatformChartTests(unittest.TestCase):
             ingress_routing["RETRIEVAL_ENGINE_ADDR"],
             "retrieval-engine.query-plane.svc.cluster.local:50053",
         )
+        self.assertEqual(
+            routing["LLM_GATEWAY_DEFAULT"],
+            "http://vllm.gpu-plane.svc.cluster.local:8000|eci-qwen3-coder-30b-a3b-fp8",
+        )
+        self.assertIn("eci-qwen3-coder-30b-a3b-fp8=", routing["LLM_GATEWAY_ROUTES"])
         self.assertEqual(routing["NEO4J_URI"], "bolt://neo4j.data-plane.svc.cluster.local:7687")
         self.assertEqual(routing["QDRANT_HOST"], "qdrant.data-plane.svc.cluster.local")
         self.assertEqual(routing["OPENSEARCH_URL"], "https://eci-opensearch.data-plane.svc.cluster.local:9200")
         self.assertEqual(routing["KAFKA_TLS_ENABLED"], "true")
+        self.assertEqual(routing["KAFKA_MTLS_ENABLED"], "true")
         self.assertEqual(routing["KAFKA_TLS_CA_FILE"], "/etc/eci/kafka/ca.crt")
+        self.assertEqual(routing["KAFKA_TLS_CERT_FILE"], "/etc/eci/kafka/user.crt")
+        self.assertEqual(routing["KAFKA_TLS_KEY_FILE"], "/etc/eci/kafka/user.key")
         self.assertEqual(routing["OPENSEARCH_CA_FILE"], "/etc/eci/opensearch/ca.crt")
         self.assertEqual(routing["REDIS_REQUIRE_AUTH"], "true")
         self.assertNotIn("localhost", "\n".join(routing.values()))
@@ -355,8 +446,18 @@ class PlatformChartTests(unittest.TestCase):
                     mounts,
                 )
                 volumes = {item["name"]: item for item in obj["spec"]["template"]["spec"]["volumes"]}
-                self.assertEqual(volumes["kafka-ca"]["secret"]["secretName"], "eci-kafka-client-ca")
-                self.assertEqual(volumes["kafka-ca"]["secret"]["items"], [{"key": "ca.crt", "path": "ca.crt"}])
+                self.assertEqual(
+                    volumes["kafka-ca"]["secret"]["secretName"],
+                    f"eci-kafka-{obj['metadata']['name']}",
+                )
+                self.assertEqual(
+                    volumes["kafka-ca"]["secret"]["items"],
+                    [
+                        {"key": "ca.crt", "path": "ca.crt"},
+                        {"key": "user.crt", "path": "user.crt"},
+                        {"key": "user.key", "path": "user.key"},
+                    ],
+                )
             if obj["metadata"]["name"] in {"retrieval-engine", "sink-search"}:
                 mounts = obj["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
                 self.assertIn(
@@ -412,6 +513,8 @@ class PlatformChartTests(unittest.TestCase):
             ("data-plane", "allow-sink-vector-to-qdrant-ingress"),
             ("query-plane", "allow-semantic-cache-to-redis"),
             ("data-plane", "allow-semantic-cache-to-redis-ingress"),
+            ("ingress", "allow-envoy-to-retrieval"),
+            ("query-plane", "allow-envoy-to-retrieval-ingress"),
         }:
             self.assertIn((namespace, name), policies)
 
@@ -467,6 +570,10 @@ class PlatformChartTests(unittest.TestCase):
         bootstrap = yaml.safe_load((ROOT / "deploy/envoy/envoy.yaml").read_text())
         listener_port = bootstrap["static_resources"]["listeners"][0]["address"]["socket_address"]["port_value"]
         self.assertEqual(listener_port, container["ports"][0]["containerPort"])
+        clusters = {item["name"]: item for item in bootstrap["static_resources"]["clusters"]}
+        for name in {"retrieval_engine", "retrieval_engine_stream"}:
+            address = clusters[name]["load_assignment"]["endpoints"][0]["lb_endpoints"][0]["endpoint"]["address"]["socket_address"]["address"]
+            self.assertEqual(address, "retrieval-engine.query-plane.svc.cluster.local")
         runbook = (ROOT / "docs/runbooks/kubernetes-dev.md").read_text()
         self.assertIn("--from-file=envoy.yaml=deploy/envoy/envoy.yaml", runbook)
         self.assertIn("--from-file=retrieval.pb=deploy/envoy/retrieval.pb", runbook)
@@ -484,6 +591,22 @@ class PlatformChartTests(unittest.TestCase):
             "131236b52d7959ee600f86ba43e48e88ff715b12a26451871fe57c2ba5809f0b",
         }:
             self.assertIn(expected, installer)
+        self.assertIn("qdrant-post-renderer.sh", installer)
+
+        post_renderer = ROOT / "deploy/k8s/qdrant-post-renderer.sh"
+        mutable = (
+            "apiVersion: apps/v1\nkind: StatefulSet\nspec:\n  template:\n    spec:\n"
+            "      containers:\n        - name: qdrant\n"
+            "          image: docker.io/qdrant/qdrant:v1.19.0-unprivileged\n"
+        )
+        rendered = subprocess.run(
+            [str(post_renderer)], input=mutable, capture_output=True, text=True, check=True
+        ).stdout
+        self.assertIn(
+            "docker.io/qdrant/qdrant:v1.19.0-unprivileged@sha256:"
+            "a0e04fe623cb064502cd869cefc1dc7ce359d8edd481063b5bd351c0a0a2c91e",
+            rendered,
+        )
 
     def test_review_application_enablement_requires_real_release_digests(self) -> None:
         result = subprocess.run(

@@ -123,7 +123,7 @@ spec:
           ports:
             - {name: rest, containerPort: 8083}
           env:
-            - {name: BOOTSTRAP_SERVERS, value: "eci-kafka-kafka-bootstrap.data-plane.svc:9092"}
+            - {name: BOOTSTRAP_SERVERS, value: "eci-kafka-kafka-bootstrap.data-plane.svc:9093"}
             - {name: GROUP_ID, value: "eci-connect"}
             - {name: CONFIG_STORAGE_TOPIC, value: "eci_connect_configs"}
             - {name: OFFSET_STORAGE_TOPIC, value: "eci_connect_offsets"}
@@ -135,6 +135,31 @@ spec:
             - {name: CONNECT_SECURITY_PROTOCOL, value: "SSL"}
             - {name: CONNECT_SSL_TRUSTSTORE_TYPE, value: "PEM"}
             - {name: CONNECT_SSL_TRUSTSTORE_LOCATION, value: "/etc/kafka-ca/ca.crt"}
+            - {name: CONNECT_SSL_KEYSTORE_TYPE, value: "PKCS12"}
+            - {name: CONNECT_SSL_KEYSTORE_LOCATION, value: "/etc/kafka-user/user.p12"}
+            - name: CONNECT_SSL_KEYSTORE_PASSWORD
+              valueFrom: &kafkaUserPasswordRef
+                secretKeyRef: {name: eci-kafka-kafka-connect, key: user.password}
+            - name: CONNECT_SSL_KEY_PASSWORD
+              valueFrom: *kafkaUserPasswordRef
+            - {name: CONNECT_PRODUCER_SECURITY_PROTOCOL, value: "SSL"}
+            - {name: CONNECT_PRODUCER_SSL_TRUSTSTORE_TYPE, value: "PEM"}
+            - {name: CONNECT_PRODUCER_SSL_TRUSTSTORE_LOCATION, value: "/etc/kafka-ca/ca.crt"}
+            - {name: CONNECT_PRODUCER_SSL_KEYSTORE_TYPE, value: "PKCS12"}
+            - {name: CONNECT_PRODUCER_SSL_KEYSTORE_LOCATION, value: "/etc/kafka-user/user.p12"}
+            - name: CONNECT_PRODUCER_SSL_KEYSTORE_PASSWORD
+              valueFrom: *kafkaUserPasswordRef
+            - name: CONNECT_PRODUCER_SSL_KEY_PASSWORD
+              valueFrom: *kafkaUserPasswordRef
+            - {name: CONNECT_ADMIN_SECURITY_PROTOCOL, value: "SSL"}
+            - {name: CONNECT_ADMIN_SSL_TRUSTSTORE_TYPE, value: "PEM"}
+            - {name: CONNECT_ADMIN_SSL_TRUSTSTORE_LOCATION, value: "/etc/kafka-ca/ca.crt"}
+            - {name: CONNECT_ADMIN_SSL_KEYSTORE_TYPE, value: "PKCS12"}
+            - {name: CONNECT_ADMIN_SSL_KEYSTORE_LOCATION, value: "/etc/kafka-user/user.p12"}
+            - name: CONNECT_ADMIN_SSL_KEYSTORE_PASSWORD
+              valueFrom: *kafkaUserPasswordRef
+            - name: CONNECT_ADMIN_SSL_KEY_PASSWORD
+              valueFrom: *kafkaUserPasswordRef
             - {name: CONNECT_CONFIG_PROVIDERS, value: "env"}
             - {name: CONNECT_CONFIG_PROVIDERS_ENV_CLASS, value: "org.apache.kafka.common.config.provider.EnvVarConfigProvider"}
             - name: POSTGRES_PASSWORD
@@ -159,6 +184,7 @@ spec:
             {{- toYaml .Values.cdc.resources | nindent 12 }}
           volumeMounts:
             - {name: kafka-ca, mountPath: /etc/kafka-ca, readOnly: true}
+            - {name: kafka-user, mountPath: /etc/kafka-user, readOnly: true}
             - {name: config, mountPath: /kafka/config}
             - {name: data, mountPath: /kafka/data}
             - {name: logs, mountPath: /kafka/logs}
@@ -166,6 +192,11 @@ spec:
       volumes:
         - name: kafka-ca
           secret: {secretName: eci-kafka-cluster-ca-cert}
+        - name: kafka-user
+          secret:
+            secretName: eci-kafka-kafka-connect
+            items:
+              - {key: user.p12, path: user.p12}
         - {name: config, emptyDir: {}}
         - {name: data, emptyDir: {}}
         - {name: logs, emptyDir: {}}

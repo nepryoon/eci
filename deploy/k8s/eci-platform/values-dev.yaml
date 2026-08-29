@@ -31,7 +31,7 @@ resources:
 
 dataPlane:
   postgres: {instances: 1, storage: 1Gi}
-  kafka: {replicas: 1, storage: 1Gi}
+  kafka: {replicas: 1, storage: 1Gi, topicPartitions: 1}
   openSearch:
     replicas: 1
     storage: 2Gi

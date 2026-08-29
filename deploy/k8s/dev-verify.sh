@@ -13,6 +13,10 @@ trap diagnostics ERR
 
 "$KUBECTL_BIN" -n data-plane wait --for=condition=Ready cluster/eci-postgres --timeout=15m
 "$KUBECTL_BIN" -n data-plane wait --for=condition=Ready kafka/eci-kafka --timeout=15m
+for user in kafka-connect embedding-worker sink-graph sink-vector sink-search; do
+  "$KUBECTL_BIN" -n data-plane wait --for=condition=Ready "kafkauser/eci-kafka-${user}" --timeout=5m
+done
+"$KUBECTL_BIN" -n data-plane wait --for=condition=Ready kafkatopic --all --timeout=5m
 "$KUBECTL_BIN" -n data-plane wait --for=condition=Available deployment/kafka-connect --timeout=10m
 "$KUBECTL_BIN" -n data-plane wait --for=condition=Available deployment/redis --timeout=10m
 "$KUBECTL_BIN" -n data-plane rollout status statefulset/minio --timeout=10m
@@ -54,7 +58,7 @@ spec:
         - |
           for endpoint in \
             eci-postgres-rw.data-plane.svc:5432 \
-            eci-kafka-kafka-bootstrap.data-plane.svc:9092 \
+            eci-kafka-kafka-bootstrap.data-plane.svc:9093 \
             kafka-connect.data-plane.svc:8083 \
             neo4j.data-plane.svc:7687 \
             qdrant.data-plane.svc:6333 \
@@ -82,4 +86,92 @@ spec:
 EOF
 "$KUBECTL_BIN" -n data-plane wait --for=jsonpath='{.status.phase}'=Succeeded pod/eci-connectivity --timeout=3m
 "$KUBECTL_BIN" -n data-plane logs eci-connectivity
+
+# Exercise both sides of the ACL boundary with the exact client identity used
+# by embedding-worker. The allowed topic must be describable; a topic owned by
+# sink-vector must be denied. The broker image is reused by immutable imageID.
+kafka_pod="$($KUBECTL_BIN -n data-plane get pod -l strimzi.io/component-type=kafka -o jsonpath='{.items[0].metadata.name}')"
+kafka_image_id="$($KUBECTL_BIN -n data-plane get pod "$kafka_pod" -o jsonpath='{.status.containerStatuses[?(@.name=="kafka")].imageID}')"
+kafka_image="${kafka_image_id#docker-pullable://}"
+test -n "$kafka_image" && [[ "$kafka_image" == *@sha256:* ]]
+"$KUBECTL_BIN" -n data-plane delete pod eci-kafka-acl-smoke --ignore-not-found --wait=true >/dev/null
+"$KUBECTL_BIN" apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: eci-kafka-acl-smoke
+  namespace: data-plane
+  labels:
+    app.kubernetes.io/name: eci-connectivity
+    app.kubernetes.io/part-of: eci
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    runAsGroup: 1001
+    fsGroup: 1001
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: acl-smoke
+      image: ${kafka_image}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+      command: [/bin/bash, -ec]
+      args:
+        - |
+          password="\$(cat /etc/kafka-user/user.password)"
+          umask 077
+          cat >/tmp/client.properties <<PROPERTIES
+          security.protocol=SSL
+          ssl.truststore.type=PEM
+          ssl.truststore.location=/etc/kafka-ca/ca.crt
+          ssl.keystore.type=PKCS12
+          ssl.keystore.location=/etc/kafka-user/user.p12
+          ssl.keystore.password=\${password}
+          ssl.key.password=\${password}
+          PROPERTIES
+          bin/kafka-producer-perf-test.sh \
+            --bootstrap-server eci-kafka-kafka-bootstrap.data-plane.svc:9093 \
+            --command-config /tmp/client.properties --topic outbox.event.CodeChunk.DLQ \
+            --num-records 1 --record-size 22 --throughput -1
+          set +e
+          bin/kafka-producer-perf-test.sh \
+            --bootstrap-server eci-kafka-kafka-bootstrap.data-plane.svc:9093 \
+            --command-config /tmp/client.properties --topic outbox.event.CodeEmbedding.DLQ \
+            --num-records 1 --record-size 22 --throughput -1 \
+            >/tmp/denied.log 2>&1
+          set -e
+          if ! grep -q 'TopicAuthorizationException' /tmp/denied.log || \
+             ! grep -q '^0 records sent' /tmp/denied.log; then
+            cat /tmp/denied.log >&2
+            echo 'cross-workload Kafka ACL unexpectedly allowed' >&2
+            exit 1
+          fi
+          echo 'Kafka mTLS identity and literal ACL isolation: PASS'
+      resources:
+        requests: {cpu: 10m, memory: 64Mi}
+        limits: {cpu: 500m, memory: 512Mi}
+      volumeMounts:
+        - {name: kafka-ca, mountPath: /etc/kafka-ca, readOnly: true}
+        - {name: kafka-user, mountPath: /etc/kafka-user, readOnly: true}
+        - {name: tmp, mountPath: /tmp}
+  volumes:
+    - name: kafka-ca
+      secret:
+        secretName: eci-kafka-cluster-ca-cert
+        items: [{key: ca.crt, path: ca.crt}]
+    - name: kafka-user
+      secret:
+        secretName: eci-kafka-embedding-worker
+        items:
+          - {key: user.p12, path: user.p12}
+          - {key: user.password, path: user.password}
+    - name: tmp
+      emptyDir: {}
+EOF
+"$KUBECTL_BIN" -n data-plane wait --for=jsonpath='{.status.phase}'=Succeeded pod/eci-kafka-acl-smoke --timeout=3m
+"$KUBECTL_BIN" -n data-plane logs eci-kafka-acl-smoke
 echo "eci-dev connectivity: PASS"

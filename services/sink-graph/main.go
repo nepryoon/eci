@@ -110,7 +110,7 @@ func main() {
 	retryProducer := &kafka.Writer{
 		Addr:                   kafka.TCP(brokers...),
 		Transport:              kafkaTransport.Transport,
-		AllowAutoTopicCreation: true,
+		AllowAutoTopicCreation: false,
 		BatchTimeout:           10 * time.Millisecond,
 	}
 	defer retryProducer.Close()

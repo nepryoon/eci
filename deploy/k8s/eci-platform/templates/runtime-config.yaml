@@ -14,6 +14,8 @@ data:
   RETRIEVAL_ENGINE_ADDR: {{ ternary ":50053" $.Values.routing.retrievalAddress (eq $namespace "query-plane") | quote }}
   ORCHESTRATOR_RETRIEVAL_ADDR: {{ $.Values.routing.retrievalAddress | quote }}
   ORCHESTRATOR_VLLM_URL: {{ $.Values.routing.vllmURL | quote }}
+  LLM_GATEWAY_ROUTES: {{ printf "eci-qwen3-coder-30b-a3b-fp8=%s|eci-qwen3-coder-30b-a3b-fp8" (trimSuffix "/v1" $.Values.routing.vllmURL) | quote }}
+  LLM_GATEWAY_DEFAULT: {{ printf "%s|eci-qwen3-coder-30b-a3b-fp8" (trimSuffix "/v1" $.Values.routing.vllmURL) | quote }}
   NEO4J_URI: {{ $.Values.routing.neo4jURI | quote }}
   QDRANT_HOST: {{ $.Values.routing.qdrantHost | quote }}
   QDRANT_GRPC_PORT: {{ $.Values.routing.qdrantGRPCPort | quote }}
@@ -24,7 +26,10 @@ data:
   REDIS_REQUIRE_AUTH: "true"
   KAFKA_BROKERS: {{ $.Values.routing.kafkaBrokers | quote }}
   KAFKA_TLS_ENABLED: "true"
+  KAFKA_MTLS_ENABLED: "true"
   KAFKA_TLS_CA_FILE: /etc/eci/kafka/ca.crt
+  KAFKA_TLS_CERT_FILE: /etc/eci/kafka/user.crt
+  KAFKA_TLS_KEY_FILE: /etc/eci/kafka/user.key
   OPENSEARCH_CA_FILE: /etc/eci/opensearch/ca.crt
 {{- end }}
 {{- end }}

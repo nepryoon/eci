@@ -2,6 +2,7 @@
 Stato: implemented
 Task-tree: T7.1 · Servizi: `deploy/k8s`, tutti i workload ECI · ADD: Modulo 4 §1.3, §2.1–§2.3, D8
 Contratti: nessuna modifica; `contracts/**` è consumato in sola lettura dalle immagini applicative
+ADR: ADR-0016 (CLI ingestion one-shot rappresentato senza fingere un server)
 
 ## 1. Obiettivo
 
@@ -44,7 +45,7 @@ operators:
   openSearchOperatorVersion: "2.8.0"
 dataPlane:
   postgres: {instances: 3, majorVersion: 17}
-  kafka: {replicas: 3, kraft: true}
+  kafka: {replicas: 3, kraft: true, topicPartitions: 12}
   neo4j: {edition: enterprise, coreReplicas: 3, gdsReplicas: 1}
   qdrant: {replicas: 3, replicationFactor: 2, shardNumber: 3}
   openSearch:
@@ -79,7 +80,8 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
 2. **Stateful production-like.** Given il profilo standard, When si renderizza,
    Then Kafka usa `KafkaNodePool` KRaft a 3 nodi/PV, CloudNativePG usa
    PostgreSQL 17 con 3 istanze, OpenSearch usa l'operator CR con Security
-   plugin e 3 nodi, Kafka Connect usa Debezium pinned con TLS verso Strimzi e
+   plugin e 3 nodi, Kafka Connect usa Debezium pinned con una propria identità
+   mTLS/ACL verso Strimzi e
    password PostgreSQL risolta dal Secret soltanto nel worker, mentre i valori
    Helm Neo4j e Qdrant descrivono core+read
    replica GDS e cluster distribuito a 3 repliche. Qdrant espone inoltre la
@@ -114,8 +116,11 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    NetworkPolicy non identifica un apiserver esterno, la sorgente portabile è
    `0.0.0.0/0` ma il selector resta limitato ai soli pod operator e il CIDR è
    restringibile per cluster.
-   I consumer Kafka usano TLS con la sola CA pubblica Strimzi montata
-   read-only; reader e writer falliscono se il trust manca. Retrieval e
+   Kafka espone soltanto il listener applicativo mTLS 9093 con simple
+   authorization deny-by-default. Connect e ogni consumer hanno un
+   `KafkaUser` distinto; topic e consumer group sono ACL literal senza
+   wildcard. Ogni consumer monta soltanto la CA pubblica del broker, il proprio `user.crt` e
+   `user.key`; reader e writer falliscono se trust o identità mancano. Retrieval e
    sink-search richiedono CA HTTP e credenziali OpenSearch, mentre Semantic
    Cache riceve esplicitamente la password del Redis `requirepass`. Nessuna CA
    privata viene copiata fra namespace.
@@ -131,17 +136,28 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    restano esplicitamente disabilitati, non sono sostituiti da fake o sleep.
    L'overlay resta marcato non-HA/non-production e non è prova di grant Neo4j
    Enterprise, GPU, performance o disaster recovery.
+   Il binario ingestion corrente è one-shot: il chart lo rappresenta come
+   template CronJob sospeso, con PVC sorgente read-only e scope Secret
+   enumerato, non come Deployment/listener inesistente. ADR-0016 e T7.1a
+   rendono esplicito che il worker pool D8 resta da implementare.
+   I server GPU richiedono un PVC modelli esterno read-only e ricevono path e
+   model/served ID canonici; nessun download di pesi o modello alternativo è
+   un fallback implicito.
 6. **Operatori/versioni verificabili.** Given checkout pulito, When si installano
    gli operatori, Then gli URL/chart sono pinned a Strimzi 1.2.0,
    CloudNativePG chart 0.29.0 (app 1.30.0), OpenSearch Operator 2.8.0,
    Neo4j chart/app 5.26.30 e Qdrant chart 1.19.0. CRD/API usate corrispondono alle
    release; ogni archivio è verificato con SHA-256 prima di Helm e ogni install
-   attende readiness con timeout bounded.
+   attende readiness con timeout bounded. Il chart Qdrant, che richiede un tag
+   semver nei values, passa sempre da un post-renderer che sostituisce
+   l'immagine runtime con il digest multi-arch verificato e rifiuta ogni
+   immagine mutabile residua.
 7. **Connettività reale.** Given il cluster dev pronto, When
    `task k8s:dev:verify` gira, Then un probe in-cluster risolve e raggiunge
    PostgreSQL, Kafka bootstrap, Kafka Connect con plugin PostgreSQL Debezium,
    Neo4j Bolt, Qdrant REST/gRPC, OpenSearch HTTPS, MinIO, Redis e OPA; inoltre
-   PostgreSQL riporta `wal_level=logical`. I workload applicativi abilitati
+   PostgreSQL riporta `wal_level=logical`; inoltre una prova mTLS Kafka
+   pubblica sulla propria DLQ e riceve un deny sulla DLQ sibling. I workload applicativi abilitati
    diventano Ready. Un
    componente assente/degradato produce exit non-zero e diagnostica mirata.
 8. **Rollback sicuro.** Given un upgrade applicativo fallito, When Helm supera
@@ -161,8 +177,10 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
 | digest chart Helm non corrispondente | installer termina prima della prima mutazione Helm |
 | immagine vuota, tag-only, `latest` o non pin-nata per digest | policy check non-zero |
 | applicazioni abilitate senza tutti i digest first-party | render Helm non-zero, nessun Deployment parziale |
+| ingestion template senza PVC/scope esterni | resta sospeso/non eseguito; nessun fixture o scope di default |
 | ConfigMap bootstrap Envoy o Secret TLS assente | Envoy non schedula/avvia; nessun fallback cleartext |
-| CA Kafka assente/non PEM con TLS abilitato | sink/worker terminano prima del consume-loop |
+| CA/certificato/chiave Kafka assente o invalido con mTLS abilitato | Connect/sink/worker terminano prima di usare il broker |
+| client Kafka tenta topic/gruppo sibling | broker nega tramite ACL literal; smoke e verifica falliscono se viene consentito |
 | CA o credenziali OpenSearch assenti su HTTPS | retrieval/sink-search terminano prima di servire/consumare |
 | password Redis assente con auth richiesta | semantic-cache termina prima di aprire il listener |
 | CRD operatore assente | apply dei CR attende/fallisce bounded; non passa a readiness dati |
@@ -170,7 +188,9 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
 | cluster con risorse insufficienti | stato non verificato; raccoglie describe/events senza ridurre soglie standard |
 | Neo4j Enterprise senza licenza | production-like richiede Secret/licenza; dev usa Community ed è marcato non equivalente |
 | OpenSearch TLS/admin secret errato | nessun fallback a security plugin disabilitato; verifica fallisce |
+| immagine Qdrant non coincide col tag atteso o resta mutabile | post-renderer/install termina prima dell'apply Helm |
 | Qdrant collection già esistente | bootstrap idempotente verifica shard/replica; mismatch fallisce, non ricrea dati |
+| PVC/path modello GPU assente | rollout GPU non supera startup/readiness; nessun download/fallback modello |
 | policy OPA assente/non valida | OPA o lo smoke decisionale falliscono; nessun avvio senza policy/default allow |
 | MinIO PVC non provisionabile | StatefulSet resta non Ready; nessun fallback automatico a `emptyDir` |
 | upgrade stateful con campo immutabile | runbook richiede backup/rollback e migrazione esplicita; niente delete automatico PVC |
@@ -185,13 +205,14 @@ source of truth, viste materializzate, PVC e audit. **Confini:** Envoy è l'unic
 ingresso; SecurityContext resta prodotto dal gateway autenticato; operatori
 controllano solo le risorse necessarie; values non sono una trust source.
 **Attacchi:** accesso diretto a store/GPU, service-account token theft,
-cross-namespace lateral movement, retag upstream, secret in manifest/log, teardown
+cross-namespace lateral movement, abuso di un client Kafka per leggere/scrivere
+topic sibling, retag upstream, secret in manifest/log, teardown
 ampio, fallback OpenSearch/OPA insicuro. **Mitigazioni:** ClusterIP,
-NetworkPolicy default-deny e allow-list, SA dedicati senza automount, pod
-security, secret references, pin di release/immagini, script con target fisso e
-fail-closed.
+NetworkPolicy default-deny e allow-list, SA dedicati senza automount, identità
+mTLS Kafka per workload con ACL literal, pod security, secret references, pin
+di release/immagini, script con target fisso e fail-closed.
 
-Non-goals: autoscaling HPA/KEDA (T7.2), collector/dashboard/alert completi
+Non-goals: worker ingestion long-running (T7.1a), autoscaling HPA/KEDA (T7.2), collector/dashboard/alert completi
 (T7.3), pipeline eval (T7.4), load test/SLO (T7.5), produzione cloud,
 provisioning DNS/certificati/GPU, accettazione licenza Neo4j per conto di un
 operatore, backup/restore production e modifica ADD/contratti. Il dev smoke non
@@ -228,6 +249,10 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
 - Supply chain: `scripts/k8s-validate.sh` richiede `name@sha256:<64 hex>`,
   rifiuta tag-only, `kind: Secret`, password/token/API key letterali e immagini
   senza digest. Task 3.53.1, Helm e kubeconform sono scaricati con checksum.
+- Kafka security: listener mTLS, `KafkaUser`/`KafkaTopic` con schemi locali,
+  ACL senza wildcard, identità distinte, TLS reader/writer e smoke allow/deny.
+- Vendor runtime: post-render Qdrant richiede esattamente l'immagine attesa e
+  rifiuta qualsiasi container non pin-nato per digest.
 - Integration locale: kind pinned, install operatori/chart pinned, apply
   atomic, `kubectl wait`, probe DNS/TCP/HTTP e raccolta eventi in errore.
 - Regression: `task build`, `task lint`, `task test`, `task guard`; nessuna GPU
@@ -248,30 +273,41 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
 
 - [x] Test §3/§7 registrati red-before-green e poi verdi.
 - [x] Chart standard/dev lintano e renderizzano deterministicamente.
-- [x] Catalogo D8 completo sotto opt-in con digest obbligatori; nessun
-      placeholder/sleep container e nessuna immagine ECI inesistente di default.
-- [x] Debezium/Kafka Connect è pinned, usa TLS verso Strimzi e non incorpora
+- [x] Catalogo delle implementazioni correnti completo sotto opt-in con digest
+      obbligatori; gap worker D8 dichiarato in ADR-0016/T7.1a, nessun
+      placeholder/sleep container o immagine ECI inesistente di default.
+- [x] Debezium/Kafka Connect è pinned, usa una propria identità mTLS/ACL verso Strimzi e non incorpora
       la password PostgreSQL nella ConfigMap del connector.
 - [x] OPA carica la policy canonica e lo smoke prova allow + deny fail-closed.
 - [x] MinIO standard è distribuito 4x100 GiB su PVC; dev è 1x1 GiB su PVC.
 - [x] Strimzi, CNPG, OpenSearch Operator, Neo4j e Qdrant hanno versioni pinned.
 - [x] Standard: Kafka/PG/OpenSearch 3 nodi, Neo4j core+GDS, Qdrant 3 nodi e
       collection con replication factor 2/shard 3.
-- [x] Tutti gli stateless hanno rollout, PDB, due topology spread, risorse e
-      probe reali; profilo dev dichiara onestamente le riduzioni.
+- [x] Tutti i server stateless hanno rollout, PDB, due topology spread, risorse
+      e probe reali; il CLI one-shot ha lifecycle Job, il profilo dev dichiara
+      onestamente le riduzioni.
 - [x] Nessun Secret/credenziale/tag mutable versionato; Envoy monta config,
       descriptor e TLS esterni sulla porta 8080 reale; NetworkPolicy e pod
       security passano i check fail-closed.
-- [x] Kafka reader/writer usano TLS+CA; OpenSearch usa HTTPS+CA+Basic Auth;
+- [x] Kafka Connect e reader/writer usano identità mTLS distinte e ACL literal
+      per topic/group; OpenSearch usa HTTPS+CA+Basic Auth;
       Redis `requirepass` è propagato esplicitamente, con unit test fail-closed.
 - [x] Secret applicativi e NetworkPolicy sono per-workload/per-destinazione;
       ogni archivio Helm terzo è verificato SHA-256 prima dell'installazione.
+- [x] Qdrant runtime e chart-test images sono post-renderizzate/verificate per
+      digest; il tag semver richiesto dal chart non arriva mai al kubelet.
+- [x] vLLM/TEI usano path modello canonici da PVC esterno read-only e startup
+      probe bounded; nessun download di pesi è implicito.
+- [x] Ingestion CLI è modellato come template Job sospeso con input/scope
+      espliciti, mai come server fittizio; deviazione D8 tracciata in ADR-0016.
 - [x] Kubeconform valida built-in e CRD contro schemi pinned.
 - [x] Cluster dev realmente creato; operatori/store Ready e connettività
       in-cluster verificata, oppure eventuale limite esterno/risorse è riportato
       senza dichiarare quel criterio soddisfatto.
 - [x] Runbook documenta install, upgrade atomico, rollback, backup boundary,
       teardown scoped e raccolta diagnostica.
+- [ ] T7.1a sostituisce il Job transitorio con worker Deployment 4–40 e
+      readiness/backpressure reali; solo allora lo stato può diventare verified.
 - [ ] `task build`, `task lint`, `task test`, `task guard`, `task k8s:validate`
       e CI verdi; SPEC `verified` solo dopo evidenza e review.
 

@@ -17,7 +17,7 @@ Results:
 - all pinned operator/chart releases deployed: PASS;
 - PostgreSQL, Kafka, Neo4j 5.26.30, Qdrant, OpenSearch, Redis, MinIO, OPA and
   Keycloak readiness: PASS;
-- Kafka Connect/Debezium 3.6.0.Final readiness, Strimzi TLS connection and
+- Kafka Connect/Debezium 3.6.0.Final readiness, distinct Strimzi mTLS identities and
   PostgreSQL connector plugin discovery: PASS;
 - PostgreSQL 17.6 `wal_level=logical`: PASS;
 - OPA canonical policy loaded; allow and missing-tenant fail-closed decisions:
@@ -25,7 +25,11 @@ Results:
 - MinIO dev StatefulSet backed by a 1 GiB PVC: PASS;
 - in-cluster DNS/TCP connectivity to every required store/service: PASS;
 - Pod Security admission label `restricted` on all six ECI namespaces: PASS;
-- deterministic Helm/policy/kubeconform/unit validation: PASS.
+- deterministic Helm/policy/kubeconform/unit validation: PASS;
+- five Kafka users and eleven explicit topics Ready; embedding-worker publish
+  to its own DLQ allowed and publish to sink-vector's DLQ denied: PASS;
+- Qdrant live pod spec and imageID match the registry-resolved immutable
+  runtime digest: PASS;
 - registry-resolved SHA-256 pins for every rendered third-party container:
   PASS; no non-existent ECI image is a default;
 - CloudNativePG webhook ingress on the operator-only selector/TCP 9443: PASS;
@@ -55,7 +59,7 @@ The later supply-chain/routing review fixes were verified at revision 6. The
 final least-privilege/supply-chain review fixes were then applied at ECI
 revision 8 after all five operator chart archives passed their checked-in
 SHA-256 gates and upgraded the real cluster releases to revision 6. The
-catalog of 189 application objects was exercised only with an explicit
+catalog of 205 application objects was exercised only with an explicit
 `registry.example.invalid` unit fixture; this proves template completeness and
 digest enforcement, not image publication or application readiness. Released
 applications remain opt-in and require real registry digests plus external
@@ -63,3 +67,10 @@ runtime/Envoy configuration. Per-workload Secret and NetworkPolicy assertions
 are deterministic render evidence, not application runtime evidence. The real
 connectivity probe was moved into data-plane with two dev-only OPA/Keycloak
 exceptions, removing the previous generic observability-to-datastore path.
+The final security review cycle upgraded ECI to revision 11 and every pinned
+vendor release to revision 8. Kafka now denies anonymous clients and uses five
+separate mTLS identities with literal topic/group ACLs; a real allowed/denied
+producer smoke passed. Qdrant is post-rendered to the verified multi-arch
+digest before Helm apply. The opt-in GPU manifests now require canonical model
+paths from a read-only external PVC; no GPU workload or model download was
+claimed as runtime evidence.

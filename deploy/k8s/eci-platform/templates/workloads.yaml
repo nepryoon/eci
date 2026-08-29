@@ -71,6 +71,10 @@ spec:
         - name: {{ $workload.name }}
           image: {{ include "eci.image" (dict "root" $ "workload" $workload) | quote }}
           imagePullPolicy: IfNotPresent
+          {{- with $workload.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           securityContext:
             {{- include "eci.containerSecurityContext" $ | nindent 12 }}
           ports:
@@ -94,6 +98,11 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 6
+          startupProbe:
+            tcpSocket: {port: service}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 180
           livenessProbe:
             tcpSocket: {port: service}
             periodSeconds: 10
@@ -109,20 +118,32 @@ spec:
             {{- if or (eq $workload.name "retrieval-engine") (eq $workload.name "sink-search") }}
             - {name: opensearch-ca, mountPath: /etc/eci/opensearch, readOnly: true}
             {{- end }}
+            {{- with $workload.modelPVC }}
+            - {name: models, mountPath: /models, readOnly: true}
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
         {{- if eq $workload.namespace "ingestion-plane" }}
         - name: kafka-ca
           secret:
-            secretName: {{ $.Values.routing.kafkaTLSSecret }}
-            items: [{key: ca.crt, path: ca.crt}]
+            secretName: {{ printf "%s-%s" $.Values.routing.kafkaTLSSecretPrefix $workload.name }}
+            items:
+              - {key: ca.crt, path: ca.crt}
+              - {key: user.crt, path: user.crt}
+              - {key: user.key, path: user.key}
         {{- end }}
         {{- if or (eq $workload.name "retrieval-engine") (eq $workload.name "sink-search") }}
         - name: opensearch-ca
           secret:
             secretName: {{ $.Values.routing.openSearchTLSSecret }}
             items: [{key: ca.crt, path: ca.crt}]
+        {{- end }}
+        {{- with $workload.modelPVC }}
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ . }}
+            readOnly: true
         {{- end }}
 ---
 apiVersion: v1

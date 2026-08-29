@@ -10,6 +10,7 @@ require "$HELM_BIN"
 require "$KUBECTL_BIN"
 require curl
 require sha256sum
+require python3
 
 CHART_DIR="$(mktemp -d)"
 trap 'rm -f "$CHART_DIR"/*.tgz; rmdir "$CHART_DIR"' EXIT
@@ -68,6 +69,7 @@ if [[ "${ECI_K8S_PROFILE:-production-like}" == dev ]]; then
     --wait --atomic --timeout 10m
   "$HELM_BIN" upgrade --install qdrant "$CHART_DIR/qdrant-1.19.0.tgz" \
     --namespace data-plane -f "$ROOT_DIR/deploy/k8s/vendor-values/qdrant-dev.yaml" \
+    --post-renderer "$ROOT_DIR/deploy/k8s/qdrant-post-renderer.sh" \
     --wait --atomic --timeout 10m
 else
   case "${NEO4J_ACCEPT_LICENSE_AGREEMENT:-}" in
@@ -91,5 +93,6 @@ else
     --wait --atomic --timeout 15m
   "$HELM_BIN" upgrade --install qdrant "$CHART_DIR/qdrant-1.19.0.tgz" \
     --namespace data-plane -f "$ROOT_DIR/deploy/k8s/vendor-values/qdrant.yaml" \
+    --post-renderer "$ROOT_DIR/deploy/k8s/qdrant-post-renderer.sh" \
     --wait --atomic --timeout 15m
 fi

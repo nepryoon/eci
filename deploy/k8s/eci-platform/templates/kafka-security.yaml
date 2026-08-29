@@ -1,0 +1,101 @@
+{{- if .Values.dataPlane.enabled }}
+{{- $applicationTopics := list
+  "outbox.event.CodeNode"
+  "outbox.event.CodeRelation"
+  "outbox.event.CodeChunk"
+  "outbox.event.CodeEmbedding"
+  "outbox.event.CodeNode.DLQ"
+  "outbox.event.CodeRelation.DLQ"
+  "outbox.event.CodeChunk.DLQ"
+  "outbox.event.CodeEmbedding.DLQ"
+}}
+{{- range $topic := $applicationTopics }}
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: {{ printf "eci-%s" ($topic | lower | replace "." "-") }}
+  namespace: data-plane
+  labels:
+    strimzi.io/cluster: eci-kafka
+    {{- include "eci.labels" $ | nindent 4 }}
+spec:
+  topicName: {{ $topic | quote }}
+  partitions: {{ $.Values.dataPlane.kafka.topicPartitions }}
+  replicas: {{ min 3 $.Values.dataPlane.kafka.replicas }}
+{{- end }}
+{{- range $topic := list
+  (dict "name" "eci_connect_configs" "partitions" 1)
+  (dict "name" "eci_connect_offsets" "partitions" 25)
+  (dict "name" "eci_connect_status" "partitions" 5)
+}}
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: {{ $topic.name | replace "_" "-" }}
+  namespace: data-plane
+  labels:
+    strimzi.io/cluster: eci-kafka
+    {{- include "eci.labels" $ | nindent 4 }}
+spec:
+  topicName: {{ $topic.name | quote }}
+  partitions: {{ $topic.partitions }}
+  replicas: {{ min 3 $.Values.dataPlane.kafka.replicas }}
+  config:
+    cleanup.policy: compact
+{{- end }}
+
+{{- $users := list
+  (dict "name" "kafka-connect" "group" "eci-connect"
+    "readTopics" (list "eci_connect_configs" "eci_connect_offsets" "eci_connect_status")
+    "writeTopics" (concat (list "eci_connect_configs" "eci_connect_offsets" "eci_connect_status") (slice $applicationTopics 0 4))
+    "clusterDescribe" true)
+  (dict "name" "embedding-worker" "group" "embedding-worker"
+    "readTopics" (list "outbox.event.CodeChunk")
+    "writeTopics" (list "outbox.event.CodeChunk" "outbox.event.CodeChunk.DLQ"))
+  (dict "name" "sink-graph" "group" "sink-graph"
+    "readTopics" (list "outbox.event.CodeNode" "outbox.event.CodeRelation")
+    "writeTopics" (list "outbox.event.CodeNode" "outbox.event.CodeRelation" "outbox.event.CodeNode.DLQ" "outbox.event.CodeRelation.DLQ"))
+  (dict "name" "sink-vector" "group" "sink-vector"
+    "readTopics" (list "outbox.event.CodeEmbedding")
+    "writeTopics" (list "outbox.event.CodeEmbedding" "outbox.event.CodeEmbedding.DLQ"))
+  (dict "name" "sink-search" "group" "sink-search"
+    "readTopics" (list "outbox.event.CodeChunk")
+    "writeTopics" (list "outbox.event.CodeChunk" "outbox.event.CodeChunk.DLQ"))
+}}
+{{- range $user := $users }}
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: eci-kafka-{{ $user.name }}
+  namespace: data-plane
+  labels:
+    strimzi.io/cluster: eci-kafka
+    {{- include "eci.labels" $ | nindent 4 }}
+spec:
+  authentication: {type: tls}
+  authorization:
+    type: simple
+    acls:
+      {{- range $topic := $user.readTopics }}
+      - resource: {type: topic, name: {{ $topic | quote }}, patternType: literal}
+        operations: [Describe, Read]
+        host: "*"
+      {{- end }}
+      {{- range $topic := $user.writeTopics }}
+      - resource: {type: topic, name: {{ $topic | quote }}, patternType: literal}
+        operations: [Describe, Write]
+        host: "*"
+      {{- end }}
+      - resource: {type: group, name: {{ $user.group | quote }}, patternType: literal}
+        operations: [Read]
+        host: "*"
+      {{- if $user.clusterDescribe }}
+      - resource: {type: cluster}
+        operations: [Describe]
+        host: "*"
+      {{- end }}
+{{- end }}
+{{- end }}

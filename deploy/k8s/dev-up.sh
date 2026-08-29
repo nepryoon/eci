@@ -81,4 +81,30 @@ ECI_K8S_PROFILE=dev HELM_BIN="$HELM_BIN" KUBECTL_BIN="$KUBECTL_BIN" "$ROOT_DIR/d
   --namespace query-plane --values "$ROOT_DIR/deploy/k8s/eci-platform/values-dev.yaml" \
   --wait --atomic --timeout 20m
 
+# Strimzi owns client private keys in data-plane. The dev bootstrap copies only
+# each workload's own public CA/certificate/private key into ingestion-plane;
+# it never copies a CA private key or shares one client identity across apps.
+for workload in embedding-worker sink-graph sink-vector sink-search; do
+  user="eci-kafka-${workload}"
+  "$KUBECTL_BIN" -n data-plane wait --for=condition=Ready "kafkauser/${user}" --timeout=5m
+  identity_dir="$ECI_DEV_TMP_DIR/$user"
+  mkdir -m 0700 "$identity_dir"
+  "$KUBECTL_BIN" -n data-plane get secret eci-kafka-cluster-ca-cert \
+    -o 'jsonpath={.data.ca\.crt}' | base64 --decode >"$identity_dir/ca.crt"
+  test -s "$identity_dir/ca.crt"
+  chmod 0600 "$identity_dir/ca.crt"
+  for key in user.crt user.key; do
+    json_key="${key//./\\.}"
+    "$KUBECTL_BIN" -n data-plane get secret "$user" -o "jsonpath={.data.${json_key}}" | \
+      base64 --decode >"$identity_dir/$key"
+    test -s "$identity_dir/$key"
+    chmod 0600 "$identity_dir/$key"
+  done
+  "$KUBECTL_BIN" -n ingestion-plane create secret generic "$user" \
+    --from-file=ca.crt="$identity_dir/ca.crt" \
+    --from-file=user.crt="$identity_dir/user.crt" \
+    --from-file=user.key="$identity_dir/user.key" \
+    --dry-run=client -o yaml | "$KUBECTL_BIN" apply -f - >/dev/null
+done
+
 echo "eci-dev installed; run task k8s:dev:verify"

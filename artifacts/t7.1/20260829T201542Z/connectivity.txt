@@ -1,5 +1,8 @@
 eci-postgres-rw.data-plane.svc:5432=PASS
-eci-kafka-kafka-bootstrap.data-plane.svc:9092=PASS
+eci-kafka-kafka-bootstrap.data-plane.svc:9093=PASS (mTLS listener)
+kafka-mtls-client-identity=PASS
+kafka-own-dlq-publish=PASS
+kafka-cross-workload-dlq-publish=DENIED (PASS)
 kafka-connect.data-plane.svc:8083=PASS
 debezium-postgresql-plugin=PASS
 neo4j.data-plane.svc:7687=PASS

@@ -446,7 +446,7 @@ static_resources:
               - endpoint:
                   address:
                     socket_address:
-                      address: retrieval-engine
+                      address: retrieval-engine.query-plane.svc.cluster.local
                       port_value: 50053
     # A separate cluster gives public direct ImpactAnalysis streams an active
     # request circuit breaker. Rate limits bound starts; this bounds occupancy.
@@ -469,7 +469,7 @@ static_resources:
               - endpoint:
                   address:
                     socket_address:
-                      address: retrieval-engine
+                      address: retrieval-engine.query-plane.svc.cluster.local
                       port_value: 50053
 
 admin:

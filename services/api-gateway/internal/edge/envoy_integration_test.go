@@ -895,7 +895,11 @@ func renderIntegrationEnvoyConfig(t *testing.T, root string, helperPort, grpcPor
 	}
 	config := string(contents)
 	config = strings.ReplaceAll(config, "address: api-gateway", "address: "+testcontainers.HostInternal)
-	config = strings.ReplaceAll(config, "address: retrieval-engine", "address: "+testcontainers.HostInternal)
+	config = strings.ReplaceAll(
+		config,
+		"address: retrieval-engine.query-plane.svc.cluster.local",
+		"address: "+testcontainers.HostInternal,
+	)
 	config = strings.ReplaceAll(config, "8081", strconv.Itoa(helperPort))
 	config = strings.ReplaceAll(config, "50053", strconv.Itoa(grpcPort))
 	config = strings.ReplaceAll(config, "request_headers_timeout: 5s", "request_headers_timeout: 0.2s")

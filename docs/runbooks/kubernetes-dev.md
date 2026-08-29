@@ -69,22 +69,55 @@ OpenSearch identities, and each sink has a distinct Secret. Workloads without
 credentials receive no Secret. Missing values are deployment errors; do not
 restore localhost defaults or reuse a sibling Secret.
 
+Provision a read-only `eci-gpu-models` PVC before enabling GPU workloads. It
+must contain these preloaded paths: `/models/qwen3-coder-30b-a3b-instruct-fp8`,
+`/models/jina-code-embeddings-1.5b` and `/models/bge-reranker-v2-m3`. The chart
+passes those paths to vLLM/TEI explicitly and has no network egress fallback
+for model download. Missing model data therefore keeps the rollout Not Ready;
+it is never replaced with a different model or an online mutable revision.
+
+The current ingestion binary is a one-shot CLI, so the chart deliberately
+renders `ingestion-template` as a suspended CronJob and never as a fake TCP
+server. Before cloning it, provision the read-only `eci-ingestion-source` PVC
+with the exact source snapshot and create `eci-runtime-ingestion` containing
+only `POSTGRES_DSN`, `ECI_TENANT_ID`, `ECI_REPOSITORY` and `ECI_ACL_GROUP`.
+Then create one bounded Job explicitly:
+
+```bash
+kubectl -n ingestion-plane create job ingestion-<commit-id> \
+  --from=cronjob/ingestion-template
+kubectl -n ingestion-plane wait --for=condition=complete \
+  job/ingestion-<commit-id> --timeout=1h
+```
+
+Do not unsuspend the schedule or run two scopes through the same prepared
+Secret/PVC. ADR-0016 records the boundary; T7.1a replaces it with the
+authenticated durable worker pool required by D8 and T7.2 HPA.
+
 Application enablement is a two-phase operation because the Strimzi and
-OpenSearch operators create their CAs only after the infrastructure CRs exist.
-After the infrastructure release is Ready, copy only the public `ca.crt` key
-to the consumer namespaces through the platform secret manager. The expected
-targets are `eci-kafka-client-ca` in `ingestion-plane` and
-`eci-opensearch-client-ca` in both `query-plane` and `ingestion-plane`.
-Never copy `ca.key`, `ca.password`, or an entire operator Secret. A local
-one-off equivalent is:
+OpenSearch operators create identities/CAs only after the infrastructure CRs
+exist. After the infrastructure release is Ready, the Strimzi User Operator
+creates a different mTLS Secret for every Kafka client. Build one scoped
+Secret per consumer in `ingestion-plane`: take the broker trust `ca.crt` from
+`eci-kafka-cluster-ca-cert`, and only that user's `user.crt` and `user.key`
+from its generated `KafkaUser` Secret. Retain names
+`eci-kafka-embedding-worker`, `eci-kafka-sink-graph`,
+`eci-kafka-sink-vector` and `eci-kafka-sink-search`. Never copy `ca.key`,
+`ca.password`, another user's key, or the whole cluster-CA Secret.
+`dev-up.sh` performs this scoped copy for the local cluster after all
+`KafkaUser` resources are Ready.
+Production replication must be continuously reconciled: when Strimzi rotates
+a client certificate or broker CA, the secret manager updates the composite
+target and the deployment controller rolls that one workload. A stale or
+partially updated identity is a fail-closed outage, never a reason to disable
+mTLS or share another client's Secret.
+
+OpenSearch clients need only the public HTTP CA. A local one-off equivalent
+for that separate trust material is:
 
 ```bash
 work_dir="$(mktemp -d)"
 trap 'rm -f "$work_dir/ca.crt"; rmdir "$work_dir"' EXIT
-kubectl -n data-plane get secret eci-kafka-cluster-ca-cert \
-  -o jsonpath='{.data.ca\.crt}' | base64 --decode >"$work_dir/ca.crt"
-kubectl -n ingestion-plane create secret generic eci-kafka-client-ca \
-  --from-file=ca.crt="$work_dir/ca.crt" --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n data-plane get secret eci-opensearch-ca \
   -o jsonpath='{.data.ca\.crt}' | base64 --decode >"$work_dir/ca.crt"
 for namespace in query-plane ingestion-plane; do
@@ -93,8 +126,10 @@ for namespace in query-plane ingestion-plane; do
 done
 ```
 
-The workloads mount those Secrets read-only. `KAFKA_TLS_ENABLED=true` requires
-the CA on both kafka-go readers and writers; HTTPS OpenSearch requires CA,
+The workloads mount those Secrets read-only. `KAFKA_MTLS_ENABLED=true`
+requires a valid CA plus the workload's certificate/private-key pair on both
+kafka-go readers and writers; the broker denies unauthenticated clients and
+literal `KafkaUser` ACLs deny sibling topics/groups. HTTPS OpenSearch requires CA,
 username and password. Redis is deployed with `requirepass`, so Semantic Cache
 also requires the explicit `redis-password` mapping. Each client fails before
 serving/consuming if its trust or credential input is absent.
@@ -126,7 +161,9 @@ task k8s:dev:verify
 ```
 
 Verification waits with bounded timeouts and runs DNS/TCP probes from inside
-the cluster. It also verifies `wal_level=logical` and loads the Kafka Connect
+the cluster. It also verifies `wal_level=logical`, waits for every Kafka topic
+and mTLS user, proves an allowed DLQ publish and a denied cross-workload DLQ
+publish with the embedding-worker identity, and loads the Kafka Connect
 plugin inventory to prove the PostgreSQL Debezium connector is available. On
 failure it prints pod state and the latest events. Inspect a
 component with `kubectl -n <namespace> describe ...` and `kubectl logs` before
@@ -150,7 +187,10 @@ NetworkPolicy cannot identify an external apiserver, so its portable source is
 `0.0.0.0/0`; this does not expose a Service externally and operators should
 narrow the CIDR when their control-plane source ranges are known.
 
-Kafka Connect is Ready before application migrations by design, but the
+Kafka Connect authenticates with `eci-kafka-kafka-connect`; its PKCS#12
+password is read only from the Strimzi-generated Secret. Its ACLs cover the
+exact three Connect internal topics, `eci-connect` group and four outbox
+output topics—never a wildcard. Kafka Connect is Ready before application migrations by design, but the
 `eci-outbox-connector` is not registered automatically against an empty
 database. After the checked-in SQL migrations have created `public.outbox`, a
 platform deployment step must submit the config-only JSON stored in ConfigMap

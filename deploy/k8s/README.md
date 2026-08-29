@@ -35,14 +35,32 @@ must provision the per-workload Secret named in `applications.workloads` with
 only the explicitly mapped keys for that process. NetworkPolicy likewise
 selects the source workload, destination workload/store and TCP port; namespace
 membership alone grants no datastore access.
-Kafka consumers mount only the Strimzi public cluster CA and always use TLS;
+
+The current Rust ingestion executable is truthfully packaged as the suspended
+`ingestion-template` one-shot Job template, not as a listening Deployment. It
+requires an external read-only source PVC and a scope-only per-workload Secret.
+ADR-0016 records this temporary boundary; T7.1a owns the durable authenticated
+worker runtime required before CPU HPA can be claimed.
+Kafka uses a TLS-authenticated listener with simple authorization. Kafka
+Connect and every consumer have a distinct Strimzi `KafkaUser`; consumers
+mount the broker public `ca.crt` plus only their own `user.crt` and `user.key`, and literal ACLs
+limit topic/group access. `dev-up.sh` copies each generated identity into the
+consumer namespace without ever copying a CA private key.
 OpenSearch clients mount only the generated public HTTP CA and require Basic
 Auth. Semantic Cache maps `redis-password` explicitly to `REDIS_PASSWORD`.
 Missing keys or CA files remain a fail-closed rollout failure.
 
 `install-operators.sh` downloads every pinned Helm archive from its canonical
 HTTPS release URL into a temporary directory and verifies its repository
-SHA-256 before Helm sees it. A version-only repository lookup is not used.
+SHA-256 before Helm sees it. The Qdrant chart is additionally passed through a
+fail-closed post-renderer that replaces the chart-compatible tag with the
+registry-resolved multi-arch image digest and rejects every remaining mutable
+image. A version-only repository lookup is not used.
+
+GPU workloads consume an externally prepared, read-only `eci-gpu-models` PVC.
+Their commands name the ADD-prescribed Qwen3-Coder FP8, Jina code embedding
+and BGE reranker paths explicitly; the default-deny profile never downloads
+model weights at startup.
 
 Envoy is not a generic application pod. When enabled it mounts the externally
 provisioned `eci-envoy-config` ConfigMap (`envoy.yaml` and binary
@@ -50,7 +68,8 @@ provisioned `eci-envoy-config` ConfigMap (`envoy.yaml` and binary
 the checked-in bootstrap on port 8080. The runbook contains the exact creation
 commands; the chart never synthesizes a certificate or a descriptor.
 
-Kafka Connect runs the pinned Debezium image over Strimzi TLS. The connector
+Kafka Connect runs the pinned Debezium image with its own Strimzi mTLS
+identity and literal ACLs. The connector
 configuration is stored separately in `eci-debezium-connector`, uses the
 Kafka environment config provider for the PostgreSQL password, and is not
 submitted before the `public.outbox` migration exists. See the runbook for the

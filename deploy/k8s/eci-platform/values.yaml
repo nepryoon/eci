@@ -62,14 +62,6 @@ applications:
       profile: io
       runtimeSecret: eci-runtime-semantic-cache
       secretEnv: [{name: REDIS_PASSWORD, key: REDIS_PASSWORD}]
-    - name: ingestion
-      namespace: ingestion-plane
-      port: 9100
-      metricsPort: 9100
-      replicas: 4
-      profile: cpu
-      runtimeSecret: eci-runtime-ingestion
-      secretEnv: [{name: POSTGRES_DSN, key: POSTGRES_DSN}]
     - name: embedding-worker
       namespace: ingestion-plane
       port: 9102
@@ -108,9 +100,42 @@ applications:
         - {name: POSTGRES_DSN, key: POSTGRES_DSN}
         - {name: OPENSEARCH_USERNAME, key: OPENSEARCH_USERNAME}
         - {name: OPENSEARCH_PASSWORD, key: OPENSEARCH_PASSWORD}
-    - {name: vllm, namespace: gpu-plane, image: "vllm/vllm-openai@sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14", port: 8000, metricsPort: 8000, replicas: 1, profile: gpu-vllm}
-    - {name: embedder, namespace: gpu-plane, image: "ghcr.io/huggingface/text-embeddings-inference@sha256:274104f179b88e2fdfc20e4d1e5273098f1cbcc2385fdef1687558413af85639", port: 80, metricsPort: 80, replicas: 1, profile: gpu-small}
-    - {name: reranker, namespace: gpu-plane, image: "ghcr.io/huggingface/text-embeddings-inference@sha256:274104f179b88e2fdfc20e4d1e5273098f1cbcc2385fdef1687558413af85639", port: 80, metricsPort: 80, replicas: 1, profile: gpu-small}
+    - name: vllm
+      namespace: gpu-plane
+      image: "vllm/vllm-openai@sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14"
+      port: 8000
+      metricsPort: 8000
+      replicas: 1
+      profile: gpu-vllm
+      modelPVC: eci-gpu-models
+      args:
+        - /models/qwen3-coder-30b-a3b-instruct-fp8
+        - --served-model-name
+        - eci-qwen3-coder-30b-a3b-fp8
+        - --host
+        - 0.0.0.0
+        - --port
+        - "8000"
+        - --kv-cache-dtype
+        - fp8
+    - name: embedder
+      namespace: gpu-plane
+      image: "ghcr.io/huggingface/text-embeddings-inference@sha256:274104f179b88e2fdfc20e4d1e5273098f1cbcc2385fdef1687558413af85639"
+      port: 80
+      metricsPort: 80
+      replicas: 1
+      profile: gpu-small
+      modelPVC: eci-gpu-models
+      args: [--model-id, /models/jina-code-embeddings-1.5b]
+    - name: reranker
+      namespace: gpu-plane
+      image: "ghcr.io/huggingface/text-embeddings-inference@sha256:274104f179b88e2fdfc20e4d1e5273098f1cbcc2385fdef1687558413af85639"
+      port: 80
+      metricsPort: 80
+      replicas: 1
+      profile: gpu-small
+      modelPVC: eci-gpu-models
+      args: [--model-id, /models/bge-reranker-v2-m3]
 
 edge:
   enabled: true
@@ -131,8 +156,8 @@ routing:
   rerankerServiceURL: http://reranker.gpu-plane.svc.cluster.local:80
   openSearchURL: https://eci-opensearch.data-plane.svc.cluster.local:9200
   redisAddress: redis.data-plane.svc.cluster.local:6379
-  kafkaBrokers: eci-kafka-kafka-bootstrap.data-plane.svc.cluster.local:9092
-  kafkaTLSSecret: eci-kafka-client-ca
+  kafkaBrokers: eci-kafka-kafka-bootstrap.data-plane.svc.cluster.local:9093
+  kafkaTLSSecretPrefix: eci-kafka
   openSearchTLSSecret: eci-opensearch-client-ca
   vllmURL: http://vllm.gpu-plane.svc.cluster.local:8000/v1
 
@@ -154,6 +179,17 @@ resources:
     limits: {cpu: "2", memory: 2Gi}
 
 batch:
+  ingestion:
+    schedule: "0 0 31 2 *"
+    sourcePVC: eci-ingestion-source
+    sourcePath: /input/source
+    runtimeSecret: eci-runtime-ingestion
+    secretEnv:
+      - {name: POSTGRES_DSN, key: POSTGRES_DSN}
+      - {name: ECI_TENANT_ID, key: ECI_TENANT_ID}
+      - {name: ECI_REPOSITORY, key: ECI_REPOSITORY}
+      - {name: ECI_ACL_GROUP, key: ECI_ACL_GROUP}
+    profile: cpu
   gds:
     schedule: "0 2 * * *"
     profile: io
@@ -181,6 +217,7 @@ dataPlane:
     replicas: 3
     version: "4.3.1"
     storage: 500Gi
+    topicPartitions: 12
   openSearch:
     replicas: 3
     version: "3.2.0"

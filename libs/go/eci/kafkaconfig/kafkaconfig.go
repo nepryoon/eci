@@ -25,6 +25,11 @@ func FromEnvironment() (Config, error) {
 		return Config{}, fmt.Errorf("KAFKA_TLS_ENABLED must be a boolean: %w", err)
 	}
 	if !enabled {
+		if mtlsEnabled, mtlsErr := strconv.ParseBool(envOrDefault("KAFKA_MTLS_ENABLED", "false")); mtlsErr != nil {
+			return Config{}, fmt.Errorf("KAFKA_MTLS_ENABLED must be a boolean: %w", mtlsErr)
+		} else if mtlsEnabled {
+			return Config{}, fmt.Errorf("KAFKA_TLS_ENABLED must be true when Kafka mTLS is enabled")
+		}
 		return Config{}, nil
 	}
 	caFile := strings.TrimSpace(os.Getenv("KAFKA_TLS_CA_FILE"))
@@ -40,6 +45,22 @@ func FromEnvironment() (Config, error) {
 		return Config{}, fmt.Errorf("Kafka CA file contains no PEM certificates")
 	}
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}
+	mtlsEnabled, err := strconv.ParseBool(envOrDefault("KAFKA_MTLS_ENABLED", "false"))
+	if err != nil {
+		return Config{}, fmt.Errorf("KAFKA_MTLS_ENABLED must be a boolean: %w", err)
+	}
+	if mtlsEnabled {
+		certFile := strings.TrimSpace(os.Getenv("KAFKA_TLS_CERT_FILE"))
+		keyFile := strings.TrimSpace(os.Getenv("KAFKA_TLS_KEY_FILE"))
+		if certFile == "" || keyFile == "" {
+			return Config{}, fmt.Errorf("KAFKA_TLS_CERT_FILE and KAFKA_TLS_KEY_FILE are required when Kafka mTLS is enabled")
+		}
+		certificate, loadErr := tls.LoadX509KeyPair(certFile, keyFile)
+		if loadErr != nil {
+			return Config{}, fmt.Errorf("Kafka client identity: %w", loadErr)
+		}
+		tlsConfig.Certificates = []tls.Certificate{certificate}
+	}
 	return Config{
 		Dialer:    &kafka.Dialer{Timeout: 10 * time.Second, DualStack: true, TLS: tlsConfig},
 		Transport: &kafka.Transport{TLS: tlsConfig.Clone()},

@@ -77,11 +77,15 @@ spec:
     version: {{ .Values.dataPlane.kafka.version | quote }}
     metadataVersion: "4.3-IV0"
     listeners:
-      - name: internal
-        port: 9092
+      - name: clients
+        port: 9093
         type: internal
         tls: true
+        authentication: {type: tls}
+    authorization:
+      type: simple
     config:
+      auto.create.topics.enable: false
       offsets.topic.replication.factor: {{ min 3 .Values.dataPlane.kafka.replicas }}
       transaction.state.log.replication.factor: {{ min 3 .Values.dataPlane.kafka.replicas }}
       transaction.state.log.min.isr: {{ min 2 .Values.dataPlane.kafka.replicas }}

@@ -3,6 +3,9 @@ image:
   repository: docker.io/qdrant/qdrant
   tag: v1.19.0
   useUnprivilegedImage: true
+chartTests:
+  dbInteraction:
+    image: registry.suse.com/bci/bci-base@sha256:b03880998771ffd522e8808bc01a31098378f82e7c4552273e336de3742109f0
 config:
   cluster:
     enabled: false
