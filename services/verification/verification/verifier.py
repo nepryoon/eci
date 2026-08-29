@@ -23,6 +23,7 @@ from verification.audit import (
 
 MAX_SCOPE_VALUES = 128
 MAX_SCOPE_VALUE_BYTES = 256
+MAX_NODE_ID_LENGTH = 1024
 
 _citation_access_counter = metrics.get_meter(__name__).create_counter(
     "eci_verification_citation_access_total",
@@ -36,20 +37,20 @@ _audit_append_counter = metrics.get_meter(__name__).create_counter(
 
 class SymbolClaim(BaseModel):
     model_config = ConfigDict(frozen=True)
-    node_id: str = Field(min_length=1)
+    node_id: str = Field(min_length=1, max_length=MAX_NODE_ID_LENGTH)
 
 
 class RelationClaim(BaseModel):
     model_config = ConfigDict(frozen=True)
-    source_id: str = Field(min_length=1)
-    target_id: str = Field(min_length=1)
+    source_id: str = Field(min_length=1, max_length=MAX_NODE_ID_LENGTH)
+    target_id: str = Field(min_length=1, max_length=MAX_NODE_ID_LENGTH)
     edge_type: str = Field(min_length=1)
     max_depth: int = Field(default=1, ge=1)
 
 
 class CitationClaim(BaseModel):
     model_config = ConfigDict(frozen=True)
-    node_id: str = Field(min_length=1)
+    node_id: str = Field(min_length=1, max_length=MAX_NODE_ID_LENGTH)
     repo: str = Field(min_length=1)
     path: str = Field(min_length=1)
     start_line: int = Field(ge=1)
@@ -80,7 +81,7 @@ class CandidateAnswer(BaseModel):
 
 class SymbolEvidence(BaseModel):
     model_config = ConfigDict(frozen=True)
-    node_id: str = Field(min_length=1)
+    node_id: str = Field(min_length=1, max_length=MAX_NODE_ID_LENGTH)
     tenant_id: str = Field(min_length=1)
     repo: str = Field(min_length=1)
     acl_group: str = Field(min_length=1)
@@ -218,7 +219,13 @@ class Verifier:
 
             for claim in candidate.relation_claims:
                 depth = min(claim.max_depth, self._config.max_relation_depth)
-                if not self._relation(claim, depth, scope):
+                endpoints_authorized = True
+                for node_id in (claim.source_id, claim.target_id):
+                    if node_id not in evidence:
+                        evidence[node_id] = self._symbol(node_id, scope)
+                    if evidence[node_id] is None:
+                        endpoints_authorized = False
+                if not endpoints_authorized or not self._relation(claim, depth, scope):
                     detail = f"{claim.source_id} -[{claim.edge_type}]-> {claim.target_id}"
                     issues.append(self._issue("relation-nonexistent", "relation", detail))
                     feedback.append(f"relation '{detail}' does not exist within depth {depth}")

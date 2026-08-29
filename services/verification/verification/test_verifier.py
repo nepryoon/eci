@@ -179,6 +179,36 @@ def test_backend_scope_bypass_is_rejected_without_provenance_leak():
     assert "secret" not in result.model_dump_json()
 
 
+def test_relation_endpoints_are_scope_checked_before_backend_relation_query():
+    class LeakyStore(Store):
+        def __init__(self):
+            super().__init__()
+            self.relation_queries = 0
+
+        def symbol(self, node_id, scope):
+            self.scopes.append(scope)
+            return self.symbols.get(node_id)
+
+        def relation_exists(self, source_id, target_id, edge_type, max_depth, scope):
+            self.relation_queries += 1
+            return True
+
+    store = LeakyStore()
+    result = verifier(store).verify(
+        candidate(
+            symbol_claims=[],
+            relation_claims=[RelationClaim(
+                source_id="foreign", target_id="A", edge_type="CALLS"
+            )],
+            citations=[],
+        ),
+        security_context(),
+    )
+    assert result.outcome == "regenerated"
+    assert result.issues[0].code == "relation-nonexistent"
+    assert store.relation_queries == 0
+
+
 def test_symbol_hallucination_requests_regeneration_with_feedback():
     result = verifier().verify(
         candidate(symbol_claims=[SymbolClaim(node_id="missing")]), security_context()
@@ -283,6 +313,15 @@ def test_models_and_config_reject_invalid_values():
         CitationClaim(
             node_id="A", repo="r", path="p", start_line=4,
             end_line=2, commit_sha="c",
+        )
+    with pytest.raises(ValidationError):
+        CitationClaim(
+            node_id="x" * 1025,
+            repo="r",
+            path="p",
+            start_line=1,
+            end_line=1,
+            commit_sha="c",
         )
     with pytest.raises(ValueError):
         VerificationConfig(max_regenerations=1)
