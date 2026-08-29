@@ -68,9 +68,23 @@ static_resources:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
                               stat_prefix: eci_edge_sse
                               token_bucket:
-                                max_tokens: 10
-                                tokens_per_fill: 10
+                                max_tokens: 1000
+                                tokens_per_fill: 1000
                                 fill_interval: 1s
+                              descriptors:
+                                - entries:
+                                    - key: authenticated_caller
+                                      value: ""
+                                  token_bucket:
+                                    max_tokens: 10
+                                    tokens_per_fill: 10
+                                    fill_interval: 1s
+                              max_dynamic_descriptors: 10000
+                              rate_limits:
+                                - actions:
+                                    - request_headers:
+                                        header_name: x-eci-rate-limit-key
+                                        descriptor_key: authenticated_caller
                               filter_enabled:
                                 default_value:
                                   numerator: 100
@@ -99,9 +113,23 @@ static_resources:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
                               stat_prefix: eci_edge_retrieval
                               token_bucket:
-                                max_tokens: 10
-                                tokens_per_fill: 10
+                                max_tokens: 1000
+                                tokens_per_fill: 1000
                                 fill_interval: 1s
+                              descriptors:
+                                - entries:
+                                    - key: authenticated_caller
+                                      value: ""
+                                  token_bucket:
+                                    max_tokens: 10
+                                    tokens_per_fill: 10
+                                    fill_interval: 1s
+                              max_dynamic_descriptors: 10000
+                              rate_limits:
+                                - actions:
+                                    - request_headers:
+                                        header_name: x-eci-rate-limit-key
+                                        descriptor_key: authenticated_caller
                               filter_enabled:
                                 default_value:
                                   numerator: 100
@@ -133,6 +161,7 @@ static_resources:
                           - remove: traceparent
                           - remove: tracestate
                           - remove: baggage
+                          - remove: x-eci-rate-limit-key
                   - name: envoy.filters.http.ext_authz
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
@@ -159,6 +188,8 @@ static_resources:
                                 ignore_case: true
                               - exact: traceparent
                                 ignore_case: true
+                              - exact: x-eci-rate-limit-key
+                                ignore_case: true
                           allowed_client_headers:
                             patterns:
                               - exact: content-type
@@ -179,6 +210,14 @@ static_resources:
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
                       stat_prefix: eci_edge
+                  # The opaque caller partition is consumed only by the local
+                  # limiter and is not application metadata.
+                  - name: envoy.filters.http.header_mutation
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
+                      mutations:
+                        request_mutations:
+                          - remove: x-eci-rate-limit-key
                   - name: envoy.filters.http.buffer
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.buffer.v3.Buffer
@@ -200,6 +239,19 @@ static_resources:
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              common_tls_context:
+                alpn_protocols: ["h2", "http/1.1"]
+                tls_params:
+                  tls_minimum_protocol_version: TLSv1_2
+                tls_certificates:
+                  - certificate_chain:
+                      filename: /etc/envoy/tls/tls.crt
+                    private_key:
+                      filename: /etc/envoy/tls/tls.key
   clusters:
     - name: api_gateway
       type: STRICT_DNS

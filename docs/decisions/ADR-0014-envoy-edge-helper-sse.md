@@ -37,10 +37,13 @@ rottura wire/semantica non richiesta dal task.
 
 ## Decisione
 
-Envoy è l'unico listener pubblico. La catena HTTP è:
+Envoy è l'unico listener pubblico e accetta solo TLS (minimo TLS 1.2, ALPN
+HTTP/2/HTTP/1.1); certificato e chiave arrivano da Secret montato, mai dal
+repository. La catena HTTP è:
 
 ```text
-header sanitization → ext_authz (fail closed) → bearer stripping → local rate limit
+header sanitization → ext_authz (fail closed) → bearer stripping
+→ caller-partitioned local rate limit → limiter-key stripping
 → grpc_json_transcoder (route JSON/gRPC) → router
 ```
 
@@ -64,8 +67,12 @@ al client gRPC e converte ogni `ImpactAnalysisEvent` con `protojson` in un
 frame `data: <json>\n\n`, con `Content-Type: text/event-stream`, flush per
 evento e cancellazione/deadline propagate.
 
-Il rate limit T6.6 è un token bucket locale per istanza Envoy con valori
-configurabili, risposta 429 e `Retry-After`. È un limite edge di protezione;
+Il rate limit T6.6 usa bucket dinamici locali per caller autenticato, derivati
+da SHA-256 della coppia canonica `(tenant_id, user_id)` prodotta dal validator:
+il valore opaco non proviene dal client, ha cardinalità massima bounded ed è
+rimosso prima dell'upstream. Un bucket condiviso più ampio resta come
+load-shedding per istanza. I limiti producono 429 e `Retry-After`. È un limite
+edge di protezione;
 quota globale per user/team/model del LLM Gateway resta responsabilità del
 bounded context LLM. Il limite effettivo aggregato scala con le repliche e sarà
 dimensionato insieme all'HPA in T7.1/T7.2.
@@ -81,6 +88,8 @@ Fonti primarie:
 
 - Un solo validatore OIDC/claim produce l'autorità; prompt, body e header
   esterni non possono costruire lo scope.
+- Bearer e chiave bucket non attraversano il boundary verso i servizi interni;
+  il listener pubblico rifiuta il cleartext prima dell'autenticazione.
 - JSON unary e SSE hanno due data path edge, ma condividono autenticazione,
   deadline, metadata e test end-to-end.
 - L'API JSON auto-mapped è stabile ma non usa URL REST cosmetici; annotations
@@ -93,6 +102,7 @@ Fonti primarie:
 
 Il rollback rimuove il listener Envoy senza cambiare servizi/contratti interni.
 Non è consentito esporre direttamente helper o porte gRPC come workaround.
-Config e immagini sono pinnate; secret OIDC provengono da env/Secret. Header
+Config e immagini sono pinnate; secret OIDC e chiavi TLS provengono da
+env/Secret o volume Secret. Header
 forgiati vengono rimossi prima di ext_authz e mai concatenati. Nessun body
 viene inviato al servizio auth, evitando prompt/body exfiltration.

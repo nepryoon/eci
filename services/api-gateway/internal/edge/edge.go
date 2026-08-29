@@ -4,6 +4,7 @@ package edge
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -33,6 +34,7 @@ import (
 const (
 	SecurityContextHeader      = "Eci-Security-Context-Bin"
 	SecurityContextMetadataKey = "eci-security-context-bin"
+	RateLimitKeyHeader         = "X-Eci-Rate-Limit-Key"
 	SSEPath                    = "/v1/impact-analysis:stream"
 	defaultMaxJSONBodyBytes    = 1 << 20
 	defaultRequestTimeout      = 30 * time.Second
@@ -157,10 +159,18 @@ func (h *handler) authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set(SecurityContextHeader, base64.StdEncoding.EncodeToString(raw))
+	w.Header().Set(RateLimitKeyHeader, authenticatedCallerRateLimitKey(canonical.GetTenantId(), canonical.GetUserId()))
 	w.Header().Set("Traceparent", "00-"+traceID+"-"+spanID+"-01")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	outcome = "allow"
+}
+
+func authenticatedCallerRateLimitKey(tenantID, userID string) string {
+	// The separator makes the tuple unambiguous. The opaque value is used only
+	// inside Envoy and is stripped before routing to application services.
+	digest := sha256.Sum256([]byte(tenantID + "\x00" + userID))
+	return hex.EncodeToString(digest[:])
 }
 
 func (h *handler) identifiers() (string, string, error) {

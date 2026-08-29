@@ -56,6 +56,7 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 		"timeout: 0s",
 		"idle_timeout: 35s",
 		"name: envoy.transport_sockets.tls",
+		`alpn_protocols: ["h2", "http/1.1"]`,
 		"tls_minimum_protocol_version: TLSv1_2",
 		"filename: /etc/envoy/tls/tls.crt",
 		"filename: /etc/envoy/tls/tls.key",

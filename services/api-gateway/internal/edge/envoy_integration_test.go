@@ -70,6 +70,7 @@ type observedCall struct {
 	tracestate      string
 	baggage         string
 	authorization   string
+	rateLimitKey    string
 }
 
 type integrationBackend struct {
@@ -87,6 +88,7 @@ func (b *integrationBackend) observe(ctx context.Context, method string, bodyCon
 	var tracestate string
 	var baggage string
 	var authorization string
+	var rateLimitKey string
 	if incoming, ok := metadata.FromIncomingContext(ctx); ok {
 		values := incoming.Get(SecurityContextMetadataKey)
 		if len(values) == 1 {
@@ -107,6 +109,9 @@ func (b *integrationBackend) observe(ctx context.Context, method string, bodyCon
 		if values := incoming.Get("authorization"); len(values) == 1 {
 			authorization = values[0]
 		}
+		if values := incoming.Get("x-eci-rate-limit-key"); len(values) == 1 {
+			rateLimitKey = values[0]
+		}
 	}
 	var clonedBody *retrievalv1.SecurityContext
 	if bodyContext != nil {
@@ -117,6 +122,7 @@ func (b *integrationBackend) observe(ctx context.Context, method string, bodyCon
 		method: method, securityContext: trusted, bodyContext: clonedBody,
 		traceparent: traceparent, tracestate: tracestate, baggage: baggage,
 		authorization: authorization,
+		rateLimitKey:  rateLimitKey,
 	})
 	b.mu.Unlock()
 }
@@ -226,6 +232,7 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 		request.Header.Set("traceparent", "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01")
 		request.Header.Set("tracestate", "attacker=value")
 		request.Header.Set("baggage", "tenant=tenant-forged")
+		request.Header.Set(RateLimitKeyHeader, "forged-shared-bucket")
 		response, err := http.DefaultClient.Do(request)
 		if err != nil {
 			t.Fatal(err)
@@ -243,6 +250,9 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 		}
 		if call.authorization != "" {
 			t.Fatalf("bearer token reached backend: %q", call.authorization)
+		}
+		if call.rateLimitKey != "" {
+			t.Fatalf("internal rate-limit key reached backend: %q", call.rateLimitKey)
 		}
 		if call.bodyContext.GetTenantId() != "tenant-forged" {
 			t.Fatalf("expected body provenance to remain distinguishable, got %v", call.bodyContext)

@@ -5,8 +5,9 @@ Contratti: `contracts/proto/eci/retrieval/v1/retrieval.proto` (immutato)
 
 ## 1. Obiettivo
 
-Esiste un edge Envoy reale che accetta gRPC e JSON, autentica prima del routing,
-applica rate limit e propaga il solo `SecurityContext` derivato dal JWT. Lo
+Esiste un edge Envoy reale che accetta gRPC e JSON esclusivamente su TLS,
+autentica prima del routing, applica rate limit isolato per caller autenticato
+e propaga il solo `SecurityContext` derivato dal JWT. Lo
 stream `ImpactAnalysis` è esposto ai browser come SSE genuino tramite un helper
 interno, senza cambiare il contratto gRPC condiviso.
 
@@ -77,7 +78,8 @@ trusted upstream metadata:
    `error` privo di detail interno e non continua a leggere.
 6. **Rate limiting.** Given bucket esaurito, When arriva una richiesta protetta,
    Then Envoy risponde 429 con `Retry-After`, non chiama l'upstream ed espone
-   contatori bounded; il limite si ricarica deterministicamente.
+   contatori bounded; il limite si ricarica deterministicamente e non consuma
+   il bucket di un caller autenticato differente.
 7. **Transcoder/config stretti.** Given metodo/query JSON sconosciuto, body
    malformato o >1 MiB, When passa dall'edge, Then 400/404/413 senza passthrough;
    descriptor e config Envoy validano con immagine pinned.
@@ -87,6 +89,10 @@ trusted upstream metadata:
    helper possiede la deadline assoluta di 30s; Envoy disabilita il route
    timeout dello stream ma applica un idle timeout di 35s, lasciando margine
    per il frame terminale senza consentire stream bloccati indefinitamente.
+9. **TLS obbligatorio.** Given bearer valido inviato in cleartext, When raggiunge
+   il listener pubblico, Then il TLS handshake manca e la richiesta non arriva
+   a ext_authz/upstream. HTTPS e gRPC TLS richiedono almeno TLS 1.2; certificato
+   e chiave sono file montati da Secret e non sono versionati.
 
 ## 4. Errori & edge case
 
@@ -100,6 +106,8 @@ trusted upstream metadata:
 | backend gRPC non raggiungibile prima del primo frame | 502/503 bounded |
 | errore dopo almeno un frame | `event: error` + payload bounded, flush e close |
 | ext_authz timeout | deny 503; mai failure-mode allow |
+| header bucket forgiato | rimosso prima di ext_authz; chiave nuova solo da identità validata |
+| certificato/chiave TLS assente o invalido | Envoy non parte; nessun fallback cleartext |
 | route/servizio non allow-listed | 404; transcoder non passthrough |
 
 ## 5. Non-goals
@@ -119,11 +127,13 @@ trusted upstream metadata:
 - D7: `SecurityContext` esistente e RPC `ImpactAnalysis` server-streaming.
 
 **Minacce:** forged metadata/body, token replay/scaduto, header smuggling,
-ext_auth bypass/failure, replay/esposizione del bearer sull'hop interno, route
+ext_auth bypass/failure, intercettazione/replay del bearer in cleartext,
+replay/esposizione del bearer sull'hop interno, starvation cross-tenant, route
 passthrough, oversized body, slow stream, rate limit bypass, direct
 helper/backend exposure, prompt injection che tenta scope, error leakage.
-Controlli: rimozione metadata forgiabili prima auth, stripping del bearer subito
-dopo ext_authz, replace da validator T6.1, porte interne, strict
+Controlli: TLS obbligatorio al listener, rimozione metadata forgiabili prima
+auth, stripping del bearer subito dopo ext_authz, bucket opaco derivato dal
+caller autenticato e poi rimosso, replace da validator T6.1, porte interne, strict
 route/transcoder, size/deadline cap, fail-closed, scope metadata-only T6.2/T6.3,
 error body allow-listed e test Envoy reale.
 
@@ -135,8 +145,9 @@ error body allow-listed e test Envoy reale.
 - Static/deterministic: genera `deploy/envoy/retrieval.pb` dal proto con Buf e
   verifica byte identity; controlla filtri/ordine/fail-closed/no-passthrough.
 - Integration CPU-only con `envoyproxy/envoy:v1.39.0` pinned, fake OIDC/auth e
-  backend gRPC reale: JSON→gRPC metadata, SSE incremental, gRPC passthrough,
-  401/503, forged headers, 429 e route unknown. `envoy --mode validate` sulla
+  backend gRPC reale: TLS/cleartext rejection, JSON→gRPC metadata, SSE
+  incremental, gRPC passthrough, 401/503, forged headers, 429 isolato tra due
+  caller e route unknown. `envoy --mode validate` sulla
   config effettiva prima del test.
 
 ## 8. Osservabilità
