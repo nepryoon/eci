@@ -621,6 +621,28 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 		if len(backend.snapshot()) != beforeBackend {
 			t.Fatal("unauthenticated flood reached backend")
 		}
+
+		otherSourceTransport := &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				RootCAs:    roots,
+				ServerName: "localhost",
+			},
+			DialContext: (&net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.2")}}).DialContext,
+		}
+		defer otherSourceTransport.CloseIdleConnections()
+		otherSourceClient := &http.Client{Transport: otherSourceTransport}
+		request, _ := http.NewRequest(http.MethodPost, baseURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", strings.NewReader(`{}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer invalid-other-source")
+		response, err := otherSourceClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("one source exhausted another source's pre-auth bucket: status=%d", response.StatusCode)
+		}
 	})
 
 	t.Run("auth helper outage fails closed", func(t *testing.T) {
