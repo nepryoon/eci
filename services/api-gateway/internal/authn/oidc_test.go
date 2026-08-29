@@ -19,15 +19,21 @@ import (
 )
 
 type oidcFixture struct {
-	testing *testing.T
-	server  *httptest.Server
-	mu      sync.RWMutex
-	keys    map[string]*rsa.PublicKey
+	testing      *testing.T
+	server       *httptest.Server
+	mu           sync.RWMutex
+	keys         map[string]*rsa.PublicKey
+	jwksStatus   int
+	jwksRequests int
 }
 
 func newOIDCFixture(t *testing.T) *oidcFixture {
 	t.Helper()
-	fixture := &oidcFixture{testing: t, keys: map[string]*rsa.PublicKey{}}
+	fixture := &oidcFixture{
+		testing:    t,
+		keys:       map[string]*rsa.PublicKey{},
+		jwksStatus: http.StatusOK,
+	}
 	fixture.server = httptest.NewServer(http.HandlerFunc(fixture.serveHTTP))
 	t.Cleanup(fixture.server.Close)
 	return fixture
@@ -46,6 +52,14 @@ func (f *oidcFixture) serveHTTP(response http.ResponseWriter, request *http.Requ
 			"id_token_signing_alg_values_supported": []string{"RS256"},
 		})
 	case "/jwks":
+		f.mu.Lock()
+		f.jwksRequests++
+		status := f.jwksStatus
+		f.mu.Unlock()
+		if status != http.StatusOK {
+			response.WriteHeader(status)
+			return
+		}
 		f.mu.RLock()
 		keys := make([]map[string]string, 0, len(f.keys))
 		for keyID, publicKey := range f.keys {
@@ -57,6 +71,18 @@ func (f *oidcFixture) serveHTTP(response http.ResponseWriter, request *http.Requ
 	default:
 		http.NotFound(response, request)
 	}
+}
+
+func (f *oidcFixture) setJWKSStatus(status int) {
+	f.mu.Lock()
+	f.jwksStatus = status
+	f.mu.Unlock()
+}
+
+func (f *oidcFixture) jwksRequestCount() int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.jwksRequests
 }
 
 func writeJSON(t *testing.T, response http.ResponseWriter, value any) {
@@ -228,4 +254,33 @@ func TestNewRejectsUnsafeOrIncompleteConfiguration(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewPreflightsAdvertisedJWKSAndRejectsUnavailableOrEmptySets(t *testing.T) {
+	t.Run("unavailable", func(t *testing.T) {
+		fixture := newOIDCFixture(t)
+		fixture.setJWKSStatus(http.StatusServiceUnavailable)
+		_, err := New(context.Background(), Config{
+			Issuer: fixture.server.URL, Audience: "eci-gateway", AllowHTTPForDevelopment: true,
+		}, prometheus.NewRegistry())
+		if err == nil {
+			t.Fatal("New succeeded with unavailable JWKS")
+		}
+		if fixture.jwksRequestCount() == 0 {
+			t.Fatal("New never requested advertised jwks_uri")
+		}
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		fixture := newOIDCFixture(t)
+		_, err := New(context.Background(), Config{
+			Issuer: fixture.server.URL, Audience: "eci-gateway", AllowHTTPForDevelopment: true,
+		}, prometheus.NewRegistry())
+		if err == nil {
+			t.Fatal("New succeeded with empty JWKS")
+		}
+		if fixture.jwksRequestCount() == 0 {
+			t.Fatal("New never requested advertised jwks_uri")
+		}
+	})
 }

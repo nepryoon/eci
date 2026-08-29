@@ -4,9 +4,12 @@ package authn
 
 import (
 	"context"
+	"crypto/rsa"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"slices"
 	"strings"
@@ -15,10 +18,12 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
+	"github.com/go-jose/go-jose/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/oauth2"
 )
 
 const (
@@ -26,6 +31,7 @@ const (
 	maxIdentityBytes            = 256
 	maxScopeValueBytes          = 256
 	maxScopeValues              = 256
+	maxJWKSBytes                = 1 << 20
 )
 
 // Config contains trusted process configuration. None of these fields may be
@@ -106,11 +112,68 @@ func New(ctx context.Context, cfg Config, registerer prometheus.Registerer) (*Au
 	if err != nil {
 		return nil, fmt.Errorf("authn: OIDC discovery failed: %w", err)
 	}
+	if err := preflightJWKS(ctx, provider, cfg.AllowHTTPForDevelopment); err != nil {
+		return nil, err
+	}
 	verifier := provider.VerifierContext(context.WithoutCancel(ctx), &oidc.Config{
 		ClientID:             cfg.Audience,
 		SupportedSigningAlgs: []string{oidc.RS256},
 	})
 	return newAuthenticator(oidcTokenVerifier{verifier: verifier}, registerer)
+}
+
+func preflightJWKS(ctx context.Context, provider *oidc.Provider, allowHTTPForDevelopment bool) error {
+	var metadata struct {
+		JWKSURI string `json:"jwks_uri"`
+	}
+	if err := provider.Claims(&metadata); err != nil {
+		return fmt.Errorf("authn: decode OIDC discovery metadata: %w", err)
+	}
+	if err := validateRemoteURL(metadata.JWKSURI, allowHTTPForDevelopment); err != nil {
+		return fmt.Errorf("authn: invalid jwks_uri: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, metadata.JWKSURI, nil)
+	if err != nil {
+		return fmt.Errorf("authn: build JWKS preflight request: %w", err)
+	}
+	request.Header.Set("Accept", "application/json")
+	client := http.DefaultClient
+	if configured, ok := ctx.Value(oauth2.HTTPClient).(*http.Client); ok && configured != nil {
+		client = configured
+	}
+	preflightClient := *client
+	preflightClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	response, err := preflightClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("authn: JWKS preflight failed: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("authn: JWKS preflight returned HTTP %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxJWKSBytes+1))
+	if err != nil {
+		return fmt.Errorf("authn: read JWKS preflight response: %w", err)
+	}
+	if len(body) > maxJWKSBytes {
+		return fmt.Errorf("authn: JWKS preflight response exceeds %d bytes", maxJWKSBytes)
+	}
+	var keySet jose.JSONWebKeySet
+	if err := json.Unmarshal(body, &keySet); err != nil {
+		return fmt.Errorf("authn: decode JWKS preflight response: %w", err)
+	}
+	for index := range keySet.Keys {
+		key := &keySet.Keys[index]
+		_, rsaPublic := key.Key.(*rsa.PublicKey)
+		if rsaPublic && key.Valid() &&
+			(key.Algorithm == "" || key.Algorithm == oidc.RS256) &&
+			(key.Use == "" || key.Use == "sig") {
+			return nil
+		}
+	}
+	return fmt.Errorf("authn: JWKS contains no usable RS256 signing key")
 }
 
 func newAuthenticator(verifier tokenVerifier, registerer prometheus.Registerer) (*Authenticator, error) {
@@ -208,6 +271,22 @@ func validateConfig(cfg Config) error {
 	default:
 		return fmt.Errorf("authn: issuer scheme must be HTTPS")
 	}
+}
+
+func validateRemoteURL(raw string, allowHTTPForDevelopment bool) error {
+	parsed, err := url.Parse(raw)
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+		return fmt.Errorf("endpoint must be an absolute URL without userinfo or fragment")
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		if allowHTTPForDevelopment && isLoopbackHost(parsed.Hostname()) {
+			return nil
+		}
+	}
+	return fmt.Errorf("endpoint must use HTTPS except for explicit loopback development")
 }
 
 func isLoopbackHost(host string) bool {
