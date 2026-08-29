@@ -157,6 +157,36 @@ def test_acl_only_visibility_change_invalidates_aggregate_without_ast_change():
     assert len(set(class_keys)) == 4  # full/restricted class and root hashes differ
 
 
+def test_authorized_descendant_of_denied_intermediate_is_suppressed():
+    nodes = [
+        node("method", SummaryLevel.METHOD, "1", source="NESTED_SECRET"),
+        node(
+            "denied-class",
+            SummaryLevel.CLASS,
+            "2",
+            children=("method",),
+            group="secret",
+        ),
+        node(
+            "repo",
+            SummaryLevel.REPO,
+            "3",
+            children=("denied-class",),
+            source="ROOT_AGGREGATE",
+        ),
+    ]
+    cache, model = Cache(), Model()
+
+    result = RaptorSummarizer(cache, model, FINGERPRINT).summarize(
+        nodes, "repo", security_context()
+    )
+
+    assert set(result.summaries) == {"repo"}
+    assert [call[0] for call in model.calls] == ["repo"]
+    assert model.calls[0][1:3] == ("", ())
+    assert len(cache.gets) == len(cache.puts) == 1
+
+
 @pytest.mark.parametrize(
     "ctx,nodes",
     [
