@@ -20,6 +20,7 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 	ordered := []string{
 		"envoy.filters.http.header_mutation",
 		"envoy.filters.http.ext_authz",
+		"envoy.filters.http.header_mutation",
 		"envoy.filters.http.local_ratelimit",
 		"envoy.filters.http.buffer",
 		"envoy.filters.http.grpc_json_transcoder",
@@ -38,6 +39,7 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 		"remove: traceparent",
 		"remove: tracestate",
 		"remove: baggage",
+		"remove: authorization",
 		"failure_mode_allow: false",
 		"max_request_bytes: 1048576",
 		"reject_unknown_method: true",
@@ -45,6 +47,8 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 		"eci.retrieval.v1.RetrievalEngine",
 		"key: retry-after",
 		"address: 127.0.0.1",
+		"timeout: 0s",
+		"idle_timeout: 35s",
 	} {
 		if !strings.Contains(config, required) {
 			t.Errorf("missing strict config fragment %q", required)

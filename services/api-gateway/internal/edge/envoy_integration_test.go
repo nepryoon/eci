@@ -57,6 +57,7 @@ type observedCall struct {
 	traceparent     string
 	tracestate      string
 	baggage         string
+	authorization   string
 }
 
 type integrationBackend struct {
@@ -73,6 +74,7 @@ func (b *integrationBackend) observe(ctx context.Context, method string, bodyCon
 	var traceparent string
 	var tracestate string
 	var baggage string
+	var authorization string
 	if incoming, ok := metadata.FromIncomingContext(ctx); ok {
 		values := incoming.Get(SecurityContextMetadataKey)
 		if len(values) == 1 {
@@ -90,6 +92,9 @@ func (b *integrationBackend) observe(ctx context.Context, method string, bodyCon
 		if values := incoming.Get("baggage"); len(values) == 1 {
 			baggage = values[0]
 		}
+		if values := incoming.Get("authorization"); len(values) == 1 {
+			authorization = values[0]
+		}
 	}
 	var clonedBody *retrievalv1.SecurityContext
 	if bodyContext != nil {
@@ -99,6 +104,7 @@ func (b *integrationBackend) observe(ctx context.Context, method string, bodyCon
 	b.calls = append(b.calls, observedCall{
 		method: method, securityContext: trusted, bodyContext: clonedBody,
 		traceparent: traceparent, tracestate: tracestate, baggage: baggage,
+		authorization: authorization,
 	})
 	b.mu.Unlock()
 }
@@ -116,6 +122,10 @@ func (b *integrationBackend) ImpactAnalysis(request *retrievalv1.ImpactAnalysisR
 	if request.GetEntryNodeId() == "cancel" {
 		<-stream.Context().Done()
 		b.cancelOnce.Do(func() { close(b.cancelled) })
+		return stream.Context().Err()
+	}
+	if request.GetEntryNodeId() == "deadline" {
+		<-stream.Context().Done()
 		return stream.Context().Err()
 	}
 	select {
@@ -197,6 +207,9 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 		if call.tracestate != "" || call.baggage != "" {
 			t.Fatalf("untrusted propagation state reached backend: tracestate=%q baggage=%q", call.tracestate, call.baggage)
 		}
+		if call.authorization != "" {
+			t.Fatalf("bearer token reached backend: %q", call.authorization)
+		}
 		if call.bodyContext.GetTenantId() != "tenant-forged" {
 			t.Fatalf("expected body provenance to remain distinguishable, got %v", call.bodyContext)
 		}
@@ -220,6 +233,9 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 		call := lastCall(t, backend, "GetNode")
 		assertTrustedContext(t, call.securityContext)
 		assertTrustedTraceparent(t, call)
+		if call.authorization != "" {
+			t.Fatalf("gRPC bearer token reached backend: %q", call.authorization)
+		}
 
 		streamContext, cancelStream := context.WithCancel(requestContext)
 		stream, err := retrievalv1.NewRetrievalEngineClient(connection).ImpactAnalysis(streamContext, &retrievalv1.ImpactAnalysisRequest{EntryNodeId: "grpc-stream"})
@@ -231,6 +247,19 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 			t.Fatalf("first stream event=%v err=%v", first, err)
 		}
 		cancelStream()
+	})
+
+	t.Run("SSE helper deadline emits bounded terminal frame through Envoy", func(t *testing.T) {
+		response := postJSON(t, baseURL+SSEPath, `{"entryNodeId":"deadline"}`, "Bearer integration-valid")
+		defer response.Body.Close()
+		payload, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != http.StatusOK || !strings.Contains(string(payload), "event: error") ||
+			!strings.Contains(string(payload), `{"code":"stream_error"}`) {
+			t.Fatalf("status=%d body=%q", response.StatusCode, payload)
+		}
 	})
 
 	t.Run("SSE flushes before upstream completion", func(t *testing.T) {
@@ -375,8 +404,9 @@ func startIntegrationHelper(t *testing.T, retrievalAddress string) (net.Listener
 	}
 	t.Cleanup(func() { _ = connection.Close() })
 	handler, err := NewEdgeHandler(integrationAuthenticator{}, retrievalv1.NewRetrievalEngineClient(connection), EdgeConfig{
-		Registerer: prometheus.NewRegistry(),
-		Tracer:     provider.Tracer("integration"),
+		RequestTimeout: 200 * time.Millisecond,
+		Registerer:     prometheus.NewRegistry(),
+		Tracer:         provider.Tracer("integration"),
 	})
 	if err != nil {
 		t.Fatal(err)
