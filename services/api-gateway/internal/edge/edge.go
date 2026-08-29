@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -43,6 +44,8 @@ const (
 	maxScopeValues                = 256
 	maxScopeValueBytes            = 256
 	maxSecurityContextHeaderBytes = 12 * 1024
+	defaultMaxConcurrentSSECaller = 10
+	defaultMaxConcurrentSSE       = 1000
 )
 
 type Authenticator interface {
@@ -58,11 +61,13 @@ type ImpactClient interface {
 }
 
 type EdgeConfig struct {
-	MaxJSONBodyBytes int64
-	RequestTimeout   time.Duration
-	Random           io.Reader
-	Registerer       prometheus.Registerer
-	Tracer           trace.Tracer
+	MaxJSONBodyBytes          int64
+	RequestTimeout            time.Duration
+	MaxConcurrentSSEPerCaller int
+	MaxConcurrentSSE          int
+	Random                    io.Reader
+	Registerer                prometheus.Registerer
+	Tracer                    trace.Tracer
 }
 
 type handler struct {
@@ -72,7 +77,51 @@ type handler struct {
 	timeout time.Duration
 	random  io.Reader
 	total   *prometheus.CounterVec
+	active  prometheus.Gauge
 	tracer  trace.Tracer
+	sseGate *sseAdmission
+}
+
+type sseAdmission struct {
+	mu             sync.Mutex
+	maxPerCaller   int
+	maxTotal       int
+	activeByCaller map[string]int
+	activeTotal    int
+}
+
+func newSSEAdmission(maxPerCaller, maxTotal int) *sseAdmission {
+	return &sseAdmission{
+		maxPerCaller:   maxPerCaller,
+		maxTotal:       maxTotal,
+		activeByCaller: make(map[string]int),
+	}
+}
+
+func (a *sseAdmission) acquire(securityContext *retrievalv1.SecurityContext) (func(), string) {
+	key := authenticatedCallerRateLimitKey(securityContext.GetTenantId(), securityContext.GetUserId())
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.activeTotal >= a.maxTotal {
+		return nil, "aggregate_limit"
+	}
+	if a.activeByCaller[key] >= a.maxPerCaller {
+		return nil, "caller_limit"
+	}
+	a.activeByCaller[key]++
+	a.activeTotal++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			a.activeByCaller[key]--
+			a.activeTotal--
+			if a.activeByCaller[key] == 0 {
+				delete(a.activeByCaller, key)
+			}
+		})
+	}, ""
 }
 
 func NewEdgeHandler(auth Authenticator, impact ImpactClient, cfg EdgeConfig) (http.Handler, error) {
@@ -82,7 +131,7 @@ func NewEdgeHandler(auth Authenticator, impact ImpactClient, cfg EdgeConfig) (ht
 	if cfg.Registerer == nil {
 		return nil, fmt.Errorf("edge: prometheus registerer is required")
 	}
-	if cfg.MaxJSONBodyBytes < 0 || cfg.RequestTimeout < 0 {
+	if cfg.MaxJSONBodyBytes < 0 || cfg.RequestTimeout < 0 || cfg.MaxConcurrentSSEPerCaller < 0 || cfg.MaxConcurrentSSE < 0 {
 		return nil, fmt.Errorf("edge: limits must not be negative")
 	}
 	if cfg.MaxJSONBodyBytes == 0 {
@@ -90,6 +139,15 @@ func NewEdgeHandler(auth Authenticator, impact ImpactClient, cfg EdgeConfig) (ht
 	}
 	if cfg.RequestTimeout == 0 {
 		cfg.RequestTimeout = defaultRequestTimeout
+	}
+	if cfg.MaxConcurrentSSEPerCaller == 0 {
+		cfg.MaxConcurrentSSEPerCaller = defaultMaxConcurrentSSECaller
+	}
+	if cfg.MaxConcurrentSSE == 0 {
+		cfg.MaxConcurrentSSE = defaultMaxConcurrentSSE
+	}
+	if cfg.MaxConcurrentSSEPerCaller > cfg.MaxConcurrentSSE {
+		return nil, fmt.Errorf("edge: per-caller SSE limit must not exceed aggregate limit")
 	}
 	if cfg.Random == nil {
 		cfg.Random = rand.Reader
@@ -106,10 +164,20 @@ func NewEdgeHandler(auth Authenticator, impact ImpactClient, cfg EdgeConfig) (ht
 	if err := cfg.Registerer.Register(total); err != nil {
 		return nil, fmt.Errorf("edge: register request metric: %w", err)
 	}
+	active := prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "eci",
+		Subsystem: "gateway_edge",
+		Name:      "active_sse",
+		Help:      "Currently admitted SSE requests across all authenticated callers.",
+	})
+	if err := cfg.Registerer.Register(active); err != nil {
+		return nil, fmt.Errorf("edge: register active SSE metric: %w", err)
+	}
 
 	h := &handler{
 		auth: auth, impact: impact, maxBody: cfg.MaxJSONBodyBytes,
-		timeout: cfg.RequestTimeout, random: cfg.Random, total: total, tracer: cfg.Tracer,
+		timeout: cfg.RequestTimeout, random: cfg.Random, total: total, active: active, tracer: cfg.Tracer,
+		sseGate: newSSEAdmission(cfg.MaxConcurrentSSEPerCaller, cfg.MaxConcurrentSSE),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/authorize/", h.authorize)
@@ -239,6 +307,16 @@ func (h *handler) sse(w http.ResponseWriter, r *http.Request) {
 		outcome = "denied"
 		return
 	}
+	release, limitOutcome := h.sseGate.acquire(securityContext)
+	if limitOutcome != "" {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "too many concurrent streams")
+		outcome = limitOutcome
+		return
+	}
+	defer release()
+	h.active.Inc()
+	defer h.active.Dec()
 
 	body := http.MaxBytesReader(w, r.Body, h.maxBody)
 	payload, err := io.ReadAll(body)

@@ -137,6 +137,9 @@ trusted upstream metadata:
 | header bucket forgiato | rimosso prima di ext_authz; chiave nuova solo da identità validata |
 | header HTTP incompleti/Slowloris | 408/close entro 5s; zero chiamate ext_authz/upstream |
 | burst HTTP/2 con header incompleti | massimo 100 stream concorrenti per connessione, prima dei filtri |
+| molte connessioni TLS incomplete | massimo 1000 connessioni listener-wide prima dell'HCM |
+| stream SSE concorrenti di un caller | massimo 10 attivi per `tenant_id`/`user_id`; 429 + `Retry-After` |
+| stream SSE concorrenti globali | massimo 1000 attivi; 429 + `Retry-After`; contatori sempre rilasciati |
 | scope autenticato con `SecurityContext` base64 >12 KiB | `invalid_claims`/deny bounded prima del trasporto |
 | deadline SSE assente/malformata | 401; nessuna deadline client-controlled |
 | deadline SSE già trascorsa durante buffering | 504; zero RPC |
@@ -166,11 +169,12 @@ intercettazione/replay del bearer in cleartext,
 replay/esposizione del bearer sull'hop interno, starvation cross-tenant, route
 passthrough, forged proxy classification/router controls, oversized body, Slowloris/header trickle, slow stream, rate limit bypass, direct
 helper/backend exposure, prompt injection che tenta scope, error leakage.
-Controlli: TLS obbligatorio al listener, rimozione metadata forgiabili e ceiling
+Controlli: TLS obbligatorio al listener, limite globale delle connessioni e
+degli stream HTTP/2 per connessione, rimozione metadata forgiabili e ceiling
 coarse prima di auth, stripping del bearer subito dopo ext_authz, bucket opaco
 derivato dal caller autenticato e poi rimosso, replace da validator T6.1, porte interne, strict
 route/transcoder, size/deadline/header-time cap, fail-closed, scope metadata-only T6.2/T6.3,
-error body allow-listed e test Envoy reale.
+concorrenza SSE bounded per caller e globale, error body allow-listed e test Envoy reale.
 
 ## 7. Test plan
 
@@ -185,7 +189,8 @@ error body allow-listed e test Envoy reale.
   caller, header parziali chiusi prima dell'auth, continuità tra auth span e
   `traceparent`, upload SSE lento incluso nella deadline assoluta, scope fuori
   dal budget trasporto, XFF/retry/timeout forgiati senza amplification, e route
-  unknown. `envoy --mode validate` sulla
+  unknown. Unit test concorrente prova che il cap SSE di Alice non blocca Bob
+  e che ogni slot viene rilasciato. `envoy --mode validate` sulla
   config effettiva prima del test.
 
 ## 8. Osservabilità
@@ -196,7 +201,9 @@ error body allow-listed e test Envoy reale.
   downstream condividono lo stesso trace id; lo span id propagato è quello
   dello span authorize realmente registrato.
 - counter `eci_gateway_edge_requests_total{route,outcome}` dove `route` è
-  allow-list `{auth,sse,health}` e outcome chiuso.
+  allow-list `{auth,sse,health}` e outcome chiuso, inclusi `caller_limit` e
+  `aggregate_limit`.
+- gauge `eci_gateway_edge_active_sse` senza label identitarie.
 - Envoy stats: `http.<listener>.downstream_rq_*`,
   `http.<listener>.ext_authz.{ok,denied,error}`,
   `http.<listener>.local_rate_limit.{enabled,ok,rate_limited}`.

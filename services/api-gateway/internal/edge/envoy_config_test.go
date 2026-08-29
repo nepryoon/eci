@@ -17,6 +17,11 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 		t.Fatal(err)
 	}
 	config := string(contents)
+	connectionLimit := strings.Index(config, "- name: envoy.filters.network.connection_limit")
+	hcm := strings.Index(config, "- name: envoy.filters.network.http_connection_manager")
+	if connectionLimit < 0 || hcm < 0 || connectionLimit >= hcm {
+		t.Fatal("listener connection limit must run before the HTTP connection manager")
+	}
 	ordered := []string{
 		"envoy.filters.http.header_mutation",
 		"eci.filters.http.pre_auth_local_ratelimit",
@@ -65,6 +70,8 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 		"idle_timeout: 35s",
 		"request_headers_timeout: 5s",
 		"max_concurrent_streams: 100",
+		"stat_prefix: eci_public_connections",
+		"max_connections: 1000",
 		"use_remote_address: true",
 		"xff_num_trusted_hops: 0",
 		"remove: x-forwarded-for",

@@ -204,6 +204,121 @@ func TestAuthenticatedCallerRateLimitKeyIsOpaqueStableAndPartitioned(t *testing.
 	}
 }
 
+func TestSSEAdmissionBoundsCallerAndAggregateAndReleases(t *testing.T) {
+	admission := newSSEAdmission(2, 3)
+	alice := testSecurityContext()
+	bob := proto.Clone(alice).(*retrievalv1.SecurityContext)
+	bob.UserId = "bob"
+	carol := proto.Clone(alice).(*retrievalv1.SecurityContext)
+	carol.UserId = "carol"
+
+	releaseAlice1, outcome := admission.acquire(alice)
+	if outcome != "" {
+		t.Fatalf("first alice admission=%q", outcome)
+	}
+	releaseAlice2, outcome := admission.acquire(alice)
+	if outcome != "" {
+		t.Fatalf("second alice admission=%q", outcome)
+	}
+	if release, got := admission.acquire(alice); release != nil || got != "caller_limit" {
+		t.Fatalf("third alice has_release=%t outcome=%q", release != nil, got)
+	}
+	releaseBob, outcome := admission.acquire(bob)
+	if outcome != "" {
+		t.Fatalf("bob admission=%q", outcome)
+	}
+	if release, got := admission.acquire(carol); release != nil || got != "aggregate_limit" {
+		t.Fatalf("carol has_release=%t outcome=%q", release != nil, got)
+	}
+
+	releaseAlice1()
+	releaseAlice2()
+	releaseBob()
+	if len(admission.activeByCaller) != 0 || admission.activeTotal != 0 {
+		t.Fatalf("admission leaked state: callers=%v total=%d", admission.activeByCaller, admission.activeTotal)
+	}
+	if release, got := admission.acquire(carol); release == nil || got != "" {
+		t.Fatalf("released capacity not reusable: has_release=%t outcome=%q", release != nil, got)
+	} else {
+		release()
+	}
+}
+
+func TestSSEHandlerRejectsConcurrentCallerWithoutBlockingAnotherIdentity(t *testing.T) {
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var callsMu sync.Mutex
+	calls := 0
+	client := &fakeImpactClient{call: func(ctx context.Context, _ *retrievalv1.ImpactAnalysisRequest) (grpc.ServerStreamingClient[retrievalv1.ImpactAnalysisEvent], error) {
+		callsMu.Lock()
+		calls++
+		callNumber := calls
+		callsMu.Unlock()
+		return &fakeStream{ctx: ctx, recv: func() (*retrievalv1.ImpactAnalysisEvent, error) {
+			if callNumber == 1 {
+				close(firstEntered)
+				select {
+				case <-releaseFirst:
+				case <-ctx.Done():
+				}
+			}
+			return nil, io.EOF
+		}}, nil
+	}}
+	handler, err := NewEdgeHandler(&fakeAuthenticator{}, client, EdgeConfig{
+		MaxJSONBodyBytes: 1024, RequestTimeout: time.Second,
+		MaxConcurrentSSEPerCaller: 1, MaxConcurrentSSE: 2,
+		Registerer: prometheus.NewRegistry(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	firstRequest := httptest.NewRequest(http.MethodPost, SSEPath, strings.NewReader(`{}`))
+	setTrustedRequestHeaders(t, firstRequest, testSecurityContext())
+	firstResponse := httptest.NewRecorder()
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		handler.ServeHTTP(firstResponse, firstRequest)
+	}()
+	select {
+	case <-firstEntered:
+	case <-time.After(time.Second):
+		t.Fatal("first stream did not reach upstream")
+	}
+
+	secondRequest := httptest.NewRequest(http.MethodPost, SSEPath, strings.NewReader(`{}`))
+	setTrustedRequestHeaders(t, secondRequest, testSecurityContext())
+	secondResponse := httptest.NewRecorder()
+	handler.ServeHTTP(secondResponse, secondRequest)
+	if secondResponse.Code != http.StatusTooManyRequests || secondResponse.Header().Get("Retry-After") != "1" {
+		t.Fatalf("same caller status=%d retry-after=%q", secondResponse.Code, secondResponse.Header().Get("Retry-After"))
+	}
+
+	bob := testSecurityContext()
+	bob.UserId = "bob"
+	bobRequest := httptest.NewRequest(http.MethodPost, SSEPath, strings.NewReader(`{}`))
+	setTrustedRequestHeaders(t, bobRequest, bob)
+	bobResponse := httptest.NewRecorder()
+	handler.ServeHTTP(bobResponse, bobRequest)
+	if bobResponse.Code != http.StatusOK {
+		t.Fatalf("other caller status=%d body=%q", bobResponse.Code, bobResponse.Body.String())
+	}
+	callsMu.Lock()
+	if calls != 2 {
+		t.Fatalf("upstream calls=%d want=2", calls)
+	}
+	callsMu.Unlock()
+
+	close(releaseFirst)
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first stream did not release admission")
+	}
+}
+
 func TestAuthorizeFailsClosedForAuthAndEntropyErrors(t *testing.T) {
 	tests := []struct {
 		name   string
