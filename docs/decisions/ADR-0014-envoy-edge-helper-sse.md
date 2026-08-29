@@ -96,4 +96,3 @@ Non è consentito esporre direttamente helper o porte gRPC come workaround.
 Config e immagini sono pinnate; secret OIDC provengono da env/Secret. Header
 forgiati vengono rimossi prima di ext_authz e mai concatenati. Nessun body
 viene inviato al servizio auth, evitando prompt/body exfiltration.
-
