@@ -1,5 +1,5 @@
 # SPEC-056 — OPA PDP e PEP fail-closed negli interceptor gRPC
-Stato: approved
+Stato: implemented
 Task-tree: T6.2 · Servizio: `libs/go/eci/authz`, `services/retrieval-engine`, `services/semantic-cache` · ADD: Modulo 3 §2.1
 Contratti: `contracts/proto/eci/retrieval/v1/retrieval.proto`, `contracts/proto/eci/semanticcache/v1/semanticcache.proto` (sola lettura)
 
@@ -216,20 +216,20 @@ package/file/wiring assente prima dell'implementazione.
 
 ## 9. Criteri di accettazione
 
-- [ ] `deploy/compose/opa/policies/eci_authz.rego` è default-deny e testato con
+- [x] `deploy/compose/opa/policies/eci_authz.rego` è default-deny e testato con
   OPA reale pin 1.20.1.
-- [ ] Input OPA contiene solo subject autenticato e full method runtime; test di
+- [x] Input OPA contiene solo subject autenticato e full method runtime; test di
   forged body/prompt prova l'assenza di influenza.
-- [ ] Orchestrator non costruisce tenant/scope impliciti e rifiuta un
+- [x] Orchestrator non costruisce tenant/scope impliciti e rifiuta un
   `SecurityContext` assente prima di invocare tool o backend.
-- [ ] Missing/malformed context, deny, timeout, outage e malformed PDP response
+- [x] Missing/malformed context, deny, timeout, outage e malformed PDP response
   sono fail-closed e non invocano l'handler.
-- [ ] Retrieval Engine e Semantic Cache installano `secctx -> authz`.
-- [ ] `ImpactAnalysis` server-streaming attraversa il PEP; non esiste un path
+- [x] Retrieval Engine e Semantic Cache installano `secctx -> authz`.
+- [x] `ImpactAnalysis` server-streaming attraversa il PEP; non esiste un path
   stream non protetto.
-- [ ] Lo stack dev include OPA pin, healthcheck e policy read-only; nessun secret.
-- [ ] Metriche/span hanno nomi e cardinalità conformi a §8.
-- [ ] Nessun file in `docs/add/**` o `contracts/**` cambia.
+- [x] Lo stack dev include OPA pin, healthcheck e policy read-only; nessun secret.
+- [x] Metriche/span hanno nomi e cardinalità conformi a §8.
+- [x] Nessun file in `docs/add/**` o `contracts/**` cambia.
 - [ ] `task build`, `task lint`, `task test`, `task guard` verdi in CI.
 - [ ] SPEC passa il secondo review avversariale, poi è `implemented`; diventa
   `verified` solo con evidenza CI/PR reale.
@@ -256,3 +256,28 @@ Pass eseguito il 2026-08-29 contro ADD, D7, SPEC-011 e SPEC-055.
   distribuito e separazione T6.2/T6.3 sono già prescritti dall'ADD/task-tree.
 
 Esito: `approved`.
+
+## 11. Evidenza di implementazione
+
+Implementato il 2026-08-29 nel commit `684ed4950694cb98cc280678b6489da893e30f2a`.
+
+- Red phase Go: `go test ./eci/authz` falliva su `Decision`,
+  `DecisionClient`, `New` e interceptor assenti; il test stream aggiunto dopo
+  l'audit falliva su entrambi gli interceptor stream assenti.
+- Red phase Rego: OPA ufficiale 1.20.1 riportava `FAIL: 10/10` senza policy.
+- Green policy: `/tmp/opa_linux_amd64_static test
+  deploy/compose/opa/policies` → `PASS: 11/11` dopo l'hardening degli scope
+  blank/non-string.
+- Green locale: `task build`, `task lint`, `task guard`; unit authz/secctx e 23
+  test Orchestrator CPU-only verdi. `docker compose config --quiet` verde con
+  credenziali temporanee ignorate e rimosse subito dopo la validazione.
+- `task test` locale: tutti i test non-container eseguiti sono verdi; fallisce
+  esclusivamente nelle suite Testcontainers preesistenti e nella nuova OPA
+  integration perché Docker Desktop non è in esecuzione
+  (`Cannot connect to ... docker.sock`). Nessun test è stato skipped o
+  indebolito; la verifica container resta obbligatoria in CI.
+
+Deviazione controllata rispetto all'interfaccia approvata iniziale: durante il
+wiring è stato rilevato che `ImpactAnalysis` è server-streaming. La SPEC e i
+test sono stati corretti prima del merge aggiungendo gli interceptor stream
+`secctx -> authz`; lasciare solo unary avrebbe creato un bypass reale.
