@@ -461,6 +461,19 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 	})
 
 	t.Run("auth helper outage fails closed", func(t *testing.T) {
+		refillDeadline := time.Now().Add(2 * time.Second)
+		for {
+			response := postJSON(t, baseURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", `{}`, "Bearer integration-valid")
+			statusCode := response.StatusCode
+			_ = response.Body.Close()
+			if statusCode == http.StatusOK {
+				break
+			}
+			if statusCode != http.StatusTooManyRequests || time.Now().After(refillDeadline) {
+				t.Fatalf("pre-auth limiter did not become ready: status=%d", statusCode)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 		if err := helperServer.Shutdown(ctx); err != nil {
 			t.Fatal(err)
 		}
