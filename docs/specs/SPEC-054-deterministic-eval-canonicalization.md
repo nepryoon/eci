@@ -1,5 +1,5 @@
 # SPEC-054 — Deterministic output canonicalization & eval hardening
-Stato: approved
+Stato: implemented
 Task-tree: T5.7 · Servizio: services/orchestrator · ADD: Modulo 1 §1.4, Modulo 2 §3.1-3.4, Modulo 4 §3.3
 Contratti: nessun nuovo contratto condiviso; formato interno dell'harness golden; `contracts/` invariati
 
@@ -279,20 +279,39 @@ già previsto dall'harness.
 
 ## 11. Criteri di accettazione
 
-- [ ] Strong structured-output contract indipendente dal golden.
-- [ ] Canonicalizzazione solo tramite repository/CPG/symbol table e solo se
+- [x] Strong structured-output contract indipendente dal golden.
+- [x] Canonicalizzazione solo tramite repository/CPG/symbol table e solo se
   univoca.
-- [ ] Metriche exact e semantic separate, con limitation esplicita.
-- [ ] Sei classi di failure prodotte deterministicamente.
-- [ ] Regression corpus T5.6 verde con le cinque classificazioni richieste.
-- [ ] `baseline-v1` e `tests/golden/queries_v0.json` byte-identici.
-- [ ] Nessun LLM judge, fuzzy matching, embedding similarity o GPU.
-- [ ] Prompt versionato e `logic_fingerprint` aggiornato.
+- [x] Metriche exact e semantic separate, con limitation esplicita.
+- [x] Sei classi di failure prodotte deterministicamente.
+- [x] Regression corpus T5.6 verde con le cinque classificazioni richieste.
+- [x] `baseline-v1` e `tests/golden/queries_v0.json` byte-identici.
+- [x] Nessun LLM judge, fuzzy matching, embedding similarity o GPU.
+- [x] Prompt versionato e `logic_fingerprint` aggiornato.
 - [ ] `task build`, `task lint`, `task test`, `task guard` verdi.
 
-## 12. Deviazioni
+## 12. Implementazione e deviazioni
 
-Nessuna implementazione è inclusa nella PR che approva questa SPEC. Il formato
-strutturato è un contratto interno dell'harness: se l'implementazione futura
-richiederà un contratto condiviso o un'API di rete, dovrà fermarsi e introdurre
-prima un ADR/SPEC contrattuale dedicata.
+Implementazione in `services/orchestrator/orchestrator/golden_canonicalization.py`
+e integrazione nell'harness `golden_eval.py`. Il resolver pubblico resta un
+`Protocol`: il run sul fixture costruisce la symbol table esclusivamente dalle
+dichiarazioni Go presenti nel repository (`type`, funzioni e metodi con
+receiver), mentre un backend CPG può implementare la stessa interfaccia senza
+toccare comparator o prompt. Il loader Go è intenzionalmente limitato al corpus
+golden corrente e non pretende di sostituire il name resolver di ingestion.
+
+Il prompt `golden-structured-facts-v2` non riceve `expected_facts`, categorie
+derivate dall'expected o `scope_note`; richiede un envelope fisso e separa
+facts/citations. Il fingerprint della logica è
+`576a17cd3e98c43bd230bb8da3add6f2d3fd22405498cb293b355e6db1c52689`.
+
+Il replay CPU-only degli output storici produce, come **nuove metriche T5.7**,
+`exact_canonical_fact_recall=0.40`, `semantic_entity_recall=14/15` e coverage
+resolver `14/15`. Questi valori sono evidenza di regressione deterministica,
+non sostituiscono né modificano la baseline ufficiale T5.6 (`pass_rate=0.50`,
+`fact_recall=0.40`). Taxonomy del replay: un `semantic_error`, quattro
+`unqualified_symbol`, quattro `verbose_fact` e un `missing_fact` conseguente al
+failure g01; nessun match fuzzy o probabilistico.
+
+Nessuna deviazione da ADD o contratti condivisi. Il formato resta interno
+all'harness; non è stato modificato alcun file sotto `contracts/`.

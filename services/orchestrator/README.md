@@ -29,6 +29,17 @@ python3 -m venv .venv   # o: python3 -m virtualenv .venv, se python3-venv non è
 Config via env (`eci_core.config.env_or_default`): `ORCHESTRATOR_RETRIEVAL_ADDR`
 (default `localhost:50053`), `ORCHESTRATOR_VLLM_URL` (default `http://localhost:8001`).
 
+## Golden evaluation
+
+`eci eval-golden` usa il contratto interno
+`golden-structured-facts-v2`: il modello restituisce esclusivamente una lista di
+`{"kind": ..., "value": ...}` con identificatori canonici e citations
+separate. Il prompt non osserva `expected_facts` o `scope_note`; la
+canonicalizzazione usa la symbol table ricavata dal repository e accredita un
+simbolo corto soltanto quando la risoluzione è univoca. Il summary mantiene le
+metriche storiche e aggiunge recall exact/semantic, coverage, taxonomy,
+`prompt_contract_version` e `logic_fingerprint` (SPEC-054).
+
 ## Test
 
 Il core T5.1 espone `orchestrator.graph.run_agent`: costruisce ed esegue
