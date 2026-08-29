@@ -1,7 +1,7 @@
 # SPEC-057 — Enforcement in-query su Neo4j, Qdrant e OpenSearch
 Stato: implemented
 Task-tree: T6.3 · Servizio: `services/ingestion`, sink materializzati, `services/retrieval-engine` · ADD: Modulo 3 §2.1–2.5
-Contratti: `contracts/jsonschema/hybrid-graph.json` (estensione additiva, ADR-0010), `contracts/proto/eci/retrieval/v1/retrieval.proto` (sola lettura)
+Contratti: `contracts/jsonschema/hybrid-graph.json` (estensione additiva, ADR-0010), `contracts/proto/eci/retrieval/v1/retrieval.proto` (sola lettura); identità fisica opaca ADR-0011
 
 ## 1. Obiettivo
 
@@ -97,6 +97,8 @@ dallo `Scope`; il backend OpenSearch è raggiungibile solo dal servizio.
    materializzati, **allora** tutti e tre gli store contengono le stesse
    etichette piatte e indicizzate; un evento privo di etichette non riceve
    placeholder o default.
+   Lo stesso parser ID in tenant/repository diversi viene namespaced prima
+   della persistenza e non può attivare un upsert/delete cross-scope.
 2. **Dato** un `SecurityContext` autenticato, **quando** si esegue `GetNode`,
    full-text o hydration Neo4j, **allora** la query contiene i tre predicati
    positivi prima di `LIMIT` e usa soltanto parametri derivati dal context.
@@ -137,6 +139,7 @@ dallo `Scope`; il backend OpenSearch è raggiungibile solo dal servizio.
 | OpenSearch DLS attribute assente | 4xx/security error propagato; nessun retry anonimo |
 | re-check Neo4j fallisce | intera richiesta fallisce prima del packing |
 | record cambia ACL tra retrieval e re-check | rimosso dal candidate set |
+| stesso path/simbolo in due ownership scope | ID fisici distinti; nessun overwrite/delete cross-scope |
 | GDS globale | proibito; solo proiezioni per tenant/ACL, fuori dal runtime corrente |
 | Neo4j Community | solo test del filtro applicativo; nessuna dichiarazione di RBAC nativo |
 
@@ -174,6 +177,8 @@ packing, dati unlabeled invisibili, zero wildcard/default e metriche bounded.
 - Modulo 3 §2.4: OpenSearch DLS derivato dallo stesso contesto.
 - Modulo 3 §2.5: filtri identici sulle tre gambe e re-check prima del packing.
 - ADR-0010: etichette additive nella provenance; legacy unlabeled invisibile.
+- ADR-0011: parser ID repository-local, ID persistito namespaced per
+  tenant/repository; ACL escluso dall'hash per consentire revoca in-place.
 
 ## 7. Test plan
 
@@ -212,6 +217,7 @@ etichette e parametri non esistono; il fallimento viene registrato nel commit.
 
 - [x] ADR-0010 e contratto additivo documentano migrazione fail-closed.
 - [x] Nuova ingestion richiede scope esplicito e lo propaga a ogni evento.
+- [x] Identità persistite e delete/replace sono namespaced per ownership.
 - [x] Neo4j, Qdrant e OpenSearch memorizzano etichette piatte indicizzate.
 - [x] Ogni query Neo4j filtra seed, risultati e nodi intermedi.
 - [x] Ogni query Qdrant contiene i tre `must`; config multitenant conforme.
@@ -236,7 +242,8 @@ etichette e parametri non esistono; il fallimento viene registrato nel commit.
   dati condividono transazione/evento e gli upsert restano per id.
 - **Fail closed:** errori DLS/RBAC/re-check non degradano verso query anonime.
 - **Contratto condiviso:** modifica additiva coperta da ADR-0010, con legacy
-  leggibile ma non autorizzato.
+  leggibile ma non autorizzato; l'ID opaco conserva forma D2 ed è namespaced
+  deterministicamente come deliberato da ADR-0011.
 - **Traversal/deadline:** depth/limit restano bounded e lo stesso context/deadline
   viene passato a ogni store.
 - **Decisioni nuove:** extended-proxy verso DLS e proprietà piatte sono

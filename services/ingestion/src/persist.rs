@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use rust_decimal::Decimal;
+use sha2::{Digest, Sha256};
 
 use crate::chunking::CodeChunk;
 use crate::{CodeNode, CodeRelation};
@@ -59,6 +60,25 @@ fn valid_scope_value(value: &str) -> bool {
         && value.trim() == value
         && value.len() <= 256
         && !value.chars().any(char::is_control)
+}
+
+/// Convert a parser-local node identity into the canonical persisted identity.
+/// Tenant and repository are immutable ownership dimensions; ACL is excluded
+/// deliberately so an ACL change updates/revokes the existing object instead
+/// of leaving an old-scope copy readable. Length-prefixing prevents delimiter
+/// ambiguity between otherwise valid scope values.
+pub fn scoped_node_id(scope: &IngestionScope, parser_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"eci-node-id-v2");
+    for component in [scope.tenant_id(), scope.repo(), parser_id] {
+        hasher.update((component.len() as u64).to_be_bytes());
+        hasher.update(component.as_bytes());
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -121,6 +141,7 @@ pub fn persist_parsed_file(
     let mut outbox_rows_written = 0usize;
 
     for node in &nodes {
+        let node_id = scoped_node_id(scope, &node.id);
         // Le etichette sono parte della provenance transazionale e provengono
         // soltanto dall'ingestion context validato (ADR-0010). Non sono mai
         // ricavate dal path, dal payload o da un consumer downstream.
@@ -141,7 +162,7 @@ pub fn persist_parsed_file(
                provenance = EXCLUDED.provenance,
                updated_at = now()",
             &[
-                &node.id,
+                &node_id,
                 &node.node_type,
                 &node.name,
                 &node.ast_hash,
@@ -156,7 +177,7 @@ pub fn persist_parsed_file(
         // `code_node.node_type`, che è una colonna scalare dedicata (DDL
         // SPEC-005, non un riflesso diretto di `ext`).
         let payload = serde_json::json!({
-            "id": node.id,
+            "id": node_id,
             "domain": node.domain,
             "name": node.name,
             "ast_hash": node.ast_hash,
@@ -166,7 +187,7 @@ pub fn persist_parsed_file(
         tx.execute(
             "INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload, trace_id)
              VALUES ('CodeNode', $1, 'UPSERT', $2, $3)",
-            &[&node.id, &payload, &trace_id],
+            &[&node_id, &payload, &trace_id],
         )?;
         outbox_rows_written += 1;
     }
@@ -174,7 +195,11 @@ pub fn persist_parsed_file(
     // Scope del DELETE: SOLO from_id, mai to_id (SPEC-014 §2) — id di
     // TUTTI i nodi appena prodotti da questo file, File incluso (le sue
     // CONTAINS hanno from_id = id del File).
-    let file_node_ids: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+    let file_node_ids_owned: Vec<String> = nodes
+        .iter()
+        .map(|node| scoped_node_id(scope, &node.id))
+        .collect();
+    let file_node_ids: Vec<&str> = file_node_ids_owned.iter().map(String::as_str).collect();
     tx.execute(
         "DELETE FROM code_relation WHERE domain = 'code' AND from_id = ANY($1)",
         &[&file_node_ids],
@@ -182,6 +207,8 @@ pub fn persist_parsed_file(
 
     let mut relations_replaced = 0usize;
     for relation in &relations {
+        let from_id = scoped_node_id(scope, &relation.from_id);
+        let to_id = scoped_node_id(scope, &relation.to_id);
         // NUMERIC via rust_decimal (SPEC-014 §10 — dipendenza aggiunta):
         // la colonna `code_relation.weight` è NUMERIC (DDL SPEC-005); il
         // driver `postgres` non lega direttamente un intero Rust a un
@@ -196,8 +223,8 @@ pub fn persist_parsed_file(
              RETURNING id::text",
             &[
                 &relation.rel_type,
-                &relation.from_id,
-                &relation.to_id,
+                &from_id,
+                &to_id,
                 &weight,
                 &serde_json::json!({
                     "tenant_id": scope.tenant_id(),
@@ -213,8 +240,8 @@ pub fn persist_parsed_file(
             "id": relation_id,
             "domain": relation.domain,
             "rel_type": relation.rel_type,
-            "from_id": relation.from_id,
-            "to_id": relation.to_id,
+            "from_id": from_id,
+            "to_id": to_id,
             "weight": relation.weight,
             "provenance": {
                 "tenant_id": scope.tenant_id(),
@@ -241,18 +268,19 @@ pub fn persist_parsed_file(
 
     // Lookup in memoria file_path per id (SPEC-032 §2): nessuna nuova
     // query, `nodes` è già ricevuto nella STESSA chiamata di `chunks`.
-    let file_path_by_node_id: HashMap<&str, &str> = nodes
+    let file_path_by_node_id: HashMap<String, &str> = nodes
         .iter()
-        .map(|n| (n.id.as_str(), n.file_path.as_str()))
+        .map(|n| (scoped_node_id(scope, &n.id), n.file_path.as_str()))
         .collect();
 
     for chunk in chunks {
+        let entity_id = scoped_node_id(scope, &chunk.entity_id);
         let row = tx.query_one(
             "INSERT INTO code_chunk (entity_id, chunk_index, text, char_count)
              VALUES ($1, $2, $3, $4)
              RETURNING id::text",
             &[
-                &chunk.entity_id,
+                &entity_id,
                 &(chunk.chunk_index as i32),
                 &chunk.text,
                 &(chunk.char_count as i32),
@@ -262,7 +290,7 @@ pub fn persist_parsed_file(
 
         let mut payload = serde_json::json!({
             "id": chunk_id,
-            "entity_id": chunk.entity_id,
+            "entity_id": entity_id,
             "chunk_index": chunk.chunk_index,
             "text": chunk.text,
             "char_count": chunk.char_count,
@@ -271,7 +299,7 @@ pub fn persist_parsed_file(
         // corrente (non dovrebbe accadere per costruzione), `provenance`
         // resta semplicemente omesso dal payload — mai un panic, mai un
         // valore fabbricato.
-        if let Some(file_path) = file_path_by_node_id.get(chunk.entity_id.as_str()) {
+        if let Some(file_path) = file_path_by_node_id.get(&entity_id) {
             payload["provenance"] = serde_json::json!({
                 "path": file_path,
                 "tenant_id": scope.tenant_id(),
