@@ -125,6 +125,10 @@ func TestAuthorizeDerivesAndReplacesReservedMetadata(t *testing.T) {
 	if got := response.Header().Get("traceparent"); got != "00-"+strings.Repeat("11", 16)+"-"+strings.Repeat("11", 8)+"-01" {
 		t.Fatalf("traceparent=%q", got)
 	}
+	wantRateKey := authenticatedCallerRateLimitKey("tenant-a", "alice")
+	if got := response.Header().Get(RateLimitKeyHeader); got != wantRateKey {
+		t.Fatalf("rate-limit key=%q want=%q", got, wantRateKey)
+	}
 	raw, err := base64.StdEncoding.DecodeString(response.Header().Get(SecurityContextHeader))
 	if err != nil {
 		t.Fatal(err)
@@ -140,6 +144,24 @@ func TestAuthorizeDerivesAndReplacesReservedMetadata(t *testing.T) {
 	}
 	if strings.Contains(response.Body.String(), "signed-token") || strings.Contains(response.Body.String(), "secret prompt") {
 		t.Fatal("secret reflected in auth response")
+	}
+}
+
+func TestAuthenticatedCallerRateLimitKeyIsOpaqueStableAndPartitioned(t *testing.T) {
+	alice := authenticatedCallerRateLimitKey("tenant-a", "alice")
+	if alice == "" || alice != authenticatedCallerRateLimitKey("tenant-a", "alice") {
+		t.Fatalf("unstable/empty key %q", alice)
+	}
+	if strings.Contains(alice, "tenant-a") || strings.Contains(alice, "alice") {
+		t.Fatalf("key exposes identity: %q", alice)
+	}
+	for _, candidate := range []string{
+		authenticatedCallerRateLimitKey("tenant-b", "alice"),
+		authenticatedCallerRateLimitKey("tenant-a", "bob"),
+	} {
+		if candidate == alice {
+			t.Fatalf("distinct authenticated caller shared key %q", candidate)
+		}
 	}
 }
 

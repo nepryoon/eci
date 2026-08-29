@@ -22,6 +22,7 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 		"envoy.filters.http.ext_authz",
 		"envoy.filters.http.header_mutation",
 		"envoy.filters.http.local_ratelimit",
+		"envoy.filters.http.header_mutation",
 		"envoy.filters.http.buffer",
 		"envoy.filters.http.grpc_json_transcoder",
 		"envoy.filters.http.router",
@@ -40,6 +41,11 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 		"remove: tracestate",
 		"remove: baggage",
 		"remove: authorization",
+		"remove: x-eci-rate-limit-key",
+		"header_name: x-eci-rate-limit-key",
+		"descriptor_key: authenticated_caller",
+		"key: authenticated_caller",
+		"max_dynamic_descriptors: 10000",
 		"failure_mode_allow: false",
 		"max_request_bytes: 1048576",
 		"reject_unknown_method: true",
@@ -49,6 +55,10 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 		"address: 127.0.0.1",
 		"timeout: 0s",
 		"idle_timeout: 35s",
+		"name: envoy.transport_sockets.tls",
+		"tls_minimum_protocol_version: TLSv1_2",
+		"filename: /etc/envoy/tls/tls.crt",
+		"filename: /etc/envoy/tls/tls.key",
 	} {
 		if !strings.Contains(config, required) {
 			t.Errorf("missing strict config fragment %q", required)

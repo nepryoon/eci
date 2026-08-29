@@ -5,9 +5,16 @@ package edge
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -28,6 +35,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
@@ -38,12 +46,16 @@ const envoyImage = "envoyproxy/envoy:v1.39.0@sha256:d59f7f5fa10cff6d5892b6c5e7df
 type integrationAuthenticator struct{}
 
 func (integrationAuthenticator) Authenticate(_ context.Context, header, traceID string) (*retrievalv1.SecurityContext, error) {
-	if header != "Bearer integration-valid" {
+	identity := map[string][2]string{
+		"Bearer integration-valid": {"tenant-a", "alice"},
+		"Bearer integration-bob":   {"tenant-b", "bob"},
+	}[header]
+	if identity == [2]string{} {
 		return nil, &authn.AuthError{Code: authn.ErrorInvalidToken}
 	}
 	return &retrievalv1.SecurityContext{
-		TenantId:     "tenant-a",
-		UserId:       "alice",
+		TenantId:     identity[0],
+		UserId:       identity[1],
 		AllowedRepos: []string{"repo-a"},
 		AclGroups:    []string{"dev"},
 		TraceId:      traceID,
@@ -160,8 +172,16 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 	helperPort := listenerPort(t, helperListener)
 
 	root := filepath.Clean(filepath.Join("..", "..", "..", ".."))
+	certificatePath, keyPath, roots := writeIntegrationTLSIdentity(t)
+	oldDefaultClient := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    roots,
+		ServerName: "localhost",
+	}}}
+	t.Cleanup(func() { http.DefaultClient = oldDefaultClient })
 	configPath := renderIntegrationEnvoyConfig(t, root, helperPort, grpcPort)
-	baseURL, gatewayAddress := startIntegrationEnvoy(t, ctx, root, configPath, helperPort, grpcPort)
+	baseURL, gatewayAddress := startIntegrationEnvoy(t, ctx, root, configPath, certificatePath, keyPath, helperPort, grpcPort)
 
 	t.Run("health is public and bounded", func(t *testing.T) {
 		response, err := http.Get(baseURL + "/healthz")
@@ -180,6 +200,20 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 		defer response.Body.Close()
 		if response.StatusCode != http.StatusUnauthorized || len(backend.snapshot()) != before {
 			t.Fatalf("status=%d backend calls=%d", response.StatusCode, len(backend.snapshot())-before)
+		}
+	})
+
+	t.Run("plaintext is rejected before bearer authentication", func(t *testing.T) {
+		before := len(backend.snapshot())
+		request, _ := http.NewRequest(http.MethodPost, "http://"+gatewayAddress+"/eci.retrieval.v1.RetrievalEngine/GetNode", strings.NewReader(`{"nodeId":"A"}`))
+		request.Header.Set("Authorization", "Bearer integration-valid")
+		response, err := (&http.Client{Timeout: time.Second}).Do(request)
+		if err == nil {
+			_ = response.Body.Close()
+			t.Fatalf("plaintext unexpectedly returned status %d", response.StatusCode)
+		}
+		if len(backend.snapshot()) != before {
+			t.Fatal("plaintext request reached authenticated backend")
 		}
 	})
 
@@ -216,7 +250,11 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 	})
 
 	t.Run("native gRPC traverses auth and preserves HTTP2", func(t *testing.T) {
-		connection, err := grpc.NewClient(gatewayAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		connection, err := grpc.NewClient(gatewayAddress, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    roots,
+			ServerName: "localhost",
+		})))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -357,6 +395,11 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 		if limited == 0 || delta != allowed {
 			t.Fatalf("allowed=%d limited=%d backend delta=%d", allowed, limited, delta)
 		}
+		response := postJSON(t, baseURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", `{"nodeId":"other-caller"}`, "Bearer integration-bob")
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("one caller exhausted another caller bucket: status=%d", response.StatusCode)
+		}
 	})
 
 	t.Run("auth helper outage fails closed", func(t *testing.T) {
@@ -421,7 +464,7 @@ func startIntegrationHelper(t *testing.T, retrievalAddress string) (net.Listener
 	return listener, server
 }
 
-func startIntegrationEnvoy(t *testing.T, ctx context.Context, root, configPath string, helperPort, grpcPort int) (string, string) {
+func startIntegrationEnvoy(t *testing.T, ctx context.Context, root, configPath, certificatePath, keyPath string, helperPort, grpcPort int) (string, string) {
 	t.Helper()
 	if binary := os.Getenv("ECI_ENVOY_BINARY"); binary != "" {
 		publicPort := availablePort(t)
@@ -435,6 +478,8 @@ func startIntegrationEnvoy(t *testing.T, ctx context.Context, root, configPath s
 		config = strings.Replace(config, "port_value: 8080", "port_value: "+strconv.Itoa(publicPort), 1)
 		config = strings.Replace(config, "port_value: 9901", "port_value: "+strconv.Itoa(adminPort), 1)
 		config = strings.ReplaceAll(config, "/etc/envoy/retrieval.pb", filepath.Join(root, "deploy", "envoy", "retrieval.pb"))
+		config = strings.ReplaceAll(config, "/etc/envoy/tls/tls.crt", certificatePath)
+		config = strings.ReplaceAll(config, "/etc/envoy/tls/tls.key", keyPath)
 		nativeConfig := filepath.Join(t.TempDir(), "envoy-native.yaml")
 		if err := os.WriteFile(nativeConfig, []byte(config), 0o600); err != nil {
 			t.Fatal(err)
@@ -451,7 +496,7 @@ func startIntegrationEnvoy(t *testing.T, ctx context.Context, root, configPath s
 			}
 			_ = command.Wait()
 		})
-		baseURL := "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(publicPort))
+		baseURL := "https://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(publicPort))
 		waitForEnvoyHealth(t, baseURL, output)
 		return baseURL, net.JoinHostPort("127.0.0.1", strconv.Itoa(publicPort))
 	}
@@ -464,8 +509,10 @@ func startIntegrationEnvoy(t *testing.T, ctx context.Context, root, configPath s
 			Files: []testcontainers.ContainerFile{
 				{HostFilePath: configPath, ContainerFilePath: "/etc/envoy/envoy.yaml", FileMode: 0o644},
 				{HostFilePath: filepath.Join(root, "deploy", "envoy", "retrieval.pb"), ContainerFilePath: "/etc/envoy/retrieval.pb", FileMode: 0o644},
+				{HostFilePath: certificatePath, ContainerFilePath: "/etc/envoy/tls/tls.crt", FileMode: 0o644},
+				{HostFilePath: keyPath, ContainerFilePath: "/etc/envoy/tls/tls.key", FileMode: 0o600},
 			},
-			WaitingFor: wait.ForHTTP("/healthz").WithPort("8080/tcp").WithStartupTimeout(time.Minute),
+			WaitingFor: wait.ForListeningPort("8080/tcp").WithStartupTimeout(time.Minute),
 		},
 		Started: true,
 	}
@@ -486,7 +533,49 @@ func startIntegrationEnvoy(t *testing.T, ctx context.Context, root, configPath s
 		t.Fatal(err)
 	}
 	address := net.JoinHostPort(host, mapped.Port())
-	return "http://" + address, address
+	baseURL := "https://" + address
+	waitForEnvoyHealth(t, baseURL, new(strings.Builder))
+	return baseURL, address
+}
+
+func writeIntegrationTLSIdentity(t *testing.T) (string, string, *x509.CertPool) {
+	t.Helper()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	template := &x509.Certificate{
+		SerialNumber:          new(big.Int).SetInt64(1),
+		Subject:               pkix.Name{CommonName: "localhost"},
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		NotBefore:             now.Add(-time.Minute),
+		NotAfter:              now.Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	certificatePath := filepath.Join(directory, "tls.crt")
+	keyPath := filepath.Join(directory, "tls.key")
+	certificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
+	if err := os.WriteFile(certificatePath, certificatePEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(certificatePEM) {
+		t.Fatal("append test certificate")
+	}
+	return certificatePath, keyPath, roots
 }
 
 func availablePort(t *testing.T) int {
