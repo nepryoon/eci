@@ -1,0 +1,35 @@
+neo4j:
+  name: eci-neo4j
+  edition: enterprise
+  acceptLicenseAgreement: "no"
+  minimumClusterSize: 3
+  passwordFromSecret: eci-runtime
+  resources:
+    cpu: "16"
+    memory: 128Gi
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 7474
+  runAsGroup: 7474
+  fsGroup: 7474
+  seccompProfile: {type: RuntimeDefault}
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 7474
+  runAsGroup: 7474
+  allowPrivilegeEscalation: false
+  capabilities: {drop: [ALL]}
+volumes:
+  data:
+    mode: defaultStorageClass
+    defaultStorageClass:
+      requests:
+        storage: 100Gi
+config:
+  server.metrics.prometheus.enabled: "true"
+  server.metrics.prometheus.endpoint: "0.0.0.0:2004"
+services:
+  neo4j:
+    spec: {type: ClusterIP}
+podSpec:
+  podAntiAffinity: true

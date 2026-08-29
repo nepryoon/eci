@@ -1,0 +1,208 @@
+{{- if .Values.dataPlane.enabled }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: eci-postgres
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  instances: {{ .Values.dataPlane.postgres.instances }}
+  imageName: {{ .Values.dataPlane.postgres.image }}
+  primaryUpdateStrategy: unsupervised
+  enableSuperuserAccess: false
+  bootstrap:
+    initdb:
+      database: eci
+      owner: eci
+      secret: {name: {{ .Values.global.existingSecret }}}
+  storage:
+    size: {{ .Values.dataPlane.postgres.storage }}
+    {{- if .Values.global.storageClass }}
+    storageClass: {{ .Values.global.storageClass }}
+    {{- end }}
+  monitoring:
+    # T7.3 owns PodMonitor lifecycle; exporter remains available now.
+    enablePodMonitor: false
+  postgresql:
+    parameters:
+      wal_level: logical
+      max_replication_slots: "10"
+      max_wal_senders: "10"
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: eci-kafka-nodes
+  namespace: data-plane
+  labels:
+    strimzi.io/cluster: eci-kafka
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.dataPlane.kafka.replicas }}
+  roles: [controller, broker]
+  template:
+    pod:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+    kafkaContainer:
+      securityContext:
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+    initContainer:
+      securityContext:
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+  storage:
+    type: persistent-claim
+    size: {{ .Values.dataPlane.kafka.storage }}
+    deleteClaim: false
+    kraftMetadata: shared
+---
+apiVersion: kafka.strimzi.io/v1
+kind: Kafka
+metadata:
+  name: eci-kafka
+  namespace: data-plane
+  annotations:
+    strimzi.io/node-pools: enabled
+    strimzi.io/kraft: enabled
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  kafka:
+    version: {{ .Values.dataPlane.kafka.version | quote }}
+    metadataVersion: "4.3-IV0"
+    listeners:
+      - name: internal
+        port: 9092
+        type: internal
+        tls: true
+    config:
+      offsets.topic.replication.factor: {{ min 3 .Values.dataPlane.kafka.replicas }}
+      transaction.state.log.replication.factor: {{ min 3 .Values.dataPlane.kafka.replicas }}
+      transaction.state.log.min.isr: {{ min 2 .Values.dataPlane.kafka.replicas }}
+      default.replication.factor: {{ min 3 .Values.dataPlane.kafka.replicas }}
+      min.insync.replicas: {{ min 2 .Values.dataPlane.kafka.replicas }}
+  entityOperator:
+    topicOperator: {}
+    userOperator: {}
+    template:
+      pod:
+        securityContext:
+          runAsNonRoot: true
+          seccompProfile: {type: RuntimeDefault}
+      topicOperatorContainer:
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+      userOperatorContainer:
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+---
+apiVersion: opensearch.opster.io/v1
+kind: OpenSearchCluster
+metadata:
+  name: eci-opensearch
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  general:
+    serviceName: eci-opensearch
+    version: {{ .Values.dataPlane.openSearch.version | quote }}
+    httpPort: 9200
+    vendor: opensearch
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      fsGroup: 1000
+      seccompProfile: {type: RuntimeDefault}
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      allowPrivilegeEscalation: false
+      capabilities: {drop: [ALL]}
+  initHelper:
+    image: docker.io/busybox
+    version: "1.37.0"
+    imagePullPolicy: IfNotPresent
+  security:
+    config:
+      adminCredentialsSecret:
+        name: {{ .Values.dataPlane.openSearch.adminCredentialsSecret }}
+      securityConfigSecret:
+        name: {{ .Values.dataPlane.openSearch.securityConfigSecret }}
+    tls:
+      transport:
+        generate: true
+      http:
+        generate: true
+  nodePools:
+    - component: masters
+      replicas: {{ .Values.dataPlane.openSearch.replicas }}
+      diskSize: {{ .Values.dataPlane.openSearch.storage }}
+      roles: [cluster_manager, data, ingest]
+      resources:
+        {{- toYaml .Values.dataPlane.openSearch.resources | nindent 8 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qdrant-collection-bootstrap
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qdrant-collection-bootstrap
+        app.kubernetes.io/component: bootstrap
+        app.kubernetes.io/part-of: eci
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "eci.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: bootstrap
+          image: "curlimages/curl:8.16.0"
+          securityContext:
+            {{- include "eci.containerSecurityContext" . | nindent 12 }}
+          env:
+            - {name: SHARD_NUMBER, value: {{ .Values.dataPlane.qdrant.shardNumber | quote }}}
+            - {name: REPLICATION_FACTOR, value: {{ .Values.dataPlane.qdrant.replicationFactor | quote }}}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              endpoint=http://qdrant.data-plane.svc:6333/collections/code_embeddings
+              body="{\"vectors\":{\"size\":1536,\"distance\":\"Cosine\"},\"shard_number\":${SHARD_NUMBER},\"replication_factor\":${REPLICATION_FACTOR}}"
+              status="$(curl -sS -o /tmp/current -w '%{http_code}' "$endpoint")"
+              if [ "$status" = 404 ]; then curl -fsS -X PUT -H 'content-type: application/json' --data "$body" "$endpoint"; exit 0; fi
+              test "$status" = 200
+              grep -q "\"shard_number\":${SHARD_NUMBER}" /tmp/current
+              grep -q "\"replication_factor\":${REPLICATION_FACTOR}" /tmp/current
+          readinessProbe:
+            exec: {command: ["/bin/sh", "-c", "test -r /proc/self/status"]}
+          livenessProbe:
+            exec: {command: ["/bin/sh", "-c", "test -r /proc/self/status"]}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

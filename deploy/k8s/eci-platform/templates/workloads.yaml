@@ -1,0 +1,122 @@
+{{- if .Values.applications.enabled }}
+{{- range $workload := .Values.applications.workloads }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $workload.name }}
+  namespace: {{ $workload.namespace }}
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $workload.name }}
+  namespace: {{ $workload.namespace }}
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+    app.kubernetes.io/name: {{ $workload.name }}
+spec:
+  replicas: {{ $workload.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  selector:
+    matchLabels:
+      {{- include "eci.selectorLabels" (dict "name" $workload.name) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "eci.selectorLabels" (dict "name" $workload.name) | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ $workload.metricsPort | quote }}
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: {{ $workload.name }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "eci.podSecurityContext" $ | nindent 8 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "eci.selectorLabels" (dict "name" $workload.name) | nindent 14 }}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "eci.selectorLabels" (dict "name" $workload.name) | nindent 14 }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "eci.selectorLabels" (dict "name" $workload.name) | nindent 20 }}
+      containers:
+        - name: {{ $workload.name }}
+          image: {{ include "eci.image" (dict "root" $ "workload" $workload) | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            {{- include "eci.containerSecurityContext" $ | nindent 12 }}
+          ports:
+            - {name: service, containerPort: {{ $workload.port }}}
+            - {name: metrics, containerPort: {{ $workload.metricsPort }}}
+          envFrom:
+            - secretRef:
+                name: {{ $.Values.global.existingSecret }}
+          readinessProbe:
+            tcpSocket: {port: service}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket: {port: service}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            {{- toYaml (index $.Values.resources $workload.profile) | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $workload.name }}
+  namespace: {{ $workload.namespace }}
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eci.selectorLabels" (dict "name" $workload.name) | nindent 4 }}
+  ports:
+    - {name: service, port: {{ $workload.port }}, targetPort: service}
+    - {name: metrics, port: {{ $workload.metricsPort }}, targetPort: metrics}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $workload.name }}
+  namespace: {{ $workload.namespace }}
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "eci.selectorLabels" (dict "name" $workload.name) | nindent 6 }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,85 @@
+global:
+  imageRegistry: ghcr.io/nepryoon/eci
+  imageTag: "0.1.0"
+  existingSecret: eci-runtime
+  storageClass: ""
+  profile: production-like
+  highAvailability: true
+  neo4jEdition: enterprise
+
+namespaces:
+  create: true
+
+applications:
+  enabled: true
+  workloads:
+    - {name: envoy, namespace: ingress, image: "envoyproxy/envoy:v1.39.0", port: 8443, metricsPort: 9901, replicas: 2, profile: io}
+    - {name: api-gateway, namespace: ingress, port: 8081, metricsPort: 9107, replicas: 2, profile: io}
+    - {name: orchestrator, namespace: query-plane, port: 8080, metricsPort: 9090, replicas: 3, profile: io}
+    - {name: retrieval-engine, namespace: query-plane, port: 50053, metricsPort: 9105, replicas: 4, profile: io}
+    - {name: verification, namespace: query-plane, port: 8080, metricsPort: 9090, replicas: 2, profile: io}
+    - {name: llm-gateway, namespace: query-plane, port: 8002, metricsPort: 9090, replicas: 2, profile: io}
+    - {name: summarization, namespace: query-plane, port: 8080, metricsPort: 9090, replicas: 2, profile: io}
+    - {name: semantic-cache, namespace: query-plane, port: 50054, metricsPort: 9106, replicas: 2, profile: io}
+    - {name: ingestion, namespace: ingestion-plane, port: 9100, metricsPort: 9100, replicas: 4, profile: cpu}
+    - {name: embedding-worker, namespace: ingestion-plane, port: 9102, metricsPort: 9102, replicas: 2, profile: io}
+    - {name: sink-graph, namespace: ingestion-plane, port: 9101, metricsPort: 9101, replicas: 2, profile: io}
+    - {name: sink-vector, namespace: ingestion-plane, port: 9103, metricsPort: 9103, replicas: 2, profile: io}
+    - {name: sink-search, namespace: ingestion-plane, port: 9104, metricsPort: 9104, replicas: 2, profile: io}
+    - {name: vllm, namespace: gpu-plane, image: "vllm/vllm-openai:v0.28.0", port: 8000, metricsPort: 8000, replicas: 1, profile: gpu-vllm}
+    - {name: embedder, namespace: gpu-plane, image: "ghcr.io/huggingface/text-embeddings-inference:1.8", port: 80, metricsPort: 80, replicas: 1, profile: gpu-small}
+    - {name: reranker, namespace: gpu-plane, image: "ghcr.io/huggingface/text-embeddings-inference:1.8", port: 80, metricsPort: 80, replicas: 1, profile: gpu-small}
+
+resources:
+  io:
+    requests: {cpu: "1", memory: 2Gi}
+    limits: {cpu: "4", memory: 8Gi}
+  cpu:
+    requests: {cpu: "4", memory: 8Gi}
+    limits: {cpu: "8", memory: 12Gi}
+  gpu-vllm:
+    requests: {cpu: "16", memory: 96Gi, nvidia.com/gpu: "1"}
+    limits: {cpu: "24", memory: 120Gi, nvidia.com/gpu: "1"}
+  gpu-small:
+    requests: {cpu: "4", memory: 16Gi, nvidia.com/mig-1g.10gb: "1"}
+    limits: {cpu: "8", memory: 24Gi, nvidia.com/mig-1g.10gb: "1"}
+  java:
+    requests: {cpu: "1", memory: 1Gi}
+    limits: {cpu: "2", memory: 2Gi}
+
+batch:
+  gds:
+    schedule: "0 2 * * *"
+    profile: io
+
+cdc:
+  enabled: true
+  image: quay.io/debezium/connect:3.6.0.Final
+  replicas: 2
+  heapOptions: "-Xms256M -Xmx1536M"
+  resources:
+    requests: {cpu: "1", memory: 1Gi}
+    limits: {cpu: "2", memory: 2Gi}
+
+dataPlane:
+  enabled: true
+  postgres:
+    instances: 3
+    image: ghcr.io/cloudnative-pg/postgresql:17.6
+    storage: 100Gi
+  kafka:
+    replicas: 3
+    version: "4.3.1"
+    storage: 500Gi
+  openSearch:
+    replicas: 3
+    version: "3.2.0"
+    storage: 30Gi
+    adminCredentialsSecret: eci-opensearch-admin
+    securityConfigSecret: eci-opensearch-security-config
+    resources:
+      requests: {cpu: "2", memory: 4Gi}
+      limits: {cpu: "8", memory: 32Gi}
+  qdrant:
+    shardNumber: 3
+    replicationFactor: 2

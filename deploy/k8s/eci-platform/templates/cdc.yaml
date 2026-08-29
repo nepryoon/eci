@@ -1,0 +1,200 @@
+{{- if .Values.cdc.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eci-debezium-connector
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+data:
+  connector.json: |
+    {
+      "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+      "database.hostname": "eci-postgres-rw.data-plane.svc",
+      "database.port": "5432",
+      "database.user": "eci",
+      "database.password": "${env:POSTGRES_PASSWORD}",
+      "database.dbname": "eci",
+      "topic.prefix": "eci",
+      "table.include.list": "public.outbox",
+      "plugin.name": "pgoutput",
+      "slot.name": "eci_outbox_slot",
+      "publication.name": "eci_outbox_publication",
+      "publication.autocreate.mode": "filtered",
+      "transforms": "outbox",
+      "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+      "transforms.outbox.route.by.field": "aggregate_type",
+      "transforms.outbox.table.field.event.key": "aggregate_id",
+      "transforms.outbox.table.expand.json.payload": "true",
+      "transforms.outbox.table.fields.additional.placement": "trace_id:header:trace_id,id:header:event_id",
+      "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+      "key.converter.schemas.enable": "false",
+      "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+      "value.converter.schemas.enable": "false"
+    }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kafka-connect
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-connect
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+    app.kubernetes.io/name: kafka-connect
+spec:
+  replicas: {{ .Values.cdc.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  selector:
+    matchLabels:
+      {{- include "eci.selectorLabels" (dict "name" "kafka-connect") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "eci.selectorLabels" (dict "name" "kafka-connect") | nindent 8 }}
+    spec:
+      serviceAccountName: kafka-connect
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "eci.selectorLabels" (dict "name" "kafka-connect") | nindent 14 }}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "eci.selectorLabels" (dict "name" "kafka-connect") | nindent 14 }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "eci.selectorLabels" (dict "name" "kafka-connect") | nindent 20 }}
+      initContainers:
+        - name: writable-config
+          image: {{ .Values.cdc.image | quote }}
+          command: ["/bin/bash", "-ec"]
+          args: ["cp -R /kafka/config.orig/. /work-config/"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 128Mi}
+          volumeMounts:
+            - {name: config, mountPath: /work-config}
+      containers:
+        - name: kafka-connect
+          image: {{ .Values.cdc.image | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+          ports:
+            - {name: rest, containerPort: 8083}
+          env:
+            - {name: BOOTSTRAP_SERVERS, value: "eci-kafka-kafka-bootstrap.data-plane.svc:9092"}
+            - {name: GROUP_ID, value: "eci-connect"}
+            - {name: CONFIG_STORAGE_TOPIC, value: "eci_connect_configs"}
+            - {name: OFFSET_STORAGE_TOPIC, value: "eci_connect_offsets"}
+            - {name: STATUS_STORAGE_TOPIC, value: "eci_connect_status"}
+            - {name: HEAP_OPTS, value: {{ .Values.cdc.heapOptions | quote }}}
+            - {name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR, value: {{ min 3 .Values.dataPlane.kafka.replicas | quote }}}
+            - {name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR, value: {{ min 3 .Values.dataPlane.kafka.replicas | quote }}}
+            - {name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR, value: {{ min 3 .Values.dataPlane.kafka.replicas | quote }}}
+            - {name: CONNECT_SECURITY_PROTOCOL, value: "SSL"}
+            - {name: CONNECT_SSL_TRUSTSTORE_TYPE, value: "PEM"}
+            - {name: CONNECT_SSL_TRUSTSTORE_LOCATION, value: "/etc/kafka-ca/ca.crt"}
+            - {name: CONNECT_CONFIG_PROVIDERS, value: "env"}
+            - {name: CONNECT_CONFIG_PROVIDERS_ENV_CLASS, value: "org.apache.kafka.common.config.provider.EnvVarConfigProvider"}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.global.existingSecret }}, key: password}
+          startupProbe:
+            httpGet: {path: /connectors, port: rest}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /connectors, port: rest}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: {path: /connectors, port: rest}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.cdc.resources | nindent 12 }}
+          volumeMounts:
+            - {name: kafka-ca, mountPath: /etc/kafka-ca, readOnly: true}
+            - {name: config, mountPath: /kafka/config}
+            - {name: data, mountPath: /kafka/data}
+            - {name: logs, mountPath: /kafka/logs}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: kafka-ca
+          secret: {secretName: eci-kafka-cluster-ca-cert}
+        - {name: config, emptyDir: {}}
+        - {name: data, emptyDir: {}}
+        - {name: logs, emptyDir: {}}
+        - {name: tmp, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-connect
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eci.selectorLabels" (dict "name" "kafka-connect") | nindent 4 }}
+  ports:
+    - {name: rest, port: 8083, targetPort: rest}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: kafka-connect
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "eci.selectorLabels" (dict "name" "kafka-connect") | nindent 6 }}
+{{- end }}

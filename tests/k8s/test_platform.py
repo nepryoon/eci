@@ -62,16 +62,24 @@ class PlatformChartTests(unittest.TestCase):
             ("query-plane", "summarization"),
             ("query-plane", "semantic-cache"),
             ("ingestion-plane", "embedding-worker"),
+            ("ingestion-plane", "ingestion"),
             ("ingestion-plane", "sink-graph"),
             ("ingestion-plane", "sink-vector"),
             ("ingestion-plane", "sink-search"),
             ("gpu-plane", "vllm"),
             ("gpu-plane", "embedder"),
             ("gpu-plane", "reranker"),
+            ("data-plane", "kafka-connect"),
         }
         self.assertTrue(expected.issubset(deployments), expected - deployments)
         cronjobs = {obj["metadata"]["name"] for obj in self.standard if obj.get("kind") == "CronJob"}
-        self.assertTrue({"ingestion", "gds-impact"}.issubset(cronjobs))
+        self.assertEqual(cronjobs, {"gds-impact"})
+        connector = self.by_key[("ConfigMap", "data-plane", "eci-debezium-connector")]
+        connector_config = connector["data"]["connector.json"]
+        self.assertIn("io.debezium.connector.postgresql.PostgresConnector", connector_config)
+        self.assertIn("io.debezium.transforms.outbox.EventRouter", connector_config)
+        self.assertIn("${env:POSTGRES_PASSWORD}", connector_config)
+        self.assertNotIn("eci-dev-only", connector_config)
 
     def test_scenario_2_stateful_operator_contracts(self) -> None:
         kafka = self.by_key[("Kafka", "data-plane", "eci-kafka")]
@@ -84,9 +92,26 @@ class PlatformChartTests(unittest.TestCase):
         self.assertEqual(pool["spec"]["storage"]["type"], "persistent-claim")
         self.assertEqual(postgres["spec"]["instances"], 3)
         self.assertTrue(postgres["spec"]["imageName"].endswith(":17.6"))
+        self.assertEqual(postgres["spec"]["postgresql"]["parameters"]["wal_level"], "logical")
         self.assertEqual(opensearch["apiVersion"], "opensearch.opster.io/v1")
         self.assertEqual(opensearch["spec"]["nodePools"][0]["replicas"], 3)
-        self.assertNotEqual(opensearch["spec"]["security"].get("config"), {"securityConfigSecret": {"name": ""}})
+        self.assertEqual(
+            opensearch["spec"]["security"]["config"],
+            {
+                "adminCredentialsSecret": {"name": "eci-opensearch-admin"},
+                "securityConfigSecret": {"name": "eci-opensearch-security-config"},
+            },
+        )
+        self.assertTrue(opensearch["spec"]["security"]["tls"]["http"]["generate"])
+        self.assertTrue(opensearch["spec"]["security"]["tls"]["transport"]["generate"])
+
+        connect = self.by_key[("Deployment", "data-plane", "kafka-connect")]
+        connect_container = connect["spec"]["template"]["spec"]["containers"][0]
+        env = {item["name"]: item for item in connect_container["env"]}
+        self.assertEqual(env["CONNECT_SECURITY_PROTOCOL"]["value"], "SSL")
+        self.assertEqual(env["CONNECT_CONFIG_PROVIDERS"]["value"], "env")
+        self.assertIn("secretKeyRef", env["POSTGRES_PASSWORD"]["valueFrom"])
+        self.assertEqual(connect_container["securityContext"]["readOnlyRootFilesystem"], True)
 
         qdrant_values = yaml.safe_load((ROOT / "deploy/k8s/vendor-values/qdrant.yaml").read_text())
         self.assertEqual(qdrant_values["replicaCount"], 3)
@@ -95,6 +120,21 @@ class PlatformChartTests(unittest.TestCase):
         env = bootstrap["spec"]["template"]["spec"]["containers"][0]["env"]
         self.assertIn({"name": "SHARD_NUMBER", "value": "3"}, env)
         self.assertIn({"name": "REPLICATION_FACTOR", "value": "2"}, env)
+
+        neo4j_core = yaml.safe_load((ROOT / "deploy/k8s/vendor-values/neo4j-core.yaml").read_text())
+        neo4j_gds = yaml.safe_load((ROOT / "deploy/k8s/vendor-values/neo4j-gds.yaml").read_text())
+        self.assertEqual(neo4j_core["neo4j"]["edition"], "enterprise")
+        self.assertEqual(neo4j_core["neo4j"]["minimumClusterSize"], 3)
+        self.assertEqual(neo4j_core["neo4j"]["resources"]["memory"], "128Gi")
+        self.assertEqual(neo4j_core["neo4j"]["acceptLicenseAgreement"], "no")
+        self.assertEqual(neo4j_gds["neo4j"]["resources"]["memory"], "256Gi")
+        self.assertTrue(neo4j_gds["neo4j"]["operations"]["enableServer"])
+        self.assertEqual(neo4j_gds["config"]["server.cluster.system_database_mode"], "SECONDARY")
+        self.assertEqual(neo4j_gds["config"]["initial.server.mode_constraint"], "SECONDARY")
+        installer = (ROOT / "deploy/k8s/install-operators.sh").read_text()
+        self.assertIn("for member in 1 2 3", installer)
+        self.assertIn('"neo4j-core-${member}"', installer)
+        self.assertIn("NEO4J_ACCEPT_LICENSE_AGREEMENT", installer)
 
     def test_scenario_3_stateless_availability(self) -> None:
         deployments = [obj for obj in self.standard if obj.get("kind") == "Deployment"]
@@ -126,14 +166,26 @@ class PlatformChartTests(unittest.TestCase):
             with self.subTest(kind=obj["kind"], name=obj["metadata"]["name"]):
                 self.assertFalse(pod.get("automountServiceAccountToken", True))
                 self.assertEqual(pod["securityContext"]["seccompProfile"]["type"], "RuntimeDefault")
-                for container in pod["containers"]:
+                for container in pod.get("initContainers", []) + pod["containers"]:
                     security = container["securityContext"]
                     self.assertTrue(security["runAsNonRoot"])
                     self.assertFalse(security["allowPrivilegeEscalation"])
                     self.assertEqual(security["capabilities"]["drop"], ["ALL"])
         policies = {(obj["metadata"]["namespace"], obj["metadata"]["name"]) for obj in self.standard if obj.get("kind") == "NetworkPolicy"}
-        for namespace in {"ingress", "query-plane", "gpu-plane", "ingestion-plane", "data-plane"}:
+        for namespace in {"ingress", "query-plane", "gpu-plane", "ingestion-plane", "data-plane", "observability"}:
             self.assertIn((namespace, "default-deny"), policies)
+        for name in {
+            "allow-kube-api-strimzi",
+            "allow-kube-api-strimzi-entity",
+            "allow-kube-api-cloudnative-pg",
+            "allow-kube-api-cnpg-instance",
+            "allow-kube-api-opensearch",
+        }:
+            policy = self.by_key[("NetworkPolicy", "data-plane", name)]
+            self.assertEqual(
+                policy["spec"]["egress"][0]["ports"],
+                [{"protocol": "TCP", "port": 443}, {"protocol": "TCP", "port": 6443}],
+            )
 
     def test_scenario_5_dev_overlay_is_explicitly_reduced(self) -> None:
         standard = keyed(self.standard)
@@ -143,7 +195,38 @@ class PlatformChartTests(unittest.TestCase):
         self.assertEqual(dev[("OpenSearchCluster", "data-plane", "eci-opensearch")]["spec"]["nodePools"][0]["replicas"], 1)
         self.assertEqual(dev[("ConfigMap", "data-plane", "eci-profile")]["data"]["ha"], "false")
         self.assertEqual(dev[("ConfigMap", "data-plane", "eci-profile")]["data"]["neo4jEdition"], "community")
+        self.assertEqual(dev[("Deployment", "data-plane", "kafka-connect")]["spec"]["replicas"], 1)
         self.assertEqual(standard[("ConfigMap", "data-plane", "eci-profile")]["data"]["ha"], "true")
+        self.assertNotIn(("Deployment", "ingress", "keycloak"), standard)
+        self.assertIn(("Deployment", "ingress", "keycloak"), dev)
+        self.assertFalse(any(obj.get("kind") == "Secret" for obj in self.dev))
+        self.assertFalse(any(obj.get("kind") == "CronJob" for obj in self.dev))
+        self.assertFalse(
+            any(
+                container.get("image", "").startswith("ghcr.io/nepryoon/eci/")
+                for obj in self.dev
+                for container in self._containers(obj)
+            )
+        )
+
+    def test_scenario_7_dev_scripts_preserve_restricted_security_and_random_secrets(self) -> None:
+        up = (ROOT / "deploy/k8s/dev-up.sh").read_text()
+        verify = (ROOT / "deploy/k8s/dev-verify.sh").read_text()
+        self.assertIn("openssl rand -hex", up)
+        self.assertIn("get secret eci-runtime", up)
+        self.assertIn("hash.sh", up)
+        self.assertIn("eci-opensearch-security-config", up)
+        self.assertNotIn("admin:admin", up)
+        self.assertNotIn("--from-literal=password", up)
+        self.assertNotIn('-p "$ECI_DEV_PASSWORD"', up)
+        self.assertIn("--from-env-file", up)
+        self.assertIn("runAsNonRoot: true", verify)
+        self.assertIn("seccompProfile: {type: RuntimeDefault}", verify)
+        self.assertIn("capabilities: {drop: [ALL]}", verify)
+        self.assertIn("neo4j.data-plane.svc:7687", verify)
+        self.assertIn("qdrant.data-plane.svc:6334", verify)
+        self.assertIn("SHOW wal_level", verify)
+        self.assertIn("io.debezium.connector.postgresql.PostgresConnector", verify)
 
     def test_scenario_6_versions_and_api_groups_are_pinned(self) -> None:
         versions = yaml.safe_load((ROOT / "deploy/k8s/operator-versions.yaml").read_text())
@@ -153,8 +236,15 @@ class PlatformChartTests(unittest.TestCase):
                 "strimzi": {"release": "1.2.0"},
                 "cloudnativePG": {"chart": "0.29.0", "app": "1.30.0"},
                 "openSearchOperator": {"chart": "2.8.0", "app": "2.8.0"},
-                "neo4j": {"chart": "2026.7.1"},
+                "neo4j": {"chart": "5.26.30", "app": "5.26.30"},
                 "qdrant": {"chart": "1.19.0", "app": "v1.19.0"},
+                "toolchain": {
+                    "helm": "3.19.0",
+                    "kind": "0.33.0",
+                    "kubeconform": "0.8.0",
+                    "kubernetes": "1.34.0",
+                    "kubectl": "1.34.0",
+                },
             },
         )
         for obj in self.standard:

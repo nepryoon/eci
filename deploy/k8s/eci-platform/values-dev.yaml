@@ -1,0 +1,42 @@
+global:
+  imageTag: 0.1.0-dev
+  profile: dev
+  highAvailability: false
+  neo4jEdition: community
+
+namespaces:
+  create: false
+
+applications:
+  # No ECI application images are published yet. Infrastructure-only smoke
+  # remains honest and never substitutes placeholders.
+  enabled: false
+
+cdc:
+  replicas: 1
+  heapOptions: "-Xms256M -Xmx768M"
+  resources:
+    requests: {cpu: 100m, memory: 512Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
+resources:
+  io:
+    requests: {cpu: 25m, memory: 32Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+  cpu:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: "1", memory: 512Mi}
+  java:
+    requests: {cpu: 100m, memory: 768Mi}
+    limits: {cpu: "1", memory: 1536Mi}
+
+dataPlane:
+  postgres: {instances: 1, storage: 1Gi}
+  kafka: {replicas: 1, storage: 1Gi}
+  openSearch:
+    replicas: 1
+    storage: 2Gi
+    resources:
+      requests: {cpu: 100m, memory: 1Gi}
+      limits: {cpu: "1", memory: 2Gi}
+  qdrant: {shardNumber: 1, replicationFactor: 1}

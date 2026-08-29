@@ -1,0 +1,188 @@
+{{- range $namespace := list "ingress" "query-plane" "gpu-plane" "ingestion-plane" "data-plane" "observability" }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-observability-probes
+  namespace: observability
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - {key: kubernetes.io/metadata.name, operator: In, values: [ingress, query-plane, gpu-plane, ingestion-plane, data-plane]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-d8-internal
+  namespace: query-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - {key: kubernetes.io/metadata.name, operator: In, values: [ingress, query-plane, observability]}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - {key: kubernetes.io/metadata.name, operator: In, values: [query-plane, gpu-plane, data-plane]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingestion-to-data
+  namespace: ingestion-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: data-plane}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-data-plane
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - {key: kubernetes.io/metadata.name, operator: In, values: [data-plane, query-plane, ingestion-plane, observability]}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: data-plane}
+{{- $apiClients := list
+  (dict "name" "strimzi" "selector" (dict "name" "strimzi-cluster-operator"))
+  (dict "name" "strimzi-entity" "selector" (dict "app.kubernetes.io/name" "entity-operator"))
+  (dict "name" "cloudnative-pg" "selector" (dict "app.kubernetes.io/name" "cloudnative-pg"))
+  (dict "name" "cnpg-instance" "selector" (dict "app.kubernetes.io/managed-by" "cloudnative-pg"))
+  (dict "name" "opensearch" "selector" (dict "control-plane" "controller-manager"))
+}}
+{{- range $client := $apiClients }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kube-api-{{ $client.name }}
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $client.selector | nindent 6 }}
+  policyTypes: [Egress]
+  # Native NetworkPolicy cannot select the kubernetes Service by name and
+  # service DNAT ordering differs between CNIs. Limit this portable exception
+  # to known control-plane clients and the two API ports.
+  egress:
+    - ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 6443}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-query-to-gpu
+  namespace: gpu-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - {key: kubernetes.io/metadata.name, operator: In, values: [query-plane, observability]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-internal
+  namespace: ingress
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - {key: kubernetes.io/metadata.name, operator: In, values: [ingress, observability]}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - {key: kubernetes.io/metadata.name, operator: In, values: [ingress, query-plane]}
+{{- if .Values.applications.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-edge
+  namespace: ingress
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: envoy}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{protocol: TCP, port: 8443}]
+  egress:
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: api-gateway}}
+{{- end }}

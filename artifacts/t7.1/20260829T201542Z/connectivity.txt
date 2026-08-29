@@ -1,0 +1,13 @@
+eci-postgres-rw.data-plane.svc:5432=PASS
+eci-kafka-kafka-bootstrap.data-plane.svc:9092=PASS
+kafka-connect.data-plane.svc:8083=PASS
+debezium-postgresql-plugin=PASS
+neo4j.data-plane.svc:7687=PASS
+qdrant.data-plane.svc:6333=PASS
+qdrant.data-plane.svc:6334=PASS
+eci-opensearch.data-plane.svc:9200=PASS
+redis.data-plane.svc:6379=PASS
+minio.data-plane.svc:9000=PASS
+opa.query-plane.svc:8181=PASS
+keycloak.ingress.svc:8080=PASS
+overall=PASS

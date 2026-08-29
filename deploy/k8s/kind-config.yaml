@@ -1,0 +1,7 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: eci-dev
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - {containerPort: 30443, hostPort: 8443, protocol: TCP}

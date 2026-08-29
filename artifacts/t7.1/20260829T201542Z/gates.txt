@@ -1,0 +1,12 @@
+task build=PASS
+task lint=PASS
+task test=PASS
+task test:integration=PASS
+task guard=PASS
+task k8s:validate=PASS
+task proto:gen=PASS (no diff)
+task schema:gen=PASS (no diff)
+task envoy:descriptor=PASS (no diff)
+task proto:lint=PASS
+task proto:breaking=PASS
+secret_pattern_scan=PASS (no new credential/private-key pattern)

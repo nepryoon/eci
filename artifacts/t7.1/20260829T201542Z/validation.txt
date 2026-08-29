@@ -1,0 +1,9 @@
+helm_lint=PASS
+standard_policy=PASS (119 objects)
+standard_kubeconform=PASS (119 valid, 0 invalid, 0 errors, 0 skipped)
+dev_policy=PASS (50 objects)
+dev_kubeconform=PASS (50 valid, 0 invalid, 0 errors, 0 skipped)
+spec_062_unit_tests=PASS (8 tests)
+neo4j_5_26_30_dev_values_render=PASS
+neo4j_5_26_30_core_values_render=PASS
+neo4j_5_26_30_gds_secondary_values_render=PASS

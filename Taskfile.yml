@@ -159,3 +159,28 @@ tasks:
     desc: Fallisce se contracts/ o docs/add/ sono toccati senza un ADR nello stesso commit
     cmds:
       - bash scripts/guard.sh
+
+  k8s:render:
+    desc: Renderizza il chart ECI production-like senza accesso al cluster
+    cmds:
+      - helm template eci deploy/k8s/eci-platform --namespace query-plane
+
+  k8s:validate:
+    desc: Helm lint/render, policy, schemi kubeconform e test SPEC-062 CPU-only
+    cmds:
+      - bash scripts/k8s-validate.sh
+
+  k8s:dev:up:
+    desc: Crea/aggiorna il solo cluster kind eci-dev con operatori pinned
+    cmds:
+      - bash deploy/k8s/dev-up.sh
+
+  k8s:dev:verify:
+    desc: Verifica readiness e connettività reale nel cluster kind eci-dev
+    cmds:
+      - bash deploy/k8s/dev-verify.sh
+
+  k8s:dev:down:
+    desc: Elimina esclusivamente il cluster kind locale eci-dev
+    cmds:
+      - bash deploy/k8s/dev-down.sh

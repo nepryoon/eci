@@ -1,0 +1,20 @@
+strimzi:
+  release: "1.2.0"
+cloudnativePG:
+  chart: "0.29.0"
+  app: "1.30.0"
+openSearchOperator:
+  chart: "2.8.0"
+  app: "2.8.0"
+neo4j:
+  chart: "5.26.30"
+  app: "5.26.30"
+qdrant:
+  chart: "1.19.0"
+  app: "v1.19.0"
+toolchain:
+  helm: "3.19.0"
+  kind: "0.33.0"
+  kubeconform: "0.8.0"
+  kubernetes: "1.34.0"
+  kubectl: "1.34.0"

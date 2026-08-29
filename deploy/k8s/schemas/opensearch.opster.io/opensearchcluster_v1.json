@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {"enum": ["opensearch.opster.io/v1"]},
+    "kind": {"enum": ["OpenSearchCluster"]},
+    "metadata": {"type": "object", "required": ["name", "namespace"]},
+    "spec": {
+      "type": "object", "required": ["general", "nodePools"],
+      "properties": {
+        "general": {"type": "object", "required": ["serviceName", "version"]},
+        "nodePools": {"type": "array", "minItems": 1}
+      }
+    }
+  }
+}

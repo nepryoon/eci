@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eci-profile
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+data:
+  profile: {{ .Values.global.profile | quote }}
+  ha: {{ .Values.global.highAvailability | quote }}
+  neo4jEdition: {{ .Values.global.neo4jEdition | quote }}
+  warning: {{ ternary "production-like sizing; licensing and secrets remain operator responsibilities" "development only; no HA, Enterprise RBAC, GPU or D9 evidence" .Values.global.highAvailability | quote }}
