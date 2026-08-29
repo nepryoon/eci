@@ -94,3 +94,33 @@ func TestScopeReturnsDefensiveCopies(t *testing.T) {
 		t.Fatalf("context scope was mutated: %v", again.AllowedRepos)
 	}
 }
+
+func TestFingerprintIsCanonicalAndExcludesUserIdentity(t *testing.T) {
+	want := "c94ba9d3ff0d97a5fd8414abbcbad8c01bdc54c35436a9a69496e0b0d184eafa"
+	first := Scope{
+		TenantID:     "tenant-a",
+		UserID:       "user-one",
+		AllowedRepos: []string{"repo-a", "repo-b"},
+		ACLGroups:    []string{"engineering", "readers"},
+	}
+	second := Scope{
+		TenantID:     "tenant-a",
+		UserID:       "different-user",
+		AllowedRepos: []string{"repo-b", "repo-a", "repo-a"},
+		ACLGroups:    []string{"readers", "engineering", "readers"},
+	}
+	if got := Fingerprint(first); got != want {
+		t.Fatalf("Fingerprint(first) = %q, want shared vector %q", got, want)
+	}
+	if got := Fingerprint(second); got != want {
+		t.Fatalf("Fingerprint(second) = %q, want canonical %q", got, want)
+	}
+}
+
+func TestFingerprintSeparatesLengthDelimitedScopes(t *testing.T) {
+	a := Scope{TenantID: "ab", AllowedRepos: []string{"c"}, ACLGroups: []string{"d"}}
+	b := Scope{TenantID: "a", AllowedRepos: []string{"bc"}, ACLGroups: []string{"d"}}
+	if Fingerprint(a) == Fingerprint(b) {
+		t.Fatal("different length-delimited scopes produced the same fingerprint")
+	}
+}
