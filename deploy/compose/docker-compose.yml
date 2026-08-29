@@ -38,6 +38,26 @@ volumes:
     name: eci_kafka_data
 
 services:
+  opa:
+    # SPEC-056 (T6.2) — PDP ABAC centralizzato. Versione immutabile,
+    # pubblicata il 2026-08-28; la policy e' montata read-only e parte in
+    # default-deny. HTTP e porta host sono esclusivamente per sviluppo.
+    image: openpolicyagent/opa:1.20.1
+    command: ["run", "--server", "--addr=0.0.0.0:8181", "--log-format=json", "/policies"]
+    ports:
+      - "8181:8181"
+    volumes:
+      - ./opa/policies/eci_authz.rego:/policies/eci_authz.rego:ro
+    networks:
+      - eci-dev
+    read_only: true
+    healthcheck:
+      test: ["CMD", "/opa", "eval", "--server", "http://127.0.0.1:8181", "data.eci.authz.decision"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+
   keycloak:
     # SPEC-055 (T6.1) — IdP OIDC esclusivamente di sviluppo. Versione
     # verificata contro la documentazione/API ufficiale Keycloak corrente;
@@ -266,9 +286,9 @@ services:
       start_period: 10s
 
   prometheus:
-    # SPEC-036 §2 (T3.3 parte 2/2) — scrape delle metriche di salute dei
-    # quattro sink Kafka (eci_messages_processed_total/
-    # eci_last_processed_timestamp_seconds, libs/go/eci/metrics). I quattro
+    # SPEC-036 §2 + SPEC-056 §8 — scrape delle metriche di salute dei
+    # quattro sink Kafka e delle decisioni/latency authz dei due servizi
+    # query. I quattro
     # sink NON sono servizi Docker Compose (verificato, non presunto —
     # vedi nota in deploy/compose/prometheus.yml): girano come processi
     # host, raggiunti da questo container via host.docker.internal, che

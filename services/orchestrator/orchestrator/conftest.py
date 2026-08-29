@@ -5,16 +5,20 @@ reale (sottoprocesso `uvicorn` dal suo stesso venv, bootstrap automatico
 se assente) — non mock di nessuno dei due, come richiesto esplicitamente
 da SPEC-018 §7."""
 
+import json
 import os
 import socket
 import subprocess
 import tempfile
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import grpc
 import httpx
 import pytest
+from eci_core.grpc_client import SecurityContextInterceptor
 from eci_core.retrieval.v1 import retrieval_pb2, retrieval_pb2_grpc
 from testcontainers.community.neo4j import Neo4jContainer
 
@@ -96,11 +100,75 @@ def _build_retrieval_engine() -> str:
     return out_path
 
 
-def _wait_for_grpc_health(addr: str, timeout: float) -> None:
+class _OPAStubHandler(BaseHTTPRequestHandler):
+    """Deterministic transport stub for existing orchestrator integration tests.
+
+    SPEC-056 policy correctness is exercised separately against real pinned OPA;
+    this stub only keeps the multi-container orchestration fixture focused on its
+    original retrieval/LLM behavior.
+    """
+
+    def do_GET(self):
+        self.send_response(200 if self.path == "/health" else 404)
+        self.end_headers()
+
+    def do_POST(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            value = json.loads(self.rfile.read(length))
+            item = value["input"]
+            subject = item["subject"]
+            allow = bool(
+                subject.get("tenant_id")
+                and subject.get("user_id")
+                and (
+                    item.get("action") == "/eci.retrieval.v1.RetrievalEngine/Health"
+                    or (subject.get("allowed_repos") and subject.get("acl_groups"))
+                )
+            )
+            body = json.dumps(
+                {"result": {"allow": allow, "reason": "allow" if allow else "policy_denied"}}
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            self.send_response(400)
+            self.end_headers()
+
+    def log_message(self, _format, *_args):
+        return
+
+
+def _start_opa_stub():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _OPAStubHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, f"http://127.0.0.1:{server.server_port}"
+
+
+@pytest.fixture(scope="session")
+def opa_url():
+    server, thread, url = _start_opa_stub()
+    try:
+        yield url
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def _wait_for_grpc_health(
+    addr: str, timeout: float, security_context: retrieval_pb2.SecurityContext
+) -> None:
     deadline = time.monotonic() + timeout
     last_err: Exception | None = None
     while time.monotonic() < deadline:
-        channel = grpc.insecure_channel(addr)
+        channel = grpc.intercept_channel(
+            grpc.insecure_channel(addr), SecurityContextInterceptor(security_context)
+        )
         try:
             stub = retrieval_pb2_grpc.RetrievalEngineStub(channel)
             stub.Health(retrieval_pb2.HealthCheckRequest(), timeout=2)
@@ -114,7 +182,7 @@ def _wait_for_grpc_health(addr: str, timeout: float) -> None:
 
 
 @pytest.fixture(scope="session")
-def retrieval_engine_addr(neo4j_bolt_url):
+def retrieval_engine_addr(neo4j_bolt_url, opa_url):
     binary = _build_retrieval_engine()
     addr = f"127.0.0.1:{_free_port()}"
     env = {
@@ -123,10 +191,24 @@ def retrieval_engine_addr(neo4j_bolt_url):
         "NEO4J_USER": "neo4j",
         "NEO4J_PASSWORD": NEO4J_TEST_PASSWORD,
         "RETRIEVAL_ENGINE_ADDR": addr,
+        "OPA_URL": opa_url,
+        "OPA_ALLOW_INSECURE_HTTP": "true",
     }
-    proc = subprocess.Popen([binary], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    # The production stdout OTel exporter emits one multi-line span per authz
+    # decision. A PIPE that nobody drains eventually fills and blocks the gRPC
+    # server; discard test-process telemetry instead of creating that deadlock.
+    proc = subprocess.Popen([binary], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
     try:
-        _wait_for_grpc_health(addr, timeout=30)
+        _wait_for_grpc_health(
+            addr,
+            timeout=30,
+            security_context=retrieval_pb2.SecurityContext(
+                tenant_id="eci-test-tenant",
+                user_id="eci-test-user",
+                allowed_repos=["local"],
+                acl_groups=["developers"],
+            ),
+        )
         yield addr
     finally:
         proc.terminate()

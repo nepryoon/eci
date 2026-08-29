@@ -18,11 +18,14 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import harness
 import pytest
+from eci_core.retrieval.v1 import retrieval_pb2
 from orchestrator.conftest import (
     _build_retrieval_engine,
     _ensure_vllm_fake_venv,
     _free_port,
+    _start_opa_stub,
     _wait_for_grpc_health,
     _wait_for_http,
 )
@@ -32,8 +35,6 @@ from testcontainers.community.postgres import PostgresContainer
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.network import Network
 from testcontainers.core.wait_strategies import HttpWaitStrategy
-
-import harness
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INGESTION_DIR = REPO_ROOT / "services" / "ingestion"
@@ -224,6 +225,7 @@ def _run_ingestion(filename: str, postgres_dsn_: str) -> str:
         env=env,
         capture_output=True,
         text=True,
+        check=False,
     )
     if proc.returncode != 0:
         raise RuntimeError(
@@ -284,7 +286,18 @@ def sink_graph_process(neo4j_bolt_url, kafka_bootstrap_host, migrated_postgres, 
 
 
 @pytest.fixture(scope="session")
-def retrieval_engine_addr(neo4j_bolt_url):
+def opa_url():
+    server, thread, url = _start_opa_stub()
+    try:
+        yield url
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+@pytest.fixture(scope="session")
+def retrieval_engine_addr(neo4j_bolt_url, opa_url):
     binary = _build_retrieval_engine()
     addr = f"127.0.0.1:{_free_port()}"
     env = {
@@ -293,10 +306,20 @@ def retrieval_engine_addr(neo4j_bolt_url):
         "NEO4J_USER": "neo4j",
         "NEO4J_PASSWORD": NEO4J_PASSWORD,
         "RETRIEVAL_ENGINE_ADDR": addr,
+        "OPA_URL": opa_url,
+        "OPA_ALLOW_INSECURE_HTTP": "true",
     }
-    proc = subprocess.Popen([binary], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    # Authz adds a span for every request. Do not leave an undrained stdout
+    # pipe that can fill and stop the real retrieval process during the suite.
+    proc = subprocess.Popen([binary], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
     try:
-        _wait_for_grpc_health(addr, timeout=30)
+        security_context = retrieval_pb2.SecurityContext(
+            tenant_id="eci-e2e-tenant",
+            user_id="eci-e2e-user",
+            allowed_repos=["sample-repo"],
+            acl_groups=["developers"],
+        )
+        _wait_for_grpc_health(addr, timeout=30, security_context=security_context)
         yield addr
     finally:
         proc.terminate()
@@ -353,9 +376,12 @@ def stack(retrieval_engine_addr, sink_graph_process, vllm_fake_url):
     popolato e che le 3 entità cercate dalle query `callers` siano
     trovabili via full-text — resta un polling con timeout esplicito su
     un insieme più ampio di nodi noti, non uno sleep fisso."""
-    from orchestrator.retrieval_client import build_security_context
-
-    security_context = build_security_context()
+    security_context = retrieval_pb2.SecurityContext(
+        tenant_id="eci-e2e-tenant",
+        user_id="eci-e2e-user",
+        allowed_repos=["sample-repo"],
+        acl_groups=["developers"],
+    )
     for filename in FIXTURE_FILES:
         file_id = harness.file_node_id(filename)
         harness.wait_for_node(retrieval_engine_addr, security_context, file_id, timeout=CDC_WAIT_TIMEOUT_SECONDS)

@@ -1,4 +1,5 @@
-# SPEC-036 §2/§6 — scrape config per i quattro sink Kafka del progetto.
+# SPEC-036 §2/§6 e SPEC-056 §8 — scrape config per i quattro sink Kafka
+# e per i due servizi query che espongono le decisioni/latency authz.
 #
 # DEVIAZIONE dichiarata rispetto al testo letterale di SPEC-036 §2 ("i
 # quattro sink per nome del servizio compose... stesso principio di
@@ -41,3 +42,11 @@ scrape_configs:
       - targets: ["host.docker.internal:9104"]
         labels:
           sink: sink-search
+  - job_name: eci-query-services
+    static_configs:
+      - targets: ["host.docker.internal:9105"]
+        labels:
+          service: retrieval-engine
+      - targets: ["host.docker.internal:9106"]
+        labels:
+          service: semantic-cache

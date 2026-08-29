@@ -17,18 +17,7 @@ from opentelemetry.instrumentation.grpc import (
 
 from orchestrator.errors import RetrievalUnavailableError
 
-# SecurityContext placeholder di sviluppo (SPEC-018 §2): propagato
-# correttamente (via l'interceptor) ma non enforced da nessuna parte
-# della catena — stesso principio "plumbing, non enforcement" di
-# T0.8/T1.4.
-DEFAULT_TENANT_ID = "eci-dev-tenant"
-DEFAULT_USER_ID = "eci-dev-user"
-
 _RPC_TIMEOUT_SECONDS = 10.0
-
-
-def build_security_context() -> retrieval_pb2.SecurityContext:
-    return retrieval_pb2.SecurityContext(tenant_id=DEFAULT_TENANT_ID, user_id=DEFAULT_USER_ID)
 
 
 def _build_channel(security_context: retrieval_pb2.SecurityContext, addr: str, tracer_provider=None):

@@ -11,10 +11,9 @@ import json
 import re
 from pathlib import Path
 
+import harness
 import pytest
 from orchestrator.ask import run_ask
-
-import harness
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GOLDEN_PATH = REPO_ROOT / "tests" / "golden" / "queries_v0.json"
@@ -70,7 +69,9 @@ def _expected_caller_names(query_text: str, callers: list[str]) -> set[str]:
 
 
 def _verify_callers(entry: dict, stack: dict) -> None:
-    result = run_ask(entry["query"], stack["retrieval_addr"], stack["vllm_url"])
+    result = run_ask(
+        entry["query"], stack["retrieval_addr"], stack["vllm_url"], stack["security_context"]
+    )
     got = {n.name for n in result.nodes}
     expected = _expected_caller_names(entry["query"], entry["expected_facts"]["callers"])
     assert got == expected, f"{entry['id']}: nomi in Fonti = {got}, atteso {expected}"
