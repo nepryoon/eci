@@ -12,12 +12,15 @@ import (
 	"log"
 	"net"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 
+	"github.com/eci-project/eci/libs/go/eci/authz"
 	"github.com/eci-project/eci/libs/go/eci/config"
 	"github.com/eci-project/eci/libs/go/eci/observability"
+	"github.com/eci-project/eci/libs/go/eci/secctx"
 	semanticcachev1 "github.com/eci-project/eci/libs/go/eci/semanticcache/v1"
 	"github.com/eci-project/eci/services/semantic-cache/internal/server"
 )
@@ -34,6 +37,14 @@ func main() {
 			log.Printf("semantic-cache: shutdown tracing: %v", err)
 		}
 	}()
+	authzConfig, err := authz.ConfigFromEnvironment("semantic-cache")
+	if err != nil {
+		log.Fatalf("semantic-cache: configurazione OPA: %v", err)
+	}
+	authorizer, err := authz.New(ctx, authzConfig, prometheus.DefaultRegisterer)
+	if err != nil {
+		log.Fatalf("semantic-cache: inizializzazione OPA: %v", err)
+	}
 
 	redisAddr := config.EnvOrDefault("REDIS_ADDR", "localhost:6379")
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
@@ -46,6 +57,10 @@ func main() {
 	}
 
 	srv := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(
+			secctx.UnaryServerInterceptor(),
+			authz.UnaryServerInterceptor(authorizer),
+		),
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 	)
 	semanticcachev1.RegisterSemanticCacheServer(srv, &server.Server{Redis: rdb})

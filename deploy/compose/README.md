@@ -88,6 +88,7 @@ sono supportati e Keycloak non diventa ready. Non commettere mai `.env`.
 | kafka | 9094 | Listener esterno (`EXTERNAL`), per client dall'host. Il listener interno `9092` (`PLAINTEXT://kafka:9092`, usato da `kafka-connect` sulla rete Docker) non è esposto sull'host |
 | kafka-connect | 8083 | REST API (registrazione/stato connector) |
 | keycloak | 8081 | OIDC dev (`/realms/eci`) e Admin Console |
+| opa | 8181 | PDP ABAC dev (`/v1/data/eci/authz/decision`) |
 
 Se una porta è già occupata da un altro processo (es. un Postgres locale
 su 5432), `docker compose up` fallisce con l'errore nativo di Docker sulla
@@ -126,6 +127,22 @@ Il token risultante ha issuer `http://localhost:8081/realms/eci`, audience
 `eci-gateway`, firma `RS256` e i claim `tenant_id`, `allowed_repos` e
 `acl_groups`. `start-dev`, HTTP e direct grant sono vietati fuori dallo stack
 locale; il deployment production-like verrà definito da T7.1.
+
+## OPA PDP (SPEC-056)
+
+OPA è pin a `openpolicyagent/opa:1.20.1` e carica la policy default-deny
+versionata in `opa/policies/eci_authz.rego` con mount read-only. I processi Go
+avviati dall'host usano:
+
+```bash
+export OPA_URL=http://localhost:8181
+export OPA_ALLOW_INSECURE_HTTP=true  # solo stack dev/test
+```
+
+Fuori dal dev stack HTTP è rifiutato per default. `OPA_URL` non ha un valore
+implicito: Retrieval Engine e Semantic Cache falliscono lo startup se il PDP
+non è configurato o non supera `/health`; un errore runtime resta fail-closed.
+Il request body e il testo utente non entrano nell'input OPA.
 
 ## Nota: OpenSearch Security plugin disattivato
 

@@ -25,6 +25,25 @@ const metadataKey = "eci-security-context-bin"
 
 type contextKey struct{}
 
+func extractIncoming(ctx context.Context) context.Context {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ctx
+	}
+	values := md.Get(metadataKey)
+	if len(values) == 0 {
+		return ctx
+	}
+	sc := &retrievalv1.SecurityContext{}
+	if err := proto.Unmarshal([]byte(values[0]), sc); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"eci/secctx: metadata %q presente ma non deserializzabile come SecurityContext, trattato come assente: %v\n",
+			metadataKey, err)
+		return ctx
+	}
+	return context.WithValue(ctx, contextKey{}, sc)
+}
+
 // UnaryServerInterceptor estrae SecurityContext dai metadata gRPC in
 // ingresso (chiave metadataKey, deserializzata come protobuf) e lo
 // attacca al context.Context passato all'handler. Se il metadata è
@@ -38,25 +57,32 @@ func UnaryServerInterceptor() grpc.UnaryServerInterceptor {
 		_ *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (any, error) {
-		md, ok := metadata.FromIncomingContext(ctx)
-		if !ok {
-			return handler(ctx, req)
-		}
+		return handler(extractIncoming(ctx), req)
+	}
+}
 
-		values := md.Get(metadataKey)
-		if len(values) == 0 {
-			return handler(ctx, req)
-		}
+type contextServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
 
-		sc := &retrievalv1.SecurityContext{}
-		if err := proto.Unmarshal([]byte(values[0]), sc); err != nil {
-			fmt.Fprintf(os.Stderr,
-				"eci/secctx: metadata %q presente ma non deserializzabile come SecurityContext, trattato come assente: %v\n",
-				metadataKey, err)
-			return handler(ctx, req)
-		}
+func (s *contextServerStream) Context() context.Context { return s.ctx }
 
-		return handler(context.WithValue(ctx, contextKey{}, sc), req)
+// StreamServerInterceptor is the streaming equivalent of
+// UnaryServerInterceptor. It remains plumbing-only: missing or malformed
+// metadata is represented as an absent SecurityContext and authorization is
+// left to the separate Phase 6 PEP.
+func StreamServerInterceptor() grpc.StreamServerInterceptor {
+	return func(
+		srv any,
+		stream grpc.ServerStream,
+		_ *grpc.StreamServerInfo,
+		handler grpc.StreamHandler,
+	) error {
+		return handler(srv, &contextServerStream{
+			ServerStream: stream,
+			ctx:          extractIncoming(stream.Context()),
+		})
 	}
 }
 

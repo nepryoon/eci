@@ -50,6 +50,13 @@ test_empty_acl_scope_denied if {
     result == {"allow": false, "reason": "empty_acl_scope"}
 }
 
+test_blank_scope_values_denied if {
+    blank_repo := decision with input as subject("tenant-a", "user-a", ["  "], ["engineering"])
+    blank_group := decision with input as subject("tenant-a", "user-a", ["repo-a"], ["\t"])
+    blank_repo == {"allow": false, "reason": "empty_repo_scope"}
+    blank_group == {"allow": false, "reason": "empty_acl_scope"}
+}
+
 test_unknown_action_denied if {
     value := subject("tenant-a", "user-a", ["repo-a"], ["engineering"])
     result := decision with input as object.union(value, {"action": "/attacker/Admin"})

@@ -17,8 +17,10 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/opensearch-project/opensearch-go/v4"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/qdrant/go-client/qdrant"
 
+	"github.com/eci-project/eci/libs/go/eci/authz"
 	"github.com/eci-project/eci/libs/go/eci/config"
 	"github.com/eci-project/eci/libs/go/eci/observability"
 	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
@@ -40,6 +42,14 @@ func main() {
 			log.Printf("retrieval-engine: shutdown tracing: %v", err)
 		}
 	}()
+	authzConfig, err := authz.ConfigFromEnvironment("retrieval-engine")
+	if err != nil {
+		log.Fatalf("retrieval-engine: configurazione OPA: %v", err)
+	}
+	authorizer, err := authz.New(ctx, authzConfig, prometheus.DefaultRegisterer)
+	if err != nil {
+		log.Fatalf("retrieval-engine: inizializzazione OPA: %v", err)
+	}
 
 	neo4jURI := config.EnvOrDefault("NEO4J_URI", "bolt://localhost:7687")
 	neo4jUser := config.EnvOrDefault("NEO4J_USER", "neo4j")
@@ -98,7 +108,14 @@ func main() {
 	}
 
 	srv := grpc.NewServer(
-		grpc.UnaryInterceptor(secctx.UnaryServerInterceptor()),
+		grpc.ChainUnaryInterceptor(
+			secctx.UnaryServerInterceptor(),
+			authz.UnaryServerInterceptor(authorizer),
+		),
+		grpc.ChainStreamInterceptor(
+			secctx.StreamServerInterceptor(),
+			authz.StreamServerInterceptor(authorizer),
+		),
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 	)
 	retrievalv1.RegisterRetrievalEngineServer(srv, &server.Server{

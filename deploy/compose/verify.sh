@@ -16,6 +16,7 @@ OPENSEARCH_HOST_PORT="${OPENSEARCH_HOST_PORT:-9200}"
 MINIO_HOST_PORT="${MINIO_HOST_PORT:-9000}"
 KAFKA_CONNECT_HOST_PORT="${KAFKA_CONNECT_HOST_PORT:-8083}"
 KEYCLOAK_HOST_PORT="${KEYCLOAK_HOST_PORT:-8081}"
+OPA_HOST_PORT="${OPA_HOST_PORT:-8181}"
 CONNECTOR_NAME="eci-outbox-connector"
 
 overall_rc=0
@@ -35,6 +36,22 @@ check_running() {
 if [ -z "${running_services}" ]; then
   echo "FAIL: nessun container dello stack eci-dev risulta in esecuzione. Esegui 'task up' prima di 'task up:verify'." >&2
   exit 1
+fi
+
+# OPA: health reale e decisione default-deny su azione sconosciuta.
+if check_running opa; then
+  health_code="$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${OPA_HOST_PORT}/health" 2>&1)"
+  decision="$(curl -s -H 'Content-Type: application/json' \
+    --data '{"input":{"subject":{"tenant_id":"tenant-dev","user_id":"verify","allowed_repos":["sample-repo"],"acl_groups":["developers"]},"action":"/unknown/Action"}}' \
+    "http://localhost:${OPA_HOST_PORT}/v1/data/eci/authz/decision" 2>&1)"
+  allow="$(echo "${decision}" | jq -r '.result.allow // "missing"' 2>/dev/null)"
+  reason="$(echo "${decision}" | jq -r '.result.reason // "missing"' 2>/dev/null)"
+  if [ "${health_code}" = "200" ] && [ "${allow}" = "false" ] && [ "${reason}" = "unknown_action" ]; then
+    echo "OK   opa: health=200 e policy default-deny verificata"
+  else
+    echo "FAIL opa: health=${health_code}, allow=${allow}, reason=${reason}"
+    overall_rc=1
+  fi
 fi
 
 # keycloak: discovery OIDC del realm importato e algoritmi di firma attesi.

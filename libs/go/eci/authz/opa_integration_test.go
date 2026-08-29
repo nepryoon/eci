@@ -3,6 +3,7 @@ package authz
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"testing"
 	"time"
@@ -22,6 +23,10 @@ func TestProductionClientAgainstRealPinnedOPA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("policy path: %v", err)
 	}
+	policyTestFile, err := filepath.Abs("../../../../deploy/compose/opa/policies/eci_authz_test.rego")
+	if err != nil {
+		t.Fatalf("policy test path: %v", err)
+	}
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		Started: true,
 		ContainerRequest: testcontainers.ContainerRequest{
@@ -32,6 +37,10 @@ func TestProductionClientAgainstRealPinnedOPA(t *testing.T) {
 				HostFilePath:      policyFile,
 				ContainerFilePath: "/policies/eci_authz.rego",
 				FileMode:          0o644,
+			}, {
+				HostFilePath:      policyTestFile,
+				ContainerFilePath: "/policy-tests/eci_authz_test.rego",
+				FileMode:          0o644,
 			}},
 			WaitingFor: wait.ForHTTP("/health").
 				WithPort("8181/tcp").
@@ -41,6 +50,19 @@ func TestProductionClientAgainstRealPinnedOPA(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("start OPA %s: %v", opaImage, err)
+	}
+	exitCode, output, err := container.Exec(ctx, []string{
+		"/opa", "test", "/policies/eci_authz.rego", "/policy-tests/eci_authz_test.rego",
+	})
+	if err != nil {
+		t.Fatalf("execute OPA policy tests: %v", err)
+	}
+	rawOutput, err := io.ReadAll(output)
+	if err != nil {
+		t.Fatalf("read OPA test output: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("OPA policy tests exit=%d:\n%s", exitCode, rawOutput)
 	}
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)

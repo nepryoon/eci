@@ -13,7 +13,6 @@ from orchestrator.graph import run_agent
 from orchestrator.intent import classify_intent, to_proto_intent
 from orchestrator.llm_client import chat_completion
 from orchestrator.prompt import build_messages
-from orchestrator.retrieval_client import build_security_context
 from orchestrator.tools import Deps, RetrievalToolRuntime
 
 
@@ -24,7 +23,13 @@ class AskResult:
     answer: str | None  # None SOLO se nodes è vuota (nessuna chiamata a vllm-fake)
 
 
-def run_ask(query_text: str, retrieval_addr: str, vllm_url: str, tracer_provider=None) -> AskResult:
+def run_ask(
+    query_text: str,
+    retrieval_addr: str,
+    vllm_url: str,
+    security_context,
+    tracer_provider=None,
+) -> AskResult:
     """Solleva RetrievalUnavailableError/LLMUnavailableError sui
     fallimenti di connessione (SPEC-018 §3 scenari 4/5) — non le
     intercetta qui, il chiamante (CLI o test) decide come presentarle.
@@ -35,7 +40,8 @@ def run_ask(query_text: str, retrieval_addr: str, vllm_url: str, tracer_provider
     span_cm = tracer.start_as_current_span("orchestrator.ask") if tracer is not None else _noop_cm()
 
     with span_cm:
-        security_context = build_security_context()
+        if security_context is None or not security_context.tenant_id or not security_context.user_id:
+            raise ValueError("authenticated SecurityContext required")
         intent = classify_intent(query_text)
         runtime = RetrievalToolRuntime(
             Deps(retrieval_addr, security_context, query_intent=to_proto_intent(intent))

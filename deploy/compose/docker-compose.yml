@@ -38,6 +38,26 @@ volumes:
     name: eci_kafka_data
 
 services:
+  opa:
+    # SPEC-056 (T6.2) — PDP ABAC centralizzato. Versione immutabile,
+    # pubblicata il 2026-08-28; la policy e' montata read-only e parte in
+    # default-deny. HTTP e porta host sono esclusivamente per sviluppo.
+    image: openpolicyagent/opa:1.20.1
+    command: ["run", "--server", "--addr=0.0.0.0:8181", "--log-format=json", "/policies"]
+    ports:
+      - "8181:8181"
+    volumes:
+      - ./opa/policies/eci_authz.rego:/policies/eci_authz.rego:ro
+    networks:
+      - eci-dev
+    read_only: true
+    healthcheck:
+      test: ["CMD", "/opa", "eval", "--server", "http://127.0.0.1:8181", "data.eci.authz.decision"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+
   keycloak:
     # SPEC-055 (T6.1) — IdP OIDC esclusivamente di sviluppo. Versione
     # verificata contro la documentazione/API ufficiale Keycloak corrente;

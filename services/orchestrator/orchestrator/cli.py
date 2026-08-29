@@ -95,7 +95,9 @@ def main(argv: list[str] | None = None) -> int:
 
     provider = init_tracing("orchestrator")
     try:
-        result = run_ask(args.query, retrieval_addr, vllm_url, tracer_provider=provider)
+        # T6.2 removed the historical implicit dev tenant. The authenticated
+        # browser entrypoint arrives with T6.6; direct CLI calls fail closed.
+        result = run_ask(args.query, retrieval_addr, vllm_url, None, tracer_provider=provider)
     except RetrievalUnavailableError as e:
         print(f"errore: {e}", file=sys.stderr)
         return 1
@@ -103,6 +105,9 @@ def main(argv: list[str] | None = None) -> int:
         if e.sources:
             print(_format_sources(e.sources))
             print()
+        print(f"errore: {e}", file=sys.stderr)
+        return 1
+    except ValueError as e:
         print(f"errore: {e}", file=sys.stderr)
         return 1
     finally:

@@ -43,6 +43,14 @@ func UnaryServerInterceptor(client DecisionClient) grpc.UnaryServerInterceptor
 func StreamServerInterceptor(client DecisionClient) grpc.StreamServerInterceptor
 ```
 
+```python
+def run_ask(query_text, retrieval_addr, vllm_url, security_context, tracer_provider=None) -> AskResult: ...
+```
+
+`security_context` è obbligatorio e già autenticato: viene propagato al PEP del
+servizio. Il precedente tenant dev implicito di SPEC-018 viene rimosso; il CLI
+diretto fallisce chiuso fino all'entrypoint autenticato T6.6.
+
 Richiesta OPA, costruita internamente e non esposta come input del chiamante:
 
 ```json
@@ -212,6 +220,8 @@ package/file/wiring assente prima dell'implementazione.
   OPA reale pin 1.20.1.
 - [ ] Input OPA contiene solo subject autenticato e full method runtime; test di
   forged body/prompt prova l'assenza di influenza.
+- [ ] Orchestrator non costruisce tenant/scope impliciti e rifiuta un
+  `SecurityContext` assente prima di invocare tool o backend.
 - [ ] Missing/malformed context, deny, timeout, outage e malformed PDP response
   sono fail-closed e non invocano l'handler.
 - [ ] Retrieval Engine e Semantic Cache installano `secctx -> authz`.

@@ -257,9 +257,23 @@ def test_run_ask_routes_through_graph(monkeypatch):
 
     monkeypatch.setattr("orchestrator.ask.RetrievalToolRuntime", Runtime)
     monkeypatch.setattr("orchestrator.ask.chat_completion", lambda _url, messages: str(messages))
-    result = run_ask("chi chiama Validate", "unused", "http://fake")
+    result = run_ask(
+        "chi chiama Validate",
+        "unused",
+        "http://fake",
+        retrieval_pb2.SecurityContext(tenant_id="tenant", user_id="user"),
+    )
     assert Runtime.instance.calls[-1] == ("get_callers", "validate")
     assert [value.node_id for value in result.nodes] == ["validate", "process"]
+
+
+def test_run_ask_rejects_missing_authenticated_context_before_tools(monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.ask.RetrievalToolRuntime",
+        lambda _deps: pytest.fail("tool runtime must not be constructed"),
+    )
+    with pytest.raises(ValueError, match="authenticated SecurityContext required"):
+        run_ask("chi chiama Validate", "unused", "http://fake", None)
 
 
 def test_structured_llm_failure_keeps_callers_in_sources(monkeypatch):
@@ -286,7 +300,12 @@ def test_structured_llm_failure_keeps_callers_in_sources(monkeypatch):
 
     monkeypatch.setattr("orchestrator.ask.chat_completion", unavailable)
     with pytest.raises(LLMUnavailableError) as excinfo:
-        run_ask("chi chiama Validate", "unused", "http://fake")
+        run_ask(
+            "chi chiama Validate",
+            "unused",
+            "http://fake",
+            retrieval_pb2.SecurityContext(tenant_id="tenant", user_id="user"),
+        )
     assert {value.node_id for value in excinfo.value.sources} == {"validate", "process"}
 
 

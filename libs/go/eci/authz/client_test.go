@@ -176,6 +176,38 @@ func TestConfigRejectsUnsafeOrAmbiguousValues(t *testing.T) {
 	}
 }
 
+func TestConfigFromEnvironmentHasNoImplicitPDPOrAuthorizationScope(t *testing.T) {
+	t.Setenv("OPA_URL", "")
+	t.Setenv("OPA_DECISION_PATH", "")
+	t.Setenv("OPA_TIMEOUT", "")
+	t.Setenv("OPA_ALLOW_INSECURE_HTTP", "")
+	cfg, err := ConfigFromEnvironment("retrieval-engine")
+	if err != nil {
+		t.Fatalf("ConfigFromEnvironment: %v", err)
+	}
+	if cfg.Endpoint != "" || cfg.DecisionPath != "/v1/data/eci/authz/decision" || cfg.Timeout != 100*time.Millisecond || cfg.AllowInsecureHTTP {
+		t.Fatalf("unexpected defaults: %+v", cfg)
+	}
+
+	for _, test := range []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "invalid timeout", key: "OPA_TIMEOUT", value: "eventually"},
+		{name: "invalid HTTP switch", key: "OPA_ALLOW_INSECURE_HTTP", value: "sometimes"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("OPA_TIMEOUT", "")
+			t.Setenv("OPA_ALLOW_INSECURE_HTTP", "")
+			t.Setenv(test.key, test.value)
+			if _, err := ConfigFromEnvironment("retrieval-engine"); err == nil {
+				t.Fatal("invalid environment value accepted")
+			}
+		})
+	}
+}
+
 func validConfig(endpoint string) Config {
 	return Config{
 		Endpoint:          endpoint,
