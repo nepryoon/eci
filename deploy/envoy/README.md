@@ -21,9 +21,11 @@ task envoy:validate
 `task envoy:descriptor` must produce no Git diff. `task envoy:validate`
 requires Docker/OpenSSL, creates an ephemeral test-only certificate and mounts
 the exact checked-in files read-only. The CPU-only
-integration suite renders only the two internal DNS endpoints to host-access
-test ports, starts the same pinned Envoy image and proves auth, JSON/gRPC,
-SSE, mandatory TLS and caller-partitioned rate-limit behavior. The ext-auth
+integration suite renders only the two internal DNS endpoints to loopback test
+ports and proves auth, JSON/gRPC, SSE, mandatory TLS and caller-partitioned
+rate-limit behavior. The task extracts `/usr/local/bin/envoy` from that same
+digest and runs it directly, so source-address partitioning is tested without
+container bridge NAT. The ext-auth
 helper derives an opaque bucket key from authenticated tenant/user identity;
 Envoy removes forged keys before auth and strips the trusted key after limiting.
 
