@@ -31,13 +31,15 @@ type fakeAuthenticator struct {
 	err          error
 	header       string
 	trustedTrace string
+	trustedSpan  oteltrace.SpanContext
 	calls        int
 }
 
-func (f *fakeAuthenticator) Authenticate(_ context.Context, header, trace string) (*retrievalv1.SecurityContext, error) {
+func (f *fakeAuthenticator) Authenticate(ctx context.Context, header, trace string) (*retrievalv1.SecurityContext, error) {
 	f.calls++
 	f.header = header
 	f.trustedTrace = trace
+	f.trustedSpan = oteltrace.SpanContextFromContext(ctx)
 	return f.result, f.err
 }
 
@@ -104,7 +106,18 @@ func noStreamClient() ImpactClient {
 func TestAuthorizeDerivesAndReplacesReservedMetadata(t *testing.T) {
 	auth := &fakeAuthenticator{result: testSecurityContext()}
 	random := bytes.NewReader(bytes.Repeat([]byte{0x11}, 24))
-	handler := newTestHandler(t, auth, noStreamClient(), random)
+	provider := trace.NewTracerProvider(trace.WithSampler(trace.AlwaysSample()))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	handler, err := NewEdgeHandler(auth, noStreamClient(), EdgeConfig{
+		MaxJSONBodyBytes: 1024,
+		RequestTimeout:   time.Second,
+		Random:           random,
+		Registerer:       prometheus.NewRegistry(),
+		Tracer:           provider.Tracer("test"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	req := httptest.NewRequest(http.MethodPost, "/authorize/eci.retrieval.v1.RetrievalEngine/GetNode", strings.NewReader("secret prompt must not be read"))
 	req.Header.Set("Authorization", "Bearer signed-token")
 	req.Header.Set(SecurityContextHeader, "forged")
@@ -122,7 +135,10 @@ func TestAuthorizeDerivesAndReplacesReservedMetadata(t *testing.T) {
 	if auth.trustedTrace != strings.Repeat("11", 16) {
 		t.Fatalf("trusted trace=%q", auth.trustedTrace)
 	}
-	if got := response.Header().Get("traceparent"); got != "00-"+strings.Repeat("11", 16)+"-"+strings.Repeat("11", 8)+"-01" {
+	if !auth.trustedSpan.IsValid() || auth.trustedSpan.TraceID().String() != auth.trustedTrace {
+		t.Fatalf("auth span=%v trusted trace=%q", auth.trustedSpan, auth.trustedTrace)
+	}
+	if got := response.Header().Get("traceparent"); got != "00-"+auth.trustedSpan.TraceID().String()+"-"+auth.trustedSpan.SpanID().String()+"-01" {
 		t.Fatalf("traceparent=%q", got)
 	}
 	wantRateKey := authenticatedCallerRateLimitKey("tenant-a", "alice")

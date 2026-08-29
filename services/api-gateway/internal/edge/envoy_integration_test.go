@@ -237,6 +237,34 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 		}
 	})
 
+	t.Run("partial headers are closed before authentication", func(t *testing.T) {
+		beforeAuth := authenticator.calls.Load()
+		connection, err := tls.Dial("tcp", gatewayAddress, &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    roots,
+			ServerName: "localhost",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connection.Close()
+		if err := connection.SetDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		started := time.Now()
+		if _, err := io.WriteString(connection, "GET /eci.retrieval.v1.RetrievalEngine/GetNode HTTP/1.1\r\nHost: localhost\r\nX-Slow:"); err != nil {
+			t.Fatal(err)
+		}
+		buffer := make([]byte, 256)
+		_, readErr := connection.Read(buffer)
+		if readErr == nil || time.Since(started) > 750*time.Millisecond {
+			t.Fatalf("partial headers were not closed within the configured bound: err=%v elapsed=%s", readErr, time.Since(started))
+		}
+		if authenticator.calls.Load() != beforeAuth {
+			t.Fatal("partial headers reached authenticator")
+		}
+	})
+
 	t.Run("JSON is transcoded and reserved metadata is replaced", func(t *testing.T) {
 		body := `{"nodeId":"node-a","securityContext":{"tenantId":"tenant-forged","userId":"mallory","allowedRepos":["repo-secret"],"aclGroups":["admins"],"traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`
 		request, _ := http.NewRequest(http.MethodPost, baseURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", strings.NewReader(body))
@@ -688,6 +716,7 @@ func renderIntegrationEnvoyConfig(t *testing.T, root string, helperPort, grpcPor
 	config = strings.ReplaceAll(config, "address: retrieval-engine", "address: "+testcontainers.HostInternal)
 	config = strings.ReplaceAll(config, "8081", strconv.Itoa(helperPort))
 	config = strings.ReplaceAll(config, "50053", strconv.Itoa(grpcPort))
+	config = strings.ReplaceAll(config, "request_headers_timeout: 5s", "request_headers_timeout: 200ms")
 	path := filepath.Join(t.TempDir(), "envoy.yaml")
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		t.Fatal(err)

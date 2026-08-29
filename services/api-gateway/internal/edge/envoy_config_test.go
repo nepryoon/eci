@@ -58,6 +58,7 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 		"address: 127.0.0.1",
 		"timeout: 0s",
 		"idle_timeout: 35s",
+		"request_headers_timeout: 5s",
 		"name: envoy.transport_sockets.tls",
 		`alpn_protocols: ["h2", "http/1.1"]`,
 		"tls_minimum_protocol_version: TLSv1_2",
