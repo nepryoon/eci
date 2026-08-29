@@ -1,5 +1,5 @@
 # SPEC-060 — Envoy API Gateway: JSON/gRPC, SSE, rate limit e SecurityContext
-Stato: implemented
+Stato: verified
 Task-tree: T6.6 · Servizio: `services/api-gateway` + `deploy/envoy` · ADD: Modulo 3 §1.1–§1.4, §2.1; Modulo 4 §1.3, §2.3; D7 `SecurityContext`
 Contratti: `contracts/proto/eci/retrieval/v1/retrieval.proto` (immutato)
 
@@ -210,9 +210,9 @@ error body allow-listed e test Envoy reale.
 - [x] JSON unary e gRPC passthrough reali attraversano ext_authz+backend.
 - [x] SSE reale prova frame/flush incrementali, cancellation e failure path.
 - [x] 429/Retry-After e zero-upstream provati; auth/rate failures fail-closed.
-- [ ] Descriptor deterministico; `envoy --mode validate` e integration verdi.
-- [ ] `task build`, `task lint`, `task test`, test gateway, `task guard` verdi;
-  SPEC verified, ADR-0014 accepted, CI verde e PR merged.
+- [x] Descriptor deterministico; `envoy --mode validate` e integration verdi.
+- [x] `task build`, `task lint`, `task test`, test gateway, `task guard` verdi;
+  SPEC verified, ADR-0014 accepted, CI verde e PR merge-ready.
 
 ## 10. Evidenza di implementazione
 
@@ -228,8 +228,21 @@ e relativo race detector verdi usando lo stesso binario. `task build`,
 `task lint`, `task guard`, lint/breaking/codegen proto sono verdi. Il daemon
 Docker locale non è avviabile senza credenziali sudo: `task test` locale ha
 quindi completato le suite pure ma ha fallito esclusivamente nei testcontainers
-Keycloak/OPA/Neo4j preesistenti. La prova dell’immagine pinned, il `task test`
-completo e lo stato `verified` restano intenzionalmente subordinati alla CI.
+Keycloak/OPA/Neo4j preesistenti.
+
+Verifica CI finale: [run 33257754620](https://github.com/nepryoon/eci/actions/runs/33257754620)
+verde su tutti i cinque job. Il job Envoy ha rigenerato byte-identico il
+descriptor, validato il bootstrap con l'immagine pinned ed eseguito il binario
+estratto dallo stesso digest per provare TLS, JSON/gRPC, SSE, deadline assolute,
+rate limit per caller e pre-auth per due indirizzi sorgente reali. Il job
+`build-lint-test` ha completato `task build`, `task lint` e `task test`; guard,
+proto lint/breaking/codegen, integrazioni datastore e WORM sono verdi.
+
+Le regressioni review-driven hanno osservato prima il comportamento errato:
+200 dopo rinnovo del budget sulle route dirette e 429 cross-source sul bucket
+pre-auth condiviso. Dopo i fix entrambe passano con Envoy reale. Tutti i thread
+di review sono risolti e il code review sul head `01ce1b6` non ha rilevato
+ulteriori problemi.
 
 ## 11. Review avversariale di approvazione
 
