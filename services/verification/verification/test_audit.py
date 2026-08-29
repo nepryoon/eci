@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from minio.error import S3Error
 
 from verification.audit import (
     CitationAccess,
@@ -98,6 +99,25 @@ def test_existing_bucket_must_expose_object_lock_configuration():
 
     with pytest.raises(WormAuditConfigurationError, match="Object Lock"):
         MinioWormAuditSink(Unlocked(exists=True), "eci-audit", now=lambda: NOW).initialize()
+
+
+def test_concurrent_bucket_bootstrap_is_idempotent_for_same_owner():
+    class Raced(FakeClient):
+        def make_bucket(self, bucket, object_lock=False):
+            self.exists = True
+            raise S3Error(
+                None,
+                "BucketAlreadyOwnedByYou",
+                "created concurrently",
+                bucket,
+                "request",
+                "host",
+                bucket,
+            )
+
+    sink = MinioWormAuditSink(Raced(), "eci-audit", now=lambda: NOW)
+    sink.initialize()
+    assert sink.append(event()).version_id == "v1"
 
 
 def test_retention_mismatch_fails_closed():

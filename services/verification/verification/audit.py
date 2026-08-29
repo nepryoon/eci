@@ -11,6 +11,7 @@ from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from minio.commonconfig import COMPLIANCE
+from minio.error import S3Error
 from minio.retention import Retention
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -123,7 +124,11 @@ class MinioWormAuditSink:
     def initialize(self) -> None:
         try:
             if not self._client.bucket_exists(self._bucket):
-                self._client.make_bucket(self._bucket, object_lock=True)
+                try:
+                    self._client.make_bucket(self._bucket, object_lock=True)
+                except S3Error as exc:
+                    if exc.code != "BucketAlreadyOwnedByYou":
+                        raise
             # A bucket created without Object Lock rejects this API. Object Lock
             # cannot be enabled later, so there is intentionally no fallback.
             self._client.get_object_lock_config(self._bucket)
