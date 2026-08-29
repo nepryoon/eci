@@ -505,6 +505,8 @@ func scenario3RelationBeforeNodesThenEnriched(t *testing.T, ctx context.Context,
 func scenario5InvalidEnumDiscardedNoNeo4jWrite(t *testing.T, ctx context.Context, st *stack) {
 	deps := newDeps(st)
 	brokers := startKafka(t, ctx)
+	reader := newReaderWithGroup(brokers, "sink-graph-test-"+uniqueID(t, "scenario5-group"))
+	defer reader.Close()
 
 	t.Run("node_type_non_valido", func(t *testing.T) {
 		badID := uniqueID(t, "scenario5-bad-node-type")
@@ -512,7 +514,7 @@ func scenario5InvalidEnumDiscardedNoNeo4jWrite(t *testing.T, ctx context.Context
 		payload := codeNodePayload(badID, "Bogus", "BogusType", "go", "x.go")
 		produce(t, ctx, brokers, consumer.TopicCodeNode, badID, payload, eventID, "")
 
-		outcome := fetchAndProcessOnce(t, ctx, brokers, deps)
+		outcome := fetchAndProcessWithReader(t, ctx, reader, deps)
 		if outcome != consumer.OutcomeInvalidSkipped {
 			t.Fatalf("outcome = %v, want OutcomeInvalidSkipped", outcome)
 		}
@@ -528,7 +530,7 @@ func scenario5InvalidEnumDiscardedNoNeo4jWrite(t *testing.T, ctx context.Context
 		payload := codeRelationPayload(fromID, toID, "BOGUS_REL", nil)
 		produce(t, ctx, brokers, consumer.TopicCodeRelation, fromID+"->"+toID, payload, eventID, "")
 
-		outcome := fetchAndProcessOnce(t, ctx, brokers, deps)
+		outcome := fetchAndProcessWithReader(t, ctx, reader, deps)
 		if outcome != consumer.OutcomeInvalidSkipped {
 			t.Fatalf("outcome = %v, want OutcomeInvalidSkipped", outcome)
 		}
