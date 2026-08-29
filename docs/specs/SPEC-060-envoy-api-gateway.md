@@ -1,5 +1,5 @@
 # SPEC-060 — Envoy API Gateway: JSON/gRPC, SSE, rate limit e SecurityContext
-Stato: approved
+Stato: implemented
 Task-tree: T6.6 · Servizio: `services/api-gateway` + `deploy/envoy` · ADD: Modulo 3 §1.1–§1.4, §2.1; Modulo 4 §1.3, §2.3; D7 `SecurityContext`
 Contratti: `contracts/proto/eci/retrieval/v1/retrieval.proto` (immutato)
 
@@ -147,18 +147,35 @@ scope metadata-only T6.2/T6.3, error body allow-listed e test Envoy reale.
 
 ## 9. Criteri di accettazione
 
-- [ ] Scenari §3 red-before-green e verdi CPU-only.
-- [ ] Envoy pinned è unico listener pubblico; helper/backend non esposti.
-- [ ] JWT SPEC-055 produce il solo SecurityContext upstream; forged header/body
+- [x] Scenari §3 red-before-green e verdi CPU-only.
+- [x] Envoy pinned è unico listener pubblico; helper/backend non esposti.
+- [x] JWT SPEC-055 produce il solo SecurityContext upstream; forged header/body
   non modifica tenant/repo/gruppi/trace.
-- [ ] JSON unary e gRPC passthrough reali attraversano ext_authz+backend.
-- [ ] SSE reale prova frame/flush incrementali, cancellation e failure path.
-- [ ] 429/Retry-After e zero-upstream provati; auth/rate failures fail-closed.
+- [x] JSON unary e gRPC passthrough reali attraversano ext_authz+backend.
+- [x] SSE reale prova frame/flush incrementali, cancellation e failure path.
+- [x] 429/Retry-After e zero-upstream provati; auth/rate failures fail-closed.
 - [ ] Descriptor deterministico; `envoy --mode validate` e integration verdi.
 - [ ] `task build`, `task lint`, `task test`, test gateway, `task guard` verdi;
   SPEC verified, ADR-0014 accepted, CI verde e PR merged.
 
-## 10. Review avversariale di approvazione
+## 10. Evidenza di implementazione
+
+Red phase osservata prima dei file di produzione: `go test ./...` falliva per
+`loadConfig` assente e per `deploy/envoy/envoy.yaml`/`retrieval.pb` assenti;
+la suite edge iniziale falliva per i simboli handler non definiti.
+
+Green locale CPU-only: unit/race/vet gateway verdi; descriptor rigenerato
+byte-identico (SHA-256
+`9e05e2a69c0aaddbd8541c60083cfca2b15ec4263228bf9b4e23b7cbac56b62e`);
+bootstrap validato dal binario ufficiale Envoy 1.39.0; integrazione end-to-end
+e relativo race detector verdi usando lo stesso binario. `task build`,
+`task lint`, `task guard`, lint/breaking/codegen proto sono verdi. Il daemon
+Docker locale non è avviabile senza credenziali sudo: `task test` locale ha
+quindi completato le suite pure ma ha fallito esclusivamente nei testcontainers
+Keycloak/OPA/Neo4j preesistenti. La prova dell’immagine pinned, il `task test`
+completo e lo stato `verified` restano intenzionalmente subordinati alla CI.
+
+## 11. Review avversariale di approvazione
 
 Pass eseguito il 2026-08-29. La soluzione non cambia ADD/proto e non scrive
 viste; l'adapter preserva bounded traversal/deadline e non post-filtra ACL.

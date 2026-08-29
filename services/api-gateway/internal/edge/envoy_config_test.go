@@ -42,6 +42,7 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 		"ignore_unknown_query_parameters: false",
 		"eci.retrieval.v1.RetrievalEngine",
 		"key: retry-after",
+		"address: 127.0.0.1",
 	} {
 		if !strings.Contains(config, required) {
 			t.Errorf("missing strict config fragment %q", required)
