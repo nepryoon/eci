@@ -132,8 +132,8 @@ spec:
       allowPrivilegeEscalation: false
       capabilities: {drop: [ALL]}
   initHelper:
-    image: docker.io/busybox
-    version: "1.37.0"
+    image: docker.io/busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+    version: ""
     imagePullPolicy: IfNotPresent
   security:
     config:
@@ -159,6 +159,10 @@ kind: Job
 metadata:
   name: qdrant-collection-bootstrap
   namespace: data-plane
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
   labels:
     {{- include "eci.labels" . | nindent 4 }}
 spec:
@@ -177,7 +181,7 @@ spec:
         {{- include "eci.podSecurityContext" . | nindent 8 }}
       containers:
         - name: bootstrap
-          image: "curlimages/curl:8.16.0"
+          image: "curlimages/curl@sha256:463eaf6072688fe96ac64fa623fe73e1dbe25d8ad6c34404a669ad3ce1f104b6"
           securityContext:
             {{- include "eci.containerSecurityContext" . | nindent 12 }}
           env:

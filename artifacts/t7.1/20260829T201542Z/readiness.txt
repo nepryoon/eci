@@ -1,5 +1,9 @@
 clean_install=PASS
-eci_release_revision=1
+eci_release_revision=6
+atomic_upgrade_revision_4=ROLLED_BACK (immutable legacy Job detected; no partial release)
+qdrant_bootstrap_hook_upgrade_revision_6=PASS
+cloudnative_pg_webhook_policy=present (operator selector; TCP 9443)
+postgres_image=17.6@sha256:30b304a2e300ed80b6d1b740e4369e9b0f25599fb518de78c01fd9f25531791b
 postgres=Ready (1/1 dev; Cluster in healthy state)
 kafka=Ready (1/1 dev; Kafka 4.3.1; metadata 4.3-IV0)
 kafka_connect=Ready (1/1 dev; Debezium 3.6.0.Final; PostgreSQL plugin present; Strimzi TLS)

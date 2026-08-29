@@ -1,6 +1,21 @@
 global:
   imageRegistry: ghcr.io/nepryoon/eci
-  imageTag: "0.1.0"
+  # Application images are intentionally unset: an installation may enable
+  # applications only with registry-issued OCI digests from its release job.
+  imageReferences:
+    api-gateway: ""
+    orchestrator: ""
+    retrieval-engine: ""
+    verification: ""
+    llm-gateway: ""
+    summarization: ""
+    semantic-cache: ""
+    ingestion: ""
+    embedding-worker: ""
+    sink-graph: ""
+    sink-vector: ""
+    sink-search: ""
+    gds-impact: ""
   existingSecret: eci-runtime
   storageClass: ""
   profile: production-like
@@ -11,9 +26,8 @@ namespaces:
   create: true
 
 applications:
-  enabled: true
+  enabled: false
   workloads:
-    - {name: envoy, namespace: ingress, image: "envoyproxy/envoy:v1.39.0", port: 8443, metricsPort: 9901, replicas: 2, profile: io}
     - {name: api-gateway, namespace: ingress, port: 8081, metricsPort: 9107, replicas: 2, profile: io}
     - {name: orchestrator, namespace: query-plane, port: 8080, metricsPort: 9090, replicas: 3, profile: io}
     - {name: retrieval-engine, namespace: query-plane, port: 50053, metricsPort: 9105, replicas: 4, profile: io}
@@ -26,9 +40,31 @@ applications:
     - {name: sink-graph, namespace: ingestion-plane, port: 9101, metricsPort: 9101, replicas: 2, profile: io}
     - {name: sink-vector, namespace: ingestion-plane, port: 9103, metricsPort: 9103, replicas: 2, profile: io}
     - {name: sink-search, namespace: ingestion-plane, port: 9104, metricsPort: 9104, replicas: 2, profile: io}
-    - {name: vllm, namespace: gpu-plane, image: "vllm/vllm-openai:v0.28.0", port: 8000, metricsPort: 8000, replicas: 1, profile: gpu-vllm}
-    - {name: embedder, namespace: gpu-plane, image: "ghcr.io/huggingface/text-embeddings-inference:1.8", port: 80, metricsPort: 80, replicas: 1, profile: gpu-small}
-    - {name: reranker, namespace: gpu-plane, image: "ghcr.io/huggingface/text-embeddings-inference:1.8", port: 80, metricsPort: 80, replicas: 1, profile: gpu-small}
+    - {name: vllm, namespace: gpu-plane, image: "vllm/vllm-openai@sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14", port: 8000, metricsPort: 8000, replicas: 1, profile: gpu-vllm}
+    - {name: embedder, namespace: gpu-plane, image: "ghcr.io/huggingface/text-embeddings-inference@sha256:274104f179b88e2fdfc20e4d1e5273098f1cbcc2385fdef1687558413af85639", port: 80, metricsPort: 80, replicas: 1, profile: gpu-small}
+    - {name: reranker, namespace: gpu-plane, image: "ghcr.io/huggingface/text-embeddings-inference@sha256:274104f179b88e2fdfc20e4d1e5273098f1cbcc2385fdef1687558413af85639", port: 80, metricsPort: 80, replicas: 1, profile: gpu-small}
+
+edge:
+  enabled: true
+  image: "envoyproxy/envoy@sha256:d59f7f5fa10cff6d5892b6c5e7df5c9297ddfb2c3683e33fbfb82da24de4fa66"
+  configMap: eci-envoy-config
+  tlsSecret: eci-envoy-tls
+  replicas: 2
+  port: 8080
+  metricsPort: 9901
+
+routing:
+  opaURL: http://opa.query-plane.svc.cluster.local:8181
+  retrievalAddress: retrieval-engine.query-plane.svc.cluster.local:50053
+  neo4jURI: bolt://neo4j.data-plane.svc.cluster.local:7687
+  qdrantHost: qdrant.data-plane.svc.cluster.local
+  qdrantGRPCPort: "6334"
+  embeddingServiceURL: http://embedder.gpu-plane.svc.cluster.local:80
+  rerankerServiceURL: http://reranker.gpu-plane.svc.cluster.local:80
+  openSearchURL: https://eci-opensearch.data-plane.svc.cluster.local:9200
+  redisAddress: redis.data-plane.svc.cluster.local:6379
+  kafkaBrokers: eci-kafka-kafka-bootstrap.data-plane.svc.cluster.local:9092
+  vllmURL: http://vllm.gpu-plane.svc.cluster.local:8000/v1
 
 resources:
   io:
@@ -54,7 +90,7 @@ batch:
 
 cdc:
   enabled: true
-  image: quay.io/debezium/connect:3.6.0.Final
+  image: quay.io/debezium/connect@sha256:698f0559e667a242f962221079e75917b2b7a3ad4de62661e977628da0e33b45
   replicas: 2
   heapOptions: "-Xms256M -Xmx1536M"
   resources:
@@ -65,7 +101,7 @@ dataPlane:
   enabled: true
   postgres:
     instances: 3
-    image: ghcr.io/cloudnative-pg/postgresql:17.6
+    image: ghcr.io/cloudnative-pg/postgresql:17.6@sha256:30b304a2e300ed80b6d1b740e4369e9b0f25599fb518de78c01fd9f25531791b
     storage: 100Gi
   kafka:
     replicas: 3
@@ -81,7 +117,7 @@ dataPlane:
       requests: {cpu: "2", memory: 4Gi}
       limits: {cpu: "8", memory: 32Gi}
   minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
     replicas: 4
     storage: 100Gi
   qdrant:

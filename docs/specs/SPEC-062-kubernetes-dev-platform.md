@@ -33,7 +33,9 @@ Valori pubblici minimi:
 ```yaml
 global:
   imageRegistry: ghcr.io/nepryoon/eci
-  imageTag: "<immutable git sha or release>"
+  imageReferences:
+    api-gateway: "ghcr.io/nepryoon/eci/api-gateway@sha256:<registry digest>"
+    # one registry-issued digest reference per first-party workload
   existingSecret: eci-runtime
   storageClass: ""
 operators:
@@ -52,20 +54,28 @@ dataPlane:
     securityConfigSecret: eci-opensearch-security-config
 ```
 
-I secret non sono valori Helm. Il chart usa esclusivamente
+I secret non sono valori Helm. Le applicazioni sono opt-in e ogni immagine
+first-party deve essere fornita dal release process come riferimento OCI per
+digest; in assenza di immagini pubblicate il profilo base non renderizza pod
+applicativi né usa riferimenti inventati. Il chart usa esclusivamente
 `secretKeyRef`/secret montati da `global.existingSecret` e dai due riferimenti
 OpenSearch dedicati; il bootstrap dev li crea a runtime da input locali non
 versionati e genera l'hash bcrypt richiesto dall'operator 2.8.0. Le immagini devono avere
-tag immutabile; `latest`, tag vuoti e credenziali letterali sono rifiutati.
+digest SHA-256; tag-only, `latest`, riferimenti vuoti e credenziali letterali
+sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
+`deploy/envoy/envoy.yaml`/`retrieval.pb` e Secret TLS `eci-envoy-tls` esterni.
 
 ## 3. Comportamento
 
-1. **Inventario completo.** Given i valori standard, When `task k8s:render`
-   produce YAML, Then esistono i namespace `ingress`, `query-plane`,
+1. **Inventario completo.** Given riferimenti OCI first-party reali e
+   `applications.enabled=true`, When il chart produce YAML, Then esistono i
+   namespace `ingress`, `query-plane`,
    `gpu-plane`, `ingestion-plane`, `data-plane`, `observability`; Deployment,
    Service, account e PDB coprono Envoy/API helper, orchestrator, retrieval,
    verification, LLM gateway, summarization, semantic cache, tre sink,
    ingestion CPU, embedding/reranker/vLLM; GDS è un workload batch esplicito.
+   Senza tali riferimenti il profilo infrastrutturale resta applicazioni-off e
+   Helm fallisce se si forza l'abilitazione: nessun digest sintetico è default.
 2. **Stateful production-like.** Given il profilo standard, When si renderizza,
    Then Kafka usa `KafkaNodePool` KRaft a 3 nodi/PV, CloudNativePG usa
    PostgreSQL 17 con 3 istanze, OpenSearch usa l'operator CR con Security
@@ -100,6 +110,10 @@ tag immutabile; `latest`, tag vuoti e credenziali letterali sono rifiutati.
    OPA monta una copia byte-identica della policy canonica Compose e la carica
    esplicitamente al bootstrap; readiness TCP senza una decisione allow e una
    deny fail-closed verificabili non è considerata evidenza sufficiente.
+   CloudNativePG riceve ingress soltanto sul target TLS webhook 9443; poiché
+   NetworkPolicy non identifica un apiserver esterno, la sorgente portabile è
+   `0.0.0.0/0` ma il selector resta limitato ai soli pod operator e il CIDR è
+   restringibile per cluster.
 5. **Overlay dev onesto.** Given `values-dev.yaml`, When il bootstrap gira su
    kind, Then usa repliche/storage/resource ridotti e Neo4j Community come
    previsto dagli ADR dev esistenti. I workload ECI senza immagini pubblicate
@@ -131,7 +145,9 @@ tag immutabile; `latest`, tag vuoti e credenziali letterali sono rifiutati.
 | Helm/kubectl/kind assente | preflight fallisce con versione richiesta e link/script, nessuna mutazione |
 | Docker indisponibile | `k8s:validate` resta CPU-only; `k8s:dev:up` fallisce prima di creare cluster |
 | secret runtime assente | pod fail-closed/non schedulato; bootstrap stampa solo nomi chiave, mai valori |
-| tag immagine vuoto, `latest` o non pinned | policy check non-zero |
+| immagine vuota, tag-only, `latest` o non pin-nata per digest | policy check non-zero |
+| applicazioni abilitate senza tutti i digest first-party | render Helm non-zero, nessun Deployment parziale |
+| ConfigMap bootstrap Envoy o Secret TLS assente | Envoy non schedula/avvia; nessun fallback cleartext |
 | CRD operatore assente | apply dei CR attende/fallisce bounded; non passa a readiness dati |
 | store non Ready | verifica non-zero con namespace/kind/nome; nessun retry infinito |
 | cluster con risorse insufficienti | stato non verificato; raccoglie describe/events senza ridurre soglie standard |
@@ -152,7 +168,7 @@ source of truth, viste materializzate, PVC e audit. **Confini:** Envoy è l'unic
 ingresso; SecurityContext resta prodotto dal gateway autenticato; operatori
 controllano solo le risorse necessarie; values non sono una trust source.
 **Attacchi:** accesso diretto a store/GPU, service-account token theft,
-cross-namespace lateral movement, tag mutable, secret in manifest/log, teardown
+cross-namespace lateral movement, retag upstream, secret in manifest/log, teardown
 ampio, fallback OpenSearch/OPA insicuro. **Mitigazioni:** ClusterIP,
 NetworkPolicy default-deny e allow-list, SA dedicati senza automount, pod
 security, secret references, pin di release/immagini, script con target fisso e
@@ -192,8 +208,9 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
 - Helm: `helm lint` e `helm template` per profilo standard/dev.
 - Schema: `kubeconform` pinned con schema Kubernetes e CRD vendute/pinned;
   oggetti CR senza schema locale sono rifiutati, non ignorati.
-- Supply chain: `scripts/k8s-validate.sh` rifiuta `latest`, digest/tag vuoti,
-  `kind: Secret`, password/token/API key letterali e immagini senza pin.
+- Supply chain: `scripts/k8s-validate.sh` richiede `name@sha256:<64 hex>`,
+  rifiuta tag-only, `kind: Secret`, password/token/API key letterali e immagini
+  senza digest. Task 3.53.1, Helm e kubeconform sono scaricati con checksum.
 - Integration locale: kind pinned, install operatori/chart pinned, apply
   atomic, `kubectl wait`, probe DNS/TCP/HTTP e raccolta eventi in errore.
 - Regression: `task build`, `task lint`, `task test`, `task guard`; nessuna GPU
@@ -214,7 +231,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
 
 - [x] Test §3/§7 registrati red-before-green e poi verdi.
 - [x] Chart standard/dev lintano e renderizzano deterministicamente.
-- [x] Inventario D8 completo; nessun placeholder/sleep container.
+- [x] Catalogo D8 completo sotto opt-in con digest obbligatori; nessun
+      placeholder/sleep container e nessuna immagine ECI inesistente di default.
 - [x] Debezium/Kafka Connect è pinned, usa TLS verso Strimzi e non incorpora
       la password PostgreSQL nella ConfigMap del connector.
 - [x] OPA carica la policy canonica e lo smoke prova allow + deny fail-closed.
@@ -224,7 +242,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       collection con replication factor 2/shard 3.
 - [x] Tutti gli stateless hanno rollout, PDB, due topology spread, risorse e
       probe reali; profilo dev dichiara onestamente le riduzioni.
-- [x] Nessun Secret/credenziale/tag mutable versionato; NetworkPolicy e pod
+- [x] Nessun Secret/credenziale/tag mutable versionato; Envoy monta config,
+      descriptor e TLS esterni sulla porta 8080 reale; NetworkPolicy e pod
       security passano i check fail-closed.
 - [x] Kubeconform valida built-in e CRD contro schemi pinned.
 - [x] Cluster dev realmente creato; operatori/store Ready e connettività
@@ -262,6 +281,18 @@ Enterprise richiede un'accettazione licenza esterna esplicita; non è stata
 simulata né incorporata. La verifica di CI e la review PR restano necessarie
 prima del passaggio a `verified`.
 
+Il secondo ciclo di review ha eliminato i tag container-only, pin-nato Task
+3.53.1 tramite checksum, introdotto routing runtime namespace-local, montato gli
+input esterni Envoy bootstrap/descriptor/TLS sulla porta reale 8080 e ammesso
+il solo target webhook CloudNativePG. Nessun digest ECI è stato inventato:
+l'abilitazione applicativa richiede riferimenti pubblicati dal release process.
+Un upgrade reale ha prima riprodotto l'immutabilità del vecchio Job Qdrant e
+Helm ha eseguito rollback senza stato parziale; convertito il bootstrap
+idempotente in hook bounded pre-install/pre-upgrade, la revision 6 è stata
+applicata e l'intero smoke readiness/connectivity/OPA è tornato verde. Questa è
+evidenza infrastrutturale, non evidenza di pubblicazione o readiness delle
+applicazioni first-party.
+
 ## 11. Review avversariale di approvazione
 
 Pass eseguito il 2026-08-29. Nessuna modifica ADD/contratto né scrittura
@@ -274,7 +305,9 @@ restano separati e non si converte uno smoke probabilistico in garanzia.
 
 Il secondo passaggio ha tentato di invalidare la proposta su cinque fronti.
 (1) Un umbrella chart che incorporasse credenziali è stato escluso in favore di
-`existingSecret`. (2) `latest` e install URL mobili sono rifiutati. (3) Il
+`existingSecret`. (2) Tag-only/`latest` e install URL mobili sono rifiutati;
+tutti i container renderizzati usano digest registry e Task è verificato per
+checksum. (3) Il
 profilo dev Neo4j Community non viene presentato come prova RBAC/HA Enterprise.
 (4) Gli operatori non autorizzano scritture applicative o filtri post-retrieval.
 (5) Lo scope del teardown è un nome kind letterale, non variabile/glob. (6) La

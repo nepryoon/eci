@@ -1,6 +1,7 @@
 kind=0.33.0
 kubernetes=1.34.0
 kubectl=1.34.x
+task=3.53.1
 helm=3.19.0
 kubeconform=0.8.0
 strimzi=1.2.0
@@ -15,3 +16,4 @@ neo4j-chart=5.26.30
 neo4j-app=5.26.30
 qdrant-chart=1.19.0
 qdrant-app=v1.19.0
+application-images=not-published; opt-in registry digests required

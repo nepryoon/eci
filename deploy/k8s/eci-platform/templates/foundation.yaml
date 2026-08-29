@@ -10,11 +10,11 @@ data:
 {{ .Files.Get "policies/eci_authz.rego" | indent 4 }}
 ---
 {{- $items := list
-  (dict "name" "opa" "namespace" "query-plane" "image" "openpolicyagent/opa:1.20.1" "port" 8181 "args" (list "run" "--server" "--addr=0.0.0.0:8181" "/policies/eci_authz.rego"))
-  (dict "name" "redis" "namespace" "data-plane" "image" "redis:8.2.1-alpine" "port" 6379 "args" (list "redis-server" "--requirepass" "$(REDIS_PASSWORD)"))
+  (dict "name" "opa" "namespace" "query-plane" "image" "openpolicyagent/opa@sha256:39daf255ae7f25d81103f03a0c18308a50b7b5bb67907bed6166f70e24a970ff" "port" 8181 "args" (list "run" "--server" "--addr=0.0.0.0:8181" "/policies/eci_authz.rego"))
+  (dict "name" "redis" "namespace" "data-plane" "image" "redis@sha256:987c376c727652f99625c7d205a1cba3cb2c53b92b0b62aade2bd48ee1593232" "port" 6379 "args" (list "redis-server" "--requirepass" "$(REDIS_PASSWORD)"))
 }}
 {{- if eq .Values.global.profile "dev" }}
-{{- $items = append $items (dict "name" "keycloak" "namespace" "ingress" "image" "quay.io/keycloak/keycloak:26.7.2" "port" 8080 "args" (list "start-dev" "--health-enabled=true")) }}
+{{- $items = append $items (dict "name" "keycloak" "namespace" "ingress" "image" "quay.io/keycloak/keycloak@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067" "port" 8080 "args" (list "start-dev" "--health-enabled=true")) }}
 {{- end }}
 {{- range $item := $items }}
 ---

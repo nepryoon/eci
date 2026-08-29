@@ -71,6 +71,8 @@ spec:
             - {name: service, containerPort: {{ $workload.port }}}
             - {name: metrics, containerPort: {{ $workload.metricsPort }}}
           envFrom:
+            - configMapRef:
+                name: eci-runtime-routing
             - secretRef:
                 name: {{ $.Values.global.existingSecret }}
           readinessProbe:

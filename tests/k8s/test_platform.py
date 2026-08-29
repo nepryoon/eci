@@ -16,10 +16,26 @@ CHART = ROOT / "deploy" / "k8s" / "eci-platform"
 HELM = os.environ.get("HELM_BIN", "helm")
 
 
-def render(values: str | None = None) -> list[dict]:
+APPLICATION_IMAGES = (
+    "api-gateway", "orchestrator", "retrieval-engine", "verification",
+    "llm-gateway", "summarization", "semantic-cache", "ingestion",
+    "embedding-worker", "sink-graph", "sink-vector", "sink-search", "gds-impact",
+)
+TEST_DIGEST = "0123456789abcdef" * 4
+
+
+def render(values: str | None = None, *, application_catalog: bool = False) -> list[dict]:
     command = [HELM, "template", "eci", str(CHART), "--namespace", "query-plane"]
     if values:
         command.extend(["--values", str(CHART / values)])
+    if application_catalog:
+        command.extend(["--set", "applications.enabled=true"])
+        for name in APPLICATION_IMAGES:
+            # Template-only fixture. It proves that every workload requires a
+            # digest-shaped reference without pretending an ECI image exists.
+            command.extend(
+                ["--set-string", f"global.imageReferences.{name}=registry.example.invalid/eci-test/{name}@sha256:{TEST_DIGEST}"]
+            )
     output = subprocess.run(command, check=True, capture_output=True, text=True).stdout
     return [doc for doc in yaml.safe_load_all(output) if isinstance(doc, dict)]
 
@@ -35,7 +51,7 @@ def keyed(objects: list[dict]) -> dict[tuple[str, str, str], dict]:
 class PlatformChartTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.standard = render()
+        cls.standard = render(application_catalog=True)
         cls.dev = render("values-dev.yaml")
         cls.by_key = keyed(cls.standard)
 
@@ -91,7 +107,10 @@ class PlatformChartTests(unittest.TestCase):
         self.assertEqual(set(pool["spec"]["roles"]), {"broker", "controller"})
         self.assertEqual(pool["spec"]["storage"]["type"], "persistent-claim")
         self.assertEqual(postgres["spec"]["instances"], 3)
-        self.assertTrue(postgres["spec"]["imageName"].endswith(":17.6"))
+        self.assertEqual(
+            postgres["spec"]["imageName"],
+            "ghcr.io/cloudnative-pg/postgresql:17.6@sha256:30b304a2e300ed80b6d1b740e4369e9b0f25599fb518de78c01fd9f25531791b",
+        )
         self.assertEqual(postgres["spec"]["postgresql"]["parameters"]["wal_level"], "logical")
         self.assertEqual(opensearch["apiVersion"], "opensearch.opster.io/v1")
         self.assertEqual(opensearch["spec"]["nodePools"][0]["replicas"], 3)
@@ -117,6 +136,14 @@ class PlatformChartTests(unittest.TestCase):
         self.assertEqual(qdrant_values["replicaCount"], 3)
         self.assertTrue(qdrant_values["config"]["cluster"]["enabled"])
         bootstrap = self.by_key[("Job", "data-plane", "qdrant-collection-bootstrap")]
+        self.assertEqual(
+            bootstrap["metadata"]["annotations"],
+            {
+                "helm.sh/hook": "pre-install,pre-upgrade",
+                "helm.sh/hook-weight": "10",
+                "helm.sh/hook-delete-policy": "before-hook-creation,hook-succeeded",
+            },
+        )
         env = bootstrap["spec"]["template"]["spec"]["containers"][0]["env"]
         self.assertIn({"name": "SHARD_NUMBER", "value": "3"}, env)
         self.assertIn({"name": "REPLICATION_FACTOR", "value": "2"}, env)
@@ -196,6 +223,14 @@ class PlatformChartTests(unittest.TestCase):
         gpu_sources = set(gpu["spec"]["ingress"][0]["from"][0]["namespaceSelector"]["matchExpressions"][0]["values"])
         self.assertIn("ingestion-plane", gpu_sources)
 
+        webhook = self.by_key[("NetworkPolicy", "data-plane", "allow-kube-api-cloudnative-pg-webhook")]
+        self.assertEqual(
+            webhook["spec"]["podSelector"]["matchLabels"],
+            {"app.kubernetes.io/name": "cloudnative-pg"},
+        )
+        self.assertEqual(webhook["spec"]["ingress"][0]["from"], [{"ipBlock": {"cidr": "0.0.0.0/0"}}])
+        self.assertEqual(webhook["spec"]["ingress"][0]["ports"], [{"protocol": "TCP", "port": 9443}])
+
     def test_scenario_4_opa_policy_and_durable_minio(self) -> None:
         policy = self.by_key[("ConfigMap", "query-plane", "opa-policy")]
         canonical_policy = (ROOT / "deploy/compose/opa/policies/eci_authz.rego").read_text()
@@ -266,6 +301,7 @@ class PlatformChartTests(unittest.TestCase):
                 "neo4j": {"chart": "5.26.30", "app": "5.26.30"},
                 "qdrant": {"chart": "1.19.0", "app": "v1.19.0"},
                 "toolchain": {
+                    "task": "3.53.1",
                     "helm": "3.19.0",
                     "kind": "0.33.0",
                     "kubeconform": "0.8.0",
@@ -277,8 +313,57 @@ class PlatformChartTests(unittest.TestCase):
         for obj in self.standard:
             for container in self._containers(obj):
                 image = container.get("image", "")
-                self.assertNotIn(":latest", image)
-                self.assertNotEqual(image.rsplit(":", 1)[-1], image)
+                self.assertRegex(image, r"@sha256:[0-9a-f]{64}$")
+
+    def test_review_runtime_routes_and_envoy_are_fail_closed(self) -> None:
+        routing = self.by_key[("ConfigMap", "query-plane", "eci-runtime-routing")]["data"]
+        self.assertEqual(routing["OPA_URL"], "http://opa.query-plane.svc.cluster.local:8181")
+        self.assertEqual(routing["RETRIEVAL_ENGINE_ADDR"], "retrieval-engine.query-plane.svc.cluster.local:50053")
+        self.assertEqual(routing["NEO4J_URI"], "bolt://neo4j.data-plane.svc.cluster.local:7687")
+        self.assertEqual(routing["QDRANT_HOST"], "qdrant.data-plane.svc.cluster.local")
+        self.assertEqual(routing["OPENSEARCH_URL"], "https://eci-opensearch.data-plane.svc.cluster.local:9200")
+        self.assertNotIn("localhost", "\n".join(routing.values()))
+
+        for obj in self.standard:
+            if obj.get("kind") != "Deployment" or obj["metadata"]["name"] in {
+                "envoy", "kafka-connect", "opa", "redis"
+            }:
+                continue
+            refs = obj["spec"]["template"]["spec"]["containers"][0].get("envFrom", [])
+            self.assertIn({"configMapRef": {"name": "eci-runtime-routing"}}, refs)
+            self.assertIn({"secretRef": {"name": "eci-runtime"}}, refs)
+
+        envoy = self.by_key[("Deployment", "ingress", "envoy")]
+        container = envoy["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(container["ports"][0], {"name": "service", "containerPort": 8080})
+        mounts = {item["name"]: item for item in container["volumeMounts"]}
+        self.assertEqual(mounts["config"]["mountPath"], "/etc/envoy/envoy.yaml")
+        self.assertEqual(mounts["descriptor"]["mountPath"], "/etc/envoy/retrieval.pb")
+        self.assertEqual(mounts["tls"]["mountPath"], "/etc/envoy/tls")
+        volumes = {item["name"]: item for item in envoy["spec"]["template"]["spec"]["volumes"]}
+        self.assertEqual(volumes["config"]["configMap"]["name"], "eci-envoy-config")
+        self.assertEqual(volumes["tls"]["secret"]["secretName"], "eci-envoy-tls")
+        bootstrap = yaml.safe_load((ROOT / "deploy/envoy/envoy.yaml").read_text())
+        listener_port = bootstrap["static_resources"]["listeners"][0]["address"]["socket_address"]["port_value"]
+        self.assertEqual(listener_port, container["ports"][0]["containerPort"])
+        runbook = (ROOT / "docs/runbooks/kubernetes-dev.md").read_text()
+        self.assertIn("--from-file=envoy.yaml=deploy/envoy/envoy.yaml", runbook)
+        self.assertIn("--from-file=retrieval.pb=deploy/envoy/retrieval.pb", runbook)
+
+    def test_review_application_enablement_requires_real_release_digests(self) -> None:
+        result = subprocess.run(
+            [HELM, "template", "eci", str(CHART), "--set", "applications.enabled=true"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("global.imageReferences.api-gateway", result.stderr)
+
+    def test_review_ci_installs_verified_task_release(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertNotIn("https://taskfile.dev/install.sh", workflow)
+        self.assertIn("task_linux_amd64.tar.gz", workflow)
+        self.assertIn("a54a408f6861ff921f6e87774180db31bacd8c1e7c944ca696db9fea49a82fc7", workflow)
 
     def test_scenario_8_teardown_is_literal_and_scoped(self) -> None:
         script = (ROOT / "deploy/k8s/dev-down.sh").read_text()

@@ -1,5 +1,4 @@
 global:
-  imageTag: 0.1.0-dev
   profile: dev
   highAvailability: false
   neo4jEdition: community

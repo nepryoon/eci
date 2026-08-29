@@ -13,6 +13,7 @@ qdrant:
   chart: "1.19.0"
   app: "v1.19.0"
 toolchain:
+  task: "3.53.1"
   helm: "3.19.0"
   kind: "0.33.0"
   kubeconform: "0.8.0"

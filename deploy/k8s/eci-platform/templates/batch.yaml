@@ -31,7 +31,7 @@ spec:
             {{- include "eci.podSecurityContext" $ | nindent 12 }}
           containers:
             - name: {{ $name }}
-              image: {{ printf "%s/%s:%s" $.Values.global.imageRegistry $name $.Values.global.imageTag | quote }}
+              image: {{ required "global.imageReferences.gds-impact must be a registry-issued name@sha256 digest when GDS is enabled" (index $.Values.global.imageReferences "gds-impact") | quote }}
               securityContext:
                 {{- include "eci.containerSecurityContext" $ | nindent 16 }}
               envFrom:

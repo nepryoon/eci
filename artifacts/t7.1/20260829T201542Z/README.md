@@ -26,8 +26,14 @@ Results:
 - in-cluster DNS/TCP connectivity to every required store/service: PASS;
 - Pod Security admission label `restricted` on all six ECI namespaces: PASS;
 - deterministic Helm/policy/kubeconform/unit validation: PASS.
+- registry-resolved SHA-256 pins for every rendered third-party container:
+  PASS; no non-existent ECI image is a default;
+- CloudNativePG webhook ingress on the operator-only selector/TCP 9443: PASS;
+- immutable Qdrant bootstrap Job upgrade: the first atomic upgrade failed and
+  rolled back as designed; the hook lifecycle fix then upgraded successfully
+  at revision 6 and the full smoke remained green.
 
-`render-sha256.txt` identifies the exact standard and dev Helm renders without
+`render-sha256.txt` identifies the exact standard infrastructure and dev Helm renders without
 versioning the bulky generated YAML. Re-rendering with the pinned Helm version
 must reproduce those digests.
 
@@ -42,3 +48,9 @@ revision 2 and the full readiness/connectivity verification passed again.
 PR review fixes were applied as revision 3: OPA policy loading, the
 ingestion-to-GPU path, and PVC-backed MinIO. The semantic verification passed
 again; the standard render uses four distributed 100 GiB MinIO PVCs.
+The later supply-chain/routing review fixes were verified at revision 6. The
+catalog of 126 application objects was exercised only with an explicit
+`registry.example.invalid` unit fixture; this proves template completeness and
+digest enforcement, not image publication or application readiness. Released
+applications remain opt-in and require real registry digests plus external
+runtime/Envoy configuration.

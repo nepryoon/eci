@@ -13,7 +13,7 @@ app.kubernetes.io/part-of: eci
 {{- if .workload.image -}}
 {{ .workload.image }}
 {{- else -}}
-{{ $.root.Values.global.imageRegistry }}/{{ .workload.name }}:{{ $.root.Values.global.imageTag }}
+{{- required (printf "global.imageReferences.%s must be a registry-issued name@sha256 digest when applications.enabled=true" .workload.name) (index .root.Values.global.imageReferences .workload.name) -}}
 {{- end -}}
 {{- end }}
 

@@ -1,0 +1,134 @@
+{{- if and .Values.applications.enabled .Values.edge.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: envoy
+  namespace: ingress
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy
+  namespace: ingress
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+    app.kubernetes.io/name: envoy
+spec:
+  replicas: {{ .Values.edge.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  selector:
+    matchLabels:
+      {{- include "eci.selectorLabels" (dict "name" "envoy") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "eci.selectorLabels" (dict "name" "envoy") | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.edge.metricsPort | quote }}
+        prometheus.io/path: /stats/prometheus
+    spec:
+      serviceAccountName: envoy
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "eci.podSecurityContext" . | nindent 8 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "eci.selectorLabels" (dict "name" "envoy") | nindent 14 }}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "eci.selectorLabels" (dict "name" "envoy") | nindent 14 }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "eci.selectorLabels" (dict "name" "envoy") | nindent 20 }}
+      containers:
+        - name: envoy
+          image: {{ .Values.edge.image | quote }}
+          imagePullPolicy: IfNotPresent
+          args: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "eci-edge"]
+          securityContext:
+            {{- include "eci.containerSecurityContext" . | nindent 12 }}
+          ports:
+            - {name: service, containerPort: {{ .Values.edge.port }}}
+            - {name: metrics, containerPort: {{ .Values.edge.metricsPort }}}
+          readinessProbe:
+            tcpSocket: {port: service}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket: {port: service}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources.io | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/envoy/envoy.yaml, subPath: envoy.yaml, readOnly: true}
+            - {name: descriptor, mountPath: /etc/envoy/retrieval.pb, subPath: retrieval.pb, readOnly: true}
+            - {name: tls, mountPath: /etc/envoy/tls, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Values.edge.configMap }}
+            items: [{key: envoy.yaml, path: envoy.yaml}]
+        - name: descriptor
+          configMap:
+            name: {{ .Values.edge.configMap }}
+            items: [{key: retrieval.pb, path: retrieval.pb}]
+        - name: tls
+          secret:
+            secretName: {{ .Values.edge.tlsSecret }}
+            items:
+              - {key: tls.crt, path: tls.crt}
+              - {key: tls.key, path: tls.key}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: envoy
+  namespace: ingress
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eci.selectorLabels" (dict "name" "envoy") | nindent 4 }}
+  ports:
+    - {name: service, port: {{ .Values.edge.port }}, targetPort: service}
+    - {name: metrics, port: {{ .Values.edge.metricsPort }}, targetPort: metrics}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: envoy
+  namespace: ingress
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "eci.selectorLabels" (dict "name" "envoy") | nindent 6 }}
+{{- end }}

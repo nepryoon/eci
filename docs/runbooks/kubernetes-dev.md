@@ -7,7 +7,7 @@ GPU, RBAC Enterprise, disaster-recovery or D9 performance evidence.
 
 ## Toolchain and validation
 
-Pinned validation versions are Helm 3.19.0 and kubeconform 0.8.0. The dev path
+Pinned validation versions are Task 3.53.1, Helm 3.19.0 and kubeconform 0.8.0. The dev path
 uses kind 0.33.0, Kubernetes 1.34.0 and a compatible kubectl. Install PyYAML in
 the active Python environment, then run:
 
@@ -15,7 +15,8 @@ the active Python environment, then run:
 task k8s:validate
 ```
 
-The command renders standard and dev profiles, rejects mutable images, inline
+The command renders standard and dev infrastructure profiles, rejects every
+container image that is not pinned by an OCI SHA-256 digest, inline
 secrets and placeholder processes, validates every built-in and operator CR
 against a checked-in schema, and runs the SPEC-062 acceptance suite. It does
 not need Docker, a cluster or network access.
@@ -29,6 +30,40 @@ operator/chart versions from `operator-versions.yaml`, and
 uses atomic Helm upgrades. Source-built ECI applications are disabled by
 default because no published image is assumed; infrastructure readiness is
 never represented by sleep/placeholder containers.
+
+## Enabling released ECI applications
+
+The repository does not invent registry digests. A release pipeline must
+publish each first-party image and supply its immutable full reference under
+`global.imageReferences`; only then may an operator set
+`applications.enabled=true`. Helm fails before producing a Deployment if any
+reference is absent, and the policy gate rejects tag-only references. The
+acceptance test uses `registry.example.invalid` exclusively as a template
+fixture and never as deployment evidence.
+
+Before enabling the edge, provision the exact generated bootstrap and TLS
+material without checking either into Git:
+
+```bash
+kubectl -n ingress create configmap eci-envoy-config \
+  --from-file=envoy.yaml=deploy/envoy/envoy.yaml \
+  --from-file=retrieval.pb=deploy/envoy/retrieval.pb \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n ingress create secret tls eci-envoy-tls \
+  --cert=/secure/path/tls.crt --key=/secure/path/tls.key \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+The Envoy Deployment mounts both ConfigMap keys and the Secret read-only,
+listens on the bootstrap's actual TLS port 8080, and fails to schedule/start if
+any input is absent. It never falls back to cleartext or generated credentials.
+Each application namespace receives `eci-runtime-routing` with concrete
+cluster DNS names for OPA, retrieval, Neo4j, Qdrant, OpenSearch, Redis, Kafka,
+embedding/reranking and vLLM. The separately managed `eci-runtime` Secret must
+contain at least `POSTGRES_DSN`, `NEO4J_USER`, `NEO4J_PASSWORD`,
+`ECI_OIDC_ISSUER`, and `ECI_OIDC_AUDIENCE` in addition to datastore bootstrap
+keys. Missing values are deployment errors; do not restore localhost defaults
+in Helm values.
 
 OpenSearch Operator 2.8.0 still defaults its metrics proxy to the removed
 `gcr.io/kubebuilder` location. The installer keeps version 0.15.0 byte lineage
@@ -59,7 +94,11 @@ cannot select the `kubernetes.default` Service by name and CNIs may enforce
 policy before or after Service DNAT. Five narrowly selected operator policies
 therefore allow only TCP 443/6443 for Strimzi, its entity operator,
 CloudNativePG/operator instances, and OpenSearch Operator. They do not grant
-application or datastore pods general egress.
+application or datastore pods general egress. A separate ingress policy
+selects only CloudNativePG operator pods on webhook target port 9443. Native
+NetworkPolicy cannot identify an external apiserver, so its portable source is
+`0.0.0.0/0`; this does not expose a Service externally and operators should
+narrow the CIDR when their control-plane source ranges are known.
 
 Kafka Connect is Ready before application migrations by design, but the
 `eci-outbox-connector` is not registered automatically against an empty

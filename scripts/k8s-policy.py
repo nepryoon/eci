@@ -36,10 +36,7 @@ def containers(obj: dict) -> list[dict]:
 
 
 def image_is_pinned(image: str) -> bool:
-    if not image or image.endswith(":latest") or image.endswith(":dev"):
-        return False
-    final = image.rsplit("/", 1)[-1]
-    return "@sha256:" in image or ":" in final
+    return bool(re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", image))
 
 
 def main() -> None:
