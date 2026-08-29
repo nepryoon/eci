@@ -1,5 +1,5 @@
 # SPEC-055 — IdP dev Keycloak e JWT → SecurityContext al gateway
-Stato: approved
+Stato: implemented
 Task-tree: T6.1 · Servizio: services/api-gateway + deploy/compose · ADD: Modulo 3 §1.1, §2.1 e D7 `SecurityContext`
 Contratti: contracts/proto/eci/retrieval/v1/retrieval.proto (letto, non modificato)
 
@@ -211,13 +211,13 @@ issuer arbitrario, testo utente o dettagli degli errori crittografici.
 
 - [ ] Keycloak dev pin-nato importa un realm riproducibile e rilascia un token
   reale con audience e claim richiesti.
-- [ ] Nessun secret o password è versionato; compose richiede env esplicite.
-- [ ] JWT access token validato per `typ=Bearer`, `RS256`, issuer, audience,
+- [x] Nessun secret o password è versionato; compose richiede env esplicite.
+- [x] JWT access token validato per `typ=Bearer`, `RS256`, issuer, audience,
   firma ed expiry.
-- [ ] Claim obbligatori e limiti falliscono chiuso senza default tenant/scope.
-- [ ] Solo claim verificati possono costruire tenant/repo/gruppi del contesto.
-- [ ] Il protobuf D7 è riusato senza modificare `contracts/`.
-- [ ] Metriche/span non contengono dati sensibili o cardinalità non limitata.
+- [x] Claim obbligatori e limiti falliscono chiuso senza default tenant/scope.
+- [x] Solo claim verificati possono costruire tenant/repo/gruppi del contesto.
+- [x] Il protobuf D7 è riusato senza modificare `contracts/`.
+- [x] Metriche/span non contengono dati sensibili o cardinalità non limitata.
 - [ ] Unit, OIDC crypto/JWKS rotation e Keycloak integration test verdi.
 - [ ] `task build`, `task lint`, `task test`, `task guard` verdi.
 
@@ -247,3 +247,31 @@ ad ADD, contratti e threat model:
 Esito: nessuna contraddizione con l'ADD, nessun indebolimento dell'isolamento,
 nessun input controllato dall'LLM nel trust boundary e nessuna decisione
 architetturale nuova non documentata. SPEC approvata per implementazione.
+
+## 12. Implementazione e deviazioni
+
+Implementazione in `services/api-gateway/internal/authn`, con
+`github.com/coreos/go-oidc/v3` v3.20.0 per discovery, JWKS e verifica JWT,
+Prometheus client v1.24.1 e OTel v1.44.0. La libreria OIDC viene configurata
+esplicitamente con il solo `RS256`; i claim applicativi vengono decodificati
+soltanto dopo la verifica crittografica.
+
+Il realm dev è importato dal compose con Keycloak `26.7.2`. La password
+bootstrap e quella dell'utente `eci-dev` sono env obbligatorie; l'integration
+test genera valori casuali in memoria. `docker compose config` è risultato
+verde con env locali temporanee non versionate; JSON e script shell sono stati
+validati staticamente.
+
+Test locali verdi: unit, required claims/limiti, metriche/span, RSA/JWKS,
+issuer/audience/expiry/algoritmo e rotazione `kid`; inoltre `task build`,
+`task lint` e `task guard`. `task test` locale arriva ai test Docker ma fallisce
+perché il daemon Docker Desktop non è raggiungibile, incluso il nuovo test
+Keycloak; la stessa limitazione produce i 10 errori testcontainers orchestrator
+preesistenti. I criteri Keycloak end-to-end e gate completi restano aperti fino
+all'esecuzione CI su runner Docker-capable.
+
+Nessuna deviazione da ADD o contratti. L'HTTP dev è più restrittivo della sola
+flag configurabile: è accettato esclusivamente per issuer loopback. Il servizio
+non espone ancora un listener, intenzionalmente: Envoy/transcoding/SSE/rate
+limiting appartengono a T6.6; T6.1 consegna il boundary interno autenticante che
+T6.6 comporrà.
