@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -253,6 +254,32 @@ func TestRequiredClaimsAndLimitsFailClosed(t *testing.T) {
 				t.Fatalf("code = %q, want %q", code, ErrorInvalidClaims)
 			}
 		})
+	}
+}
+
+func TestSecurityContextTransportBudgetFailsClosed(t *testing.T) {
+	largeScope := make([]string, 80)
+	for index := range largeScope {
+		largeScope[index] = strings.Repeat("r", 200) + string(rune('a'+index%26))
+	}
+	raw, err := json.Marshal(map[string]any{
+		"sub": "user-7", "typ": "Bearer", "tenant_id": "tenant-42",
+		"allowed_repos": largeScope, "acl_groups": []string{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator, _ := newTestAuthenticator(t, &stubVerifier{claims: raw})
+
+	securityContext, authenticateErr := authenticator.Authenticate(
+		context.Background(), "Bearer signed.jwt.value", validTraceID,
+	)
+	if securityContext != nil {
+		t.Fatalf("oversized context returned: %v", securityContext)
+	}
+	var authError *AuthError
+	if !errors.As(authenticateErr, &authError) || authError.Code != ErrorInvalidClaims {
+		t.Fatalf("error=%v want invalid_claims", authenticateErr)
 	}
 }
 

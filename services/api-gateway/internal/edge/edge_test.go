@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -160,6 +161,27 @@ func TestAuthorizeDerivesAndReplacesReservedMetadata(t *testing.T) {
 	}
 	if strings.Contains(response.Body.String(), "signed-token") || strings.Contains(response.Body.String(), "secret prompt") {
 		t.Fatal("secret reflected in auth response")
+	}
+}
+
+func TestAuthorizeRejectsContextOutsideTransportBudget(t *testing.T) {
+	largeScope := make([]string, 80)
+	for index := range largeScope {
+		largeScope[index] = strings.Repeat("r", 200) + string(rune('a'+index%26))
+	}
+	auth := &fakeAuthenticator{result: &retrievalv1.SecurityContext{
+		TenantId: "tenant-a", UserId: "alice", AllowedRepos: largeScope,
+		AclGroups: []string{}, TraceId: "0123456789abcdef0123456789abcdef",
+	}}
+	handler := newTestHandler(t, auth, noStreamClient(), bytes.NewReader(bytes.Repeat([]byte{0x11}, 24)))
+	request := httptest.NewRequest(http.MethodPost, "/authorize/anything", nil)
+	request.Header.Set("Authorization", "Bearer valid")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get(SecurityContextHeader) != "" {
+		t.Fatalf("status=%d security-context=%q", response.Code, response.Header().Get(SecurityContextHeader))
 	}
 }
 
@@ -453,5 +475,40 @@ func TestSSEEmitsBoundedErrorWhenHelperDeadlineExpiresAfterFirstFrame(t *testing
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "event: error") ||
 		!strings.Contains(response.Body.String(), `{"code":"stream_error"}`) {
 		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+type delayedReadCloser struct {
+	reader io.Reader
+	delay  time.Duration
+}
+
+func (r *delayedReadCloser) Read(buffer []byte) (int, error) {
+	time.Sleep(r.delay)
+	return r.reader.Read(buffer)
+}
+
+func (*delayedReadCloser) Close() error { return nil }
+
+func TestSSEDeadlineIncludesRequestBodyRead(t *testing.T) {
+	calls := 0
+	client := &fakeImpactClient{call: func(context.Context, *retrievalv1.ImpactAnalysisRequest) (grpc.ServerStreamingClient[retrievalv1.ImpactAnalysisEvent], error) {
+		calls++
+		return nil, status.Error(codes.Unavailable, "must not be reached")
+	}}
+	handler := newTestHandler(t, &fakeAuthenticator{}, client, bytes.NewReader(make([]byte, 24)))
+	request := httptest.NewRequest(http.MethodPost, SSEPath, nil)
+	request.Body = &delayedReadCloser{
+		reader: strings.NewReader(`{"entryNodeId":"A"}`),
+		delay:  20 * time.Millisecond,
+	}
+	setTrustedRequestHeaders(t, request, testSecurityContext())
+	request.Header.Set("X-Eci-Request-Deadline-Unix-Ms", strconv.FormatInt(time.Now().Add(10*time.Millisecond).UnixMilli(), 10))
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusGatewayTimeout || calls != 0 {
+		t.Fatalf("status=%d backend calls=%d body=%q", response.Code, calls, response.Body.String())
 	}
 }
