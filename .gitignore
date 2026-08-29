@@ -8,6 +8,7 @@ services/*/sink-search
 services/*/retrieval-engine
 services/*/llm-gateway
 services/*/semantic-cache
+services/*/api-gateway
 
 # Rust
 **/target/

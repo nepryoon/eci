@@ -15,6 +15,7 @@ QDRANT_HOST_PORT="${QDRANT_HOST_PORT:-6333}"
 OPENSEARCH_HOST_PORT="${OPENSEARCH_HOST_PORT:-9200}"
 MINIO_HOST_PORT="${MINIO_HOST_PORT:-9000}"
 KAFKA_CONNECT_HOST_PORT="${KAFKA_CONNECT_HOST_PORT:-8083}"
+KEYCLOAK_HOST_PORT="${KEYCLOAK_HOST_PORT:-8081}"
 CONNECTOR_NAME="eci-outbox-connector"
 
 overall_rc=0
@@ -34,6 +35,20 @@ check_running() {
 if [ -z "${running_services}" ]; then
   echo "FAIL: nessun container dello stack eci-dev risulta in esecuzione. Esegui 'task up' prima di 'task up:verify'." >&2
   exit 1
+fi
+
+# keycloak: discovery OIDC del realm importato e algoritmi di firma attesi.
+if check_running keycloak; then
+  discovery="$(curl -s "http://localhost:${KEYCLOAK_HOST_PORT}/realms/eci/.well-known/openid-configuration" 2>&1)"
+  issuer="$(echo "${discovery}" | jq -r '.issuer // ""' 2>/dev/null)"
+  jwks_uri="$(echo "${discovery}" | jq -r '.jwks_uri // ""' 2>/dev/null)"
+  has_rs256="$(echo "${discovery}" | jq -r '.id_token_signing_alg_values_supported // [] | index("RS256") != null' 2>/dev/null)"
+  if [ "${issuer}" = "http://localhost:${KEYCLOAK_HOST_PORT}/realms/eci" ] && [ -n "${jwks_uri}" ] && [ "${has_rs256}" = "true" ]; then
+    echo "OK   keycloak: discovery realm eci, issuer/JWKS/RS256 disponibili"
+  else
+    echo "FAIL keycloak: discovery OIDC inattesa (issuer=${issuer}, jwks_uri=${jwks_uri}, RS256=${has_rs256})"
+    overall_rc=1
+  fi
 fi
 
 # postgres: SELECT 1

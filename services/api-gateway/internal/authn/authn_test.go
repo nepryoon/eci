@@ -8,6 +8,9 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 const validTraceID = "0123456789abcdef0123456789abcdef"
@@ -111,6 +114,9 @@ func TestMissingOrMalformedBearerFailsBeforeVerification(t *testing.T) {
 		"Basic abc",
 		"Bearer",
 		"Bearer ",
+		"Bearer  token",
+		"Bearer\ttoken",
+		"Bearer\ntoken",
 		"Bearer first second",
 		"Bearer first,Bearer second",
 	}
@@ -127,6 +133,15 @@ func TestMissingOrMalformedBearerFailsBeforeVerification(t *testing.T) {
 				t.Fatalf("verifier calls = %d, want 0", verifier.calls)
 			}
 		})
+	}
+}
+
+func TestBearerSchemeIsCaseInsensitiveWithoutRelaxingSyntax(t *testing.T) {
+	authenticator, _ := newTestAuthenticator(t, &stubVerifier{claims: validClaims()})
+	if _, err := authenticator.Authenticate(
+		context.Background(), "bearer signed.jwt.value", validTraceID,
+	); err != nil {
+		t.Fatalf("Authenticate lower-case bearer scheme: %v", err)
 	}
 }
 
@@ -166,6 +181,36 @@ func TestInvalidTokenDoesNotLeakVerifierDetails(t *testing.T) {
 	}
 	if got := metricValue(t, registry, "failure", "invalid_token"); got != 1 {
 		t.Fatalf("failure counter = %v, want 1", got)
+	}
+}
+
+func TestAuthenticationSpanUsesOnlyClosedOutcomeAttributes(t *testing.T) {
+	previousProvider := otel.GetTracerProvider()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		otel.SetTracerProvider(previousProvider)
+	})
+	authenticator, _ := newTestAuthenticator(t, &stubVerifier{claims: validClaims()})
+
+	if _, err := authenticator.Authenticate(
+		context.Background(), "Bearer signed.jwt.value", validTraceID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	spans := recorder.Ended()
+	if len(spans) != 1 || spans[0].Name() != "eci.gateway.authenticate" {
+		t.Fatalf("spans = %v", spans)
+	}
+	attributes := map[string]string{}
+	for _, item := range spans[0].Attributes() {
+		attributes[string(item.Key)] = item.Value.AsString()
+	}
+	if len(attributes) != 2 || attributes["auth.outcome"] != "success" || attributes["auth.reason"] != "success" {
+		t.Fatalf("span attributes = %v", attributes)
 	}
 }
 

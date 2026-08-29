@@ -9,7 +9,7 @@ set -uo pipefail
 
 status=0
 
-GO_SERVICES=(sink-graph sink-vector sink-search retrieval-engine llm-gateway semantic-cache)
+GO_SERVICES=(sink-graph sink-vector sink-search retrieval-engine llm-gateway semantic-cache api-gateway)
 RUST_SERVICES=(ingestion)
 PY_SERVICES=(orchestrator verification summarization)
 

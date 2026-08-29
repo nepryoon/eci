@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPEC-006 §2 — `task up`: avvia lo stack e attende che tutti i servizi con
-# healthcheck risultino "healthy" entro un timeout complessivo (default 90s).
+# healthcheck risultino "healthy" entro un timeout complessivo (default 180s,
+# include il primo bootstrap/import JVM di Keycloak da SPEC-055).
 # Se il timeout scade, fallisce elencando esplicitamente quali servizi non
 # sono diventati healthy (non un timeout muto).
 # SPEC-007 §2 (estensione): una volta tutti healthy (kafka/kafka-connect
@@ -8,7 +9,7 @@
 set -uo pipefail
 
 COMPOSE_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/docker-compose.yml"
-TIMEOUT_SECONDS="${UP_TIMEOUT_SECONDS:-90}"
+TIMEOUT_SECONDS="${UP_TIMEOUT_SECONDS:-180}"
 POLL_INTERVAL_SECONDS=3
 
 docker compose -f "${COMPOSE_FILE}" up -d

@@ -38,6 +38,38 @@ volumes:
     name: eci_kafka_data
 
 services:
+  keycloak:
+    # SPEC-055 (T6.1) — IdP OIDC esclusivamente di sviluppo. Versione
+    # verificata contro la documentazione/API ufficiale Keycloak corrente;
+    # start-dev e direct grant NON sono configurazioni di produzione.
+    image: quay.io/keycloak/keycloak:26.7.2
+    command: ["start-dev", "--import-realm"]
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: eci-admin
+      KC_HEALTH_ENABLED: "true"
+      KC_HOSTNAME: http://localhost:8081
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./keycloak/eci-realm.json:/opt/keycloak/data/import/eci-realm.json:ro
+    networks:
+      - eci-dev
+    healthcheck:
+      # L'immagine ufficiale non contiene curl/wget. Questa richiesta HEAD
+      # via /dev/tcp è il probe raccomandato dalla documentazione Keycloak.
+      test: ["CMD-SHELL", "{ printf 'HEAD /health/ready HTTP/1.0\\r\\n\\r\\n' >&0; grep 'HTTP/1.0 200'; } 0<>/dev/tcp/localhost/9000"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
   postgres:
     image: postgres:17
     # wal_level=logical: richiesto da Debezium per il logical decoding

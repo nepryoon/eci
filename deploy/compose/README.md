@@ -1,8 +1,9 @@
 # deploy/compose — stack di sviluppo locale (SPEC-006 + SPEC-007)
 
 Docker Compose per i cinque datastore di sviluppo (PostgreSQL 17, Neo4j 5
-Community, Qdrant, OpenSearch, MinIO — SPEC-006) più Kafka (KRaft) e Kafka
-Connect con il connector Debezium sulla tabella `outbox` (SPEC-007).
+Community, Qdrant, OpenSearch, MinIO — SPEC-006), Kafka (KRaft) e Kafka
+Connect con il connector Debezium sulla tabella `outbox` (SPEC-007), più
+Keycloak come IdP OIDC dev di T6.1/SPEC-055.
 
 ## Prerequisiti
 
@@ -38,7 +39,19 @@ Connect con il connector Debezium sulla tabella `outbox` (SPEC-007).
 
 ## Comandi
 
-- `task up` — avvia lo stack e attende (timeout di default 90s
+Prima del primo avvio crea il file locale dei secret Keycloak, che è ignorato
+da Git:
+
+```bash
+cp deploy/compose/.env.example deploy/compose/.env
+openssl rand -base64 32
+```
+
+Inserisci due valori casuali distinti nell'`.env` per
+`KC_BOOTSTRAP_ADMIN_PASSWORD` e `ECI_DEV_USER_PASSWORD`. Valori vuoti non
+sono supportati e Keycloak non diventa ready. Non commettere mai `.env`.
+
+- `task up` — avvia lo stack e attende (timeout di default 180s
   complessivi, configurabile con `UP_TIMEOUT_SECONDS`) che tutti i servizi
   risultino `healthy`, poi registra il connector Debezium outbox
   (`deploy/compose/register-connector.sh`, con retry/backoff se Kafka
@@ -47,7 +60,8 @@ Connect con il connector Debezium sulla tabella `outbox` (SPEC-007).
   Se il timeout scade, elenca esplicitamente quali servizi non ce l'hanno
   fatta.
 - `task up:verify` — verifica connettività reale (non solo "container up")
-  a ciascuno dei 5 datastore: `SELECT 1` su Postgres, `RETURN 1` su Neo4j
+  a Keycloak e a ciascuno dei 5 datastore: discovery OIDC del realm `eci`,
+  `SELECT 1` su Postgres, `RETURN 1` su Neo4j
   via bolt, `GET /collections` su Qdrant, `/_cluster/health` su OpenSearch
   (accetta `green`/`yellow`, mai `red`), `/minio/health/live` su MinIO;
   più `GET /connectors/eci-outbox-connector/status` su Kafka Connect,
@@ -73,6 +87,7 @@ Connect con il connector Debezium sulla tabella `outbox` (SPEC-007).
 | minio | 9001 | Console web |
 | kafka | 9094 | Listener esterno (`EXTERNAL`), per client dall'host. Il listener interno `9092` (`PLAINTEXT://kafka:9092`, usato da `kafka-connect` sulla rete Docker) non è esposto sull'host |
 | kafka-connect | 8083 | REST API (registrazione/stato connector) |
+| keycloak | 8081 | OIDC dev (`/realms/eci`) e Admin Console |
 
 Se una porta è già occupata da un altro processo (es. un Postgres locale
 su 5432), `docker compose up` fallisce con l'errore nativo di Docker sulla
@@ -85,6 +100,32 @@ in `docker-compose.yml`.
 sono valori di sviluppo fissi e pubblici in questo repo. **Non riusarli in
 nessun altro ambiente** (staging, produzione, o qualunque istanza
 raggiungibile fuori da questa macchina).
+
+Le credenziali Keycloak fanno eccezione: non esiste alcun valore di default
+versionato. Sono lette da `deploy/compose/.env`; il realm versionato contiene
+soltanto `${ECI_DEV_USER_PASSWORD}`, risolto da Keycloak all'import. Il client
+`eci-dev-cli` è pubblico e abilitato al direct grant unicamente per test
+locali; il resource server `eci-gateway` non contiene client secret.
+
+Un token dev può essere ottenuto senza stamparne la password nella command
+history caricando l'env nel processo corrente:
+
+```bash
+set -a
+. deploy/compose/.env
+set +a
+curl --fail --silent --show-error \
+  --data-urlencode grant_type=password \
+  --data-urlencode client_id=eci-dev-cli \
+  --data-urlencode username=eci-dev \
+  --data-urlencode "password=${ECI_DEV_USER_PASSWORD}" \
+  http://localhost:8081/realms/eci/protocol/openid-connect/token
+```
+
+Il token risultante ha issuer `http://localhost:8081/realms/eci`, audience
+`eci-gateway`, firma `RS256` e i claim `tenant_id`, `allowed_repos` e
+`acl_groups`. `start-dev`, HTTP e direct grant sono vietati fuori dallo stack
+locale; il deployment production-like verrà definito da T7.1.
 
 ## Nota: OpenSearch Security plugin disattivato
 
