@@ -127,3 +127,28 @@ jobs:
 
       - name: T6.5 MinIO Object Lock COMPLIANCE
         run: bash scripts/test-minio-worm.sh
+
+  envoy-gateway-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.9'
+
+      - name: Install go-task and buf
+        run: |
+          curl -sL https://taskfile.dev/install.sh | sh -s -- -d -b /usr/local/bin
+          go install github.com/bufbuild/buf/cmd/buf@v1.72.0
+
+      - name: T6.6 deterministic Envoy descriptor
+        run: |
+          task envoy:descriptor
+          git diff --exit-code -- deploy/envoy/retrieval.pb
+
+      - name: T6.6 pinned Envoy configuration validation
+        run: task envoy:validate
+
+      - name: T6.6 JSON/gRPC, SSE, auth and rate-limit integration
+        run: task test:envoy

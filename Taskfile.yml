@@ -80,6 +80,54 @@ tasks:
         fi
       - buf breaking --against '../.git#branch=main,subdir=contracts'
 
+  envoy:descriptor:
+    desc: Rigenera deterministicamente il descriptor Envoy dal contratto retrieval
+    cmds:
+      - buf build contracts --as-file-descriptor-set -o deploy/envoy/retrieval.pb
+
+  envoy:validate:
+    desc: Valida il bootstrap TLS con l'immagine Envoy T6.6 pinned (richiede Docker e OpenSSL)
+    cmds:
+      - |
+        ECI_ENVOY_TLS_DIR="$(mktemp -d)"
+        trap 'rm -rf -- "${ECI_ENVOY_TLS_DIR}"' EXIT
+        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 \
+          -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
+          -keyout "${ECI_ENVOY_TLS_DIR}/tls.key" -out "${ECI_ENVOY_TLS_DIR}/tls.crt" \
+          >/dev/null 2>&1
+        # This identity exists only for config validation. Make the bind-mounted
+        # files readable by the image's non-root Envoy UID; the trap removes them.
+        chmod 0755 "${ECI_ENVOY_TLS_DIR}"
+        chmod 0644 "${ECI_ENVOY_TLS_DIR}/tls.key" "${ECI_ENVOY_TLS_DIR}/tls.crt"
+        docker run --rm \
+          -v "{{.ROOT_DIR}}/deploy/envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro" \
+          -v "{{.ROOT_DIR}}/deploy/envoy/retrieval.pb:/etc/envoy/retrieval.pb:ro" \
+          -v "${ECI_ENVOY_TLS_DIR}:/etc/envoy/tls:ro" \
+          envoyproxy/envoy:v1.39.0@sha256:d59f7f5fa10cff6d5892b6c5e7df5c9297ddfb2c3683e33fbfb82da24de4fa66 \
+          --mode validate --config-path /etc/envoy/envoy.yaml
+
+  test:envoy:
+    desc: Test CPU-only dell'edge con binario Envoy estratto dall'immagine pinned (richiede Docker)
+    dir: services/api-gateway
+    cmds:
+      - |
+        ECI_ENVOY_BIN_DIR="$(mktemp -d)"
+        ECI_ENVOY_CONTAINER_ID=""
+        cleanup_envoy_test() {
+          if [ -n "${ECI_ENVOY_CONTAINER_ID}" ]; then
+            docker rm -f "${ECI_ENVOY_CONTAINER_ID}" >/dev/null 2>&1 || true
+          fi
+          rm -rf -- "${ECI_ENVOY_BIN_DIR}"
+        }
+        trap cleanup_envoy_test EXIT
+        ECI_ENVOY_CONTAINER_ID="$(docker create envoyproxy/envoy:v1.39.0@sha256:d59f7f5fa10cff6d5892b6c5e7df5c9297ddfb2c3683e33fbfb82da24de4fa66)"
+        docker cp "${ECI_ENVOY_CONTAINER_ID}:/usr/local/bin/envoy" "${ECI_ENVOY_BIN_DIR}/envoy"
+        docker rm "${ECI_ENVOY_CONTAINER_ID}" >/dev/null
+        ECI_ENVOY_CONTAINER_ID=""
+        chmod 0755 "${ECI_ENVOY_BIN_DIR}/envoy"
+        ECI_ENVOY_BINARY="${ECI_ENVOY_BIN_DIR}/envoy" \
+          go test -tags=integration ./internal/edge -run TestEnvoyGatewayEndToEnd -v
+
   schema:gen:
     desc: Codegen Pydantic/Go dai JSON Schema via datamodel-code-generator
     cmds:

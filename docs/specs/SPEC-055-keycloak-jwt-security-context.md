@@ -68,7 +68,10 @@ trustedTraceID    -> SecurityContext.trace_id
 `allowed_repos` e `acl_groups` devono esistere come array JSON di stringhe;
 possono essere vuoti (utente autenticato ma privo di accesso), non possono
 contenere stringhe vuote o duplicati. Il risultato è deduplicato e ordinato
-lessicograficamente per propagazione deterministica. `trustedTraceID` proviene
+lessicograficamente per propagazione deterministica. Oltre ai limiti per campo,
+il `SecurityContext` protobuf codificato base64 deve restare entro 12 KiB, con
+4 KiB riservati agli altri header del budget interno da 16 KiB; un insieme di
+claim che supera questo limite cumulativo è `invalid_claims`. `trustedTraceID` proviene
 dal tracing del gateway, non da JWT, query text o header applicativi arbitrari;
 deve essere un W3C trace-id non-zero di 32 caratteri esadecimali minuscoli.
 
@@ -129,6 +132,7 @@ d'ambiente al runtime. Nessuna password o client secret è versionata.
 | discovery/JWKS indisponibile all'avvio | `New` fallisce; nessun default allow |
 | header Bearer oltre 16 KiB | `invalid_token`, nessuna allocazione non limitata |
 | `sub`/tenant oltre 256 byte, più di 256 repo o gruppi, singolo valore oltre 256 byte | `invalid_claims` |
+| `SecurityContext` base64 oltre 12 KiB | `invalid_claims`; nessun header parziale o errore di trasporto a valle |
 | `allowed_repos`/`acl_groups` assenti | `invalid_claims`; assente non equivale a lista vuota |
 | array presenti ma vuoti | autenticazione valida, scope vuoto |
 | errore interno del recorder metriche | non trasforma un rifiuto in successo |
