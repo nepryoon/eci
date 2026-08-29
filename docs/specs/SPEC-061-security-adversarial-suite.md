@@ -284,10 +284,16 @@ Docker Desktop, inizialmente inattivo, è stato avviato per le integrazioni. Due
 tentativi preliminari del gate completo hanno incontrato failure di bootstrap
 Testcontainers (`PortNotExposed` PostgreSQL e timeout del mapped port Kafka);
 entrambi i test sono passati subito isolati senza modifiche. Una terza
-esecuzione integrale di `task test:integration` è verde; la verifica CI e la
-review successive sono registrate qui sotto.
+esecuzione integrale di `task test:integration` è verde. Dopo il rafforzamento
+del lock order, un'ulteriore esecuzione completa è verde: sink-graph reale
+146.46 s (inclusi i due casi concorrenti), GDS reale 199.01 s, reranker e MinIO
+COMPLIANCE inclusi. Anche `task build`, `task lint`, `task test` e `task guard`
+sono verdi sul nuovo head; la verifica CI e la review successive sono
+registrate qui sotto.
 
-La run intermedia [33263671444](https://github.com/nepryoon/eci/actions/runs/33263671444)
-era verde sull'head eager `9cfbbb7`, ma non è evidenza finale per ADR-0015. I
-due nuovi thread P1 restano aperti fino ai gate e alla fresh review del nuovo
-head. Baseline T5.6, metriche storiche e `queries_v0.json` restano byte-identici.
+Le run intermedie [33263671444](https://github.com/nepryoon/eci/actions/runs/33263671444)
+e [33266041291](https://github.com/nepryoon/eci/actions/runs/33266041291) erano
+verdi rispettivamente sugli head eager `9cfbbb7` e generation-fenced
+`b5ec9d9`, ma non costituiscono evidenza finale per il lock order rafforzato.
+I thread restano aperti fino ai gate e alla fresh review del nuovo head.
+Baseline T5.6, metriche storiche e `queries_v0.json` restano byte-identici.
