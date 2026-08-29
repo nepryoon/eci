@@ -31,10 +31,10 @@ const (
 )
 
 // Chiave di cache: quadrupla entity_id + ast_hash + logic_fingerprint +
-// acl_scope (SPEC-022 §2). logic_fingerprint è una stringa opaca fornita
-// dal chiamante, non calcolata né interpretata da questo servizio.
-// acl_scope è plumbing (partiziona già la chiave per costruzione) senza
-// enforcement di autorizzazione in questa SPEC (Fase 6).
+// acl_scope (SPEC-022 §2, enforcement SPEC-058/ADR-0012).
+// logic_fingerprint resta una stringa opaca fornita dal chiamante.
+// acl_scope deve essere il fingerprint canonico dello scope autenticato: il
+// server lo deriva dai metadata e richiede uguaglianza prima dello storage.
 type CacheKey struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	EntityId         string                 `protobuf:"bytes,1,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`

@@ -1,10 +1,9 @@
 // Command semantic-cache (SPEC-022, T2.3): server gRPC del Semantic Cache
 // Service, chiave->valore su Redis keyed su ast_hash + logic_fingerprint +
 // acl_scope (ADD Modulo 3 §2.6.3). Stessa coppia bootstrap
-// tracing/net.Listen di retrieval-engine (SPEC-016); nessun interceptor
-// SecurityContext qui — il contratto di questa SPEC non lo prevede
-// (acl_scope è un campo esplicito della chiave, non derivato dai metadata
-// gRPC, vedi SPEC-022 §2 "plumbing, non enforcement").
+// tracing/net.Listen di retrieval-engine (SPEC-016). Gli interceptor T6.1/T6.2
+// autenticano/autorizzano il chiamante; SPEC-058 deriva nuovamente lo scope
+// nel handler e richiede che la chiave coincida prima di accedere a Redis.
 package main
 
 import (

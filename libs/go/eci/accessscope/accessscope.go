@@ -4,7 +4,11 @@
 package accessscope
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"sort"
 	"strings"
@@ -13,6 +17,8 @@ import (
 
 	"github.com/eci-project/eci/libs/go/eci/secctx"
 )
+
+const fingerprintVersion = "eci-acl-scope-v1"
 
 const (
 	maxValues      = 128
@@ -81,4 +87,43 @@ func validValue(value string) bool {
 		}
 	}
 	return true
+}
+
+// Fingerprint returns the canonical ACL partition identifier from a validated
+// authorization scope. User identity is deliberately excluded: users with the
+// same tenant/repository/group permissions may safely share cache entries.
+// Invalid directly-constructed scopes return an empty fingerprint so callers
+// cannot accidentally create a default partition.
+func Fingerprint(scope Scope) string {
+	if !validValue(scope.TenantID) {
+		return ""
+	}
+	repos, ok := normalize(scope.AllowedRepos)
+	if !ok {
+		return ""
+	}
+	groups, ok := normalize(scope.ACLGroups)
+	if !ok {
+		return ""
+	}
+
+	var encoded bytes.Buffer
+	encoded.WriteString(fingerprintVersion)
+	writeLengthPrefixed(&encoded, scope.TenantID)
+	writeList(&encoded, repos)
+	writeList(&encoded, groups)
+	digest := sha256.Sum256(encoded.Bytes())
+	return hex.EncodeToString(digest[:])
+}
+
+func writeList(dst *bytes.Buffer, values []string) {
+	_ = binary.Write(dst, binary.BigEndian, uint32(len(values)))
+	for _, value := range values {
+		writeLengthPrefixed(dst, value)
+	}
+}
+
+func writeLengthPrefixed(dst *bytes.Buffer, value string) {
+	_ = binary.Write(dst, binary.BigEndian, uint32(len([]byte(value))))
+	dst.WriteString(value)
 }

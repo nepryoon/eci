@@ -3,6 +3,11 @@ Stato: verified
 Task-tree: T2.3 (terzo task di Fase 2) · Nuovo servizio: services/semantic-cache (Go, scaffold vuoto da SPEC-001) · ADD: Modulo 1 §1.6.3, Modulo 3 §1.1/§2.6.3, Modulo 4 §1
 Contratti: nuovo `contracts/proto/eci/semanticcache/v1/semanticcache.proto`; modifica dichiarata a `deploy/compose/docker-compose.yml` (nuovo servizio Redis)
 
+> Nota Fase 6: la semantica storica "plumbing, non enforcement" di
+> `acl_scope` descrive T2.3 ed è superata da SPEC-058/ADR-0012. Il wire proto
+> resta invariato, ma T6.4 richiede il fingerprint derivato dal contesto
+> autenticato e rifiuta placeholder/mismatch prima di Redis.
+
 ## 1. Obiettivo
 Un servizio Go che azzera le chiamate LLM ridondanti su sottoalberi AST invariati: cache chiave→valore con chiave **tripla** `ast_hash + logic_fingerprint + acl_scope` (ADD Modulo 3 §2.6.3 — non solo doppia come descritto più genericamente in §1.6.3), dove `acl_scope` esiste specificamente per impedire il riuso cross-ACL di un summary/embedding, non solo come metadata informativo. Nessun consumatore reale esiste ancora (T2.4/T5.5 sono task successivi) — questa SPEC costruisce l'infrastruttura del cache, non la logica di embedding/summary che la userà.
 
