@@ -1,0 +1,167 @@
+# SPEC-060 — Envoy API Gateway: JSON/gRPC, SSE, rate limit e SecurityContext
+Stato: approved
+Task-tree: T6.6 · Servizio: `services/api-gateway` + `deploy/envoy` · ADD: Modulo 3 §1.1–§1.4, §2.1; Modulo 4 §1.3, §2.3; D7 `SecurityContext`
+Contratti: `contracts/proto/eci/retrieval/v1/retrieval.proto` (immutato)
+
+## 1. Obiettivo
+
+Esiste un edge Envoy reale che accetta gRPC e JSON, autentica prima del routing,
+applica rate limit e propaga il solo `SecurityContext` derivato dal JWT. Lo
+stream `ImpactAnalysis` è esposto ai browser come SSE genuino tramite un helper
+interno, senza cambiare il contratto gRPC condiviso.
+
+## 2. Interfaccia
+
+```go
+type Authenticator interface {
+    Authenticate(context.Context, string, string) (*retrievalv1.SecurityContext, error)
+}
+
+type ImpactClient interface {
+    ImpactAnalysis(
+        context.Context, *retrievalv1.ImpactAnalysisRequest,
+        ...grpc.CallOption,
+    ) (grpc.ServerStreamingClient[retrievalv1.ImpactAnalysisEvent], error)
+}
+
+type EdgeConfig struct {
+    MaxJSONBodyBytes int64        // default 1 MiB
+    RequestTimeout   time.Duration // default 30s
+}
+
+func NewEdgeHandler(auth Authenticator, impact ImpactClient, cfg EdgeConfig) (http.Handler, error)
+// internal routes:
+// ANY  /authorize/*                  ext_authz only
+// POST /v1/impact-analysis:stream    Envoy-routed SSE only
+// GET  /healthz                      internal readiness
+```
+
+```text
+Public Envoy:
+POST /eci.retrieval.v1.RetrievalEngine/HybridSearch       application/json
+POST /eci.retrieval.v1.RetrievalEngine/GetNode            application/json
+POST /eci.retrieval.v1.RetrievalEngine/ExpandNeighbors    application/json
+POST /v1/impact-analysis:stream                            text/event-stream
+gRPC /eci.retrieval.v1.RetrievalEngine/*                   application/grpc
+GET  /healthz                                              200 (no identity data)
+```
+
+```yaml
+trusted upstream metadata:
+  eci-security-context-bin: base64(protobuf SecurityContext)
+  traceparent: 00-<gateway-generated-trace-id>-<gateway-generated-span-id>-01
+```
+
+## 3. Comportamento
+
+1. **JSON→gRPC autenticato.** Given JWT valido, When il client invia JSON a un
+   metodo auto-mapped, Then Envoy chiama ext_authz, sovrascrive metadata
+   riservati, transcodifica e il backend riceve body corretto più
+   `SecurityContext` autenticato.
+2. **Header/body forgiati.** Given `eci-security-context-bin`, `traceparent` o
+   `securityContext` controllati dal client, When la richiesta attraversa il
+   gateway, Then gli header vengono rimossi/sostituiti e lo scope backend
+   deriva solo dal JWT; il body non espande mai i permessi.
+3. **Auth fail-closed.** Given token mancante/invalido/scaduto oppure helper
+   auth indisponibile, When si chiama una route protetta, Then 401/403 oppure
+   503 bounded e zero chiamate upstream; `failure_mode_allow=false`.
+4. **SSE genuino.** Given stream gRPC di almeno due eventi, When si chiama la
+   route SSE, Then status/headers precedono la fine dello stream e ogni evento
+   è un frame `data:` JSON seguito da blank line e flush osservabile.
+5. **SSE cancellation/error.** Given client cancellato, deadline o errore gRPC,
+   When lo stream è aperto, Then il context downstream viene cancellato; prima
+   degli header ritorna status HTTP bounded, dopo gli header chiude con evento
+   `error` privo di detail interno e non continua a leggere.
+6. **Rate limiting.** Given bucket esaurito, When arriva una richiesta protetta,
+   Then Envoy risponde 429 con `Retry-After`, non chiama l'upstream ed espone
+   contatori bounded; il limite si ricarica deterministicamente.
+7. **Transcoder/config stretti.** Given metodo/query JSON sconosciuto, body
+   malformato o >1 MiB, When passa dall'edge, Then 400/404/413 senza passthrough;
+   descriptor e config Envoy validano con immagine pinned.
+8. **Compatibilità gRPC e deadline.** Given client gRPC diretto all'edge, When
+   invoca unary/server-stream con JWT metadata, Then Envoy preserva HTTP/2,
+   autenticazione, status/cancellazione e deadline massima 30s.
+
+## 4. Errori & edge case
+
+| Condizione | Comportamento atteso |
+|---|---|
+| helper auth non configurabile/OIDC discovery fallisce | processo non ready/non parte; nessun default issuer/audience |
+| header auth >16 KiB o malformed | 401 bounded; non eco del token |
+| impossibile generare randomness per trace/span | 503, nessun metadata debole/fisso |
+| metadata binario assente/malformed nell'adapter SSE | 401/403, zero RPC |
+| JSON SSE contiene `securityContext` privilegiato | campo azzerato; metadata autenticato unico scope |
+| backend gRPC non raggiungibile prima del primo frame | 502/503 bounded |
+| errore dopo almeno un frame | `event: error` + payload bounded, flush e close |
+| ext_authz timeout | deny 503; mai failure-mode allow |
+| route/servizio non allow-listed | 404; transcoder non passthrough |
+
+## 5. Non-goals
+
+- Nessuna modifica proto/ADD, gRPC-Web, WebSocket o endpoint LLM OpenAI.
+- Nessuna quota distribuita user/team/model (bounded context LLM Gateway) e
+  nessuna configurazione Kubernetes/HPA (T7.1/T7.2).
+- Nessun mTLS/service mesh (T7.1) o telemetry end-to-end completa (T7.3).
+- Nessuna fiducia in body/header esterni e nessun filtro ACL post-retrieval.
+
+## 6. Vincoli dall'ADD e threat model
+
+- Modulo 3 §1.1–§1.4: edge auth, `SecurityContext`, REST/JSON+SSE→gRPC,
+  rate limit; Modulo 3 §2: scope soltanto da identità autenticata.
+- Modulo 4 §1.3: Envoy API Gateway; §1.4: deadline assolute/decrescenti;
+  §2.3: W3C trace context e attributi bounded.
+- D7: `SecurityContext` esistente e RPC `ImpactAnalysis` server-streaming.
+
+**Minacce:** forged metadata/body, token replay/scaduto, header smuggling,
+ext_auth bypass/failure, route passthrough, oversized body, slow stream, rate
+limit bypass, direct helper/backend exposure, prompt injection che tenta scope,
+error leakage. Controlli: rimozione header prima auth, replace da validator
+T6.1, porte interne, strict route/transcoder, size/deadline cap, fail-closed,
+scope metadata-only T6.2/T6.3, error body allow-listed e test Envoy reale.
+
+## 7. Test plan
+
+- Unit Go `internal/edge`: auth success/failure, header overwrite, randomness
+  failure, metadata decode, JSON size/forgery, SSE multi-frame/flush,
+  cancellation ed errori pre/post-header (scenari 2–5).
+- Static/deterministic: genera `deploy/envoy/retrieval.pb` dal proto con Buf e
+  verifica byte identity; controlla filtri/ordine/fail-closed/no-passthrough.
+- Integration CPU-only con `envoyproxy/envoy:v1.39.0` pinned, fake OIDC/auth e
+  backend gRPC reale: JSON→gRPC metadata, SSE incremental, gRPC passthrough,
+  401/503, forged headers, 429 e route unknown. `envoy --mode validate` sulla
+  config effettiva prima del test.
+
+## 8. Osservabilità
+
+- span `eci.gateway.authorize` e `eci.gateway.sse` con soli attributi bounded
+  `gateway.route`, `gateway.outcome`, `rpc.grpc.status_code`.
+- counter `eci_gateway_edge_requests_total{route,outcome}` dove `route` è
+  allow-list `{auth,sse,health}` e outcome chiuso.
+- Envoy stats: `http.<listener>.downstream_rq_*`,
+  `http.<listener>.ext_authz.{ok,denied,error}`,
+  `http.<listener>.local_rate_limit.{enabled,ok,rate_limited}`.
+- vietati tenant/user/repo/gruppo/token/query/body/node/path in log, span o label.
+
+## 9. Criteri di accettazione
+
+- [ ] Scenari §3 red-before-green e verdi CPU-only.
+- [ ] Envoy pinned è unico listener pubblico; helper/backend non esposti.
+- [ ] JWT SPEC-055 produce il solo SecurityContext upstream; forged header/body
+  non modifica tenant/repo/gruppi/trace.
+- [ ] JSON unary e gRPC passthrough reali attraversano ext_authz+backend.
+- [ ] SSE reale prova frame/flush incrementali, cancellation e failure path.
+- [ ] 429/Retry-After e zero-upstream provati; auth/rate failures fail-closed.
+- [ ] Descriptor deterministico; `envoy --mode validate` e integration verdi.
+- [ ] `task build`, `task lint`, `task test`, test gateway, `task guard` verdi;
+  SPEC verified, ADR-0014 accepted, CI verde e PR merged.
+
+## 10. Review avversariale di approvazione
+
+Pass eseguito il 2026-08-29. La soluzione non cambia ADD/proto e non scrive
+viste; l'adapter preserva bounded traversal/deadline e non post-filtra ACL.
+Header/body/LLM non costruiscono autorità; ext_auth/rate limit falliscono chiusi.
+Non esiste default tenant, direct exposure o route pass-through. SSE resta una
+rappresentazione edge separata dal contratto deterministico e non introduce
+judge/garanzie probabilistiche. La decisione non ovvia Envoy+helper e il limite
+locale sono espliciti in ADR-0014, con impatto replica documentato. Nessuna
+contraddizione, escalation o decisione architetturale nascosta rilevata.
