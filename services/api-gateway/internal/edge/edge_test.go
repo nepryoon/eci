@@ -142,9 +142,10 @@ func TestAuthorizeFailsClosedForAuthAndEntropyErrors(t *testing.T) {
 		random io.Reader
 		want   int
 	}{
-		{"invalid token", &fakeAuthenticator{err: &authn.AuthError{Code: authn.ErrorInvalidToken}}, bytes.NewReader(make([]byte, 24)), http.StatusUnauthorized},
-		{"auth backend", &fakeAuthenticator{err: errors.New("oidc down")}, bytes.NewReader(make([]byte, 24)), http.StatusServiceUnavailable},
+		{"invalid token", &fakeAuthenticator{err: &authn.AuthError{Code: authn.ErrorInvalidToken}}, bytes.NewReader(bytes.Repeat([]byte{0x11}, 24)), http.StatusUnauthorized},
+		{"auth backend", &fakeAuthenticator{err: errors.New("oidc down")}, bytes.NewReader(bytes.Repeat([]byte{0x11}, 24)), http.StatusServiceUnavailable},
 		{"entropy", &fakeAuthenticator{result: testSecurityContext()}, errReader{}, http.StatusServiceUnavailable},
+		{"all-zero trace context", &fakeAuthenticator{result: testSecurityContext()}, bytes.NewReader(make([]byte, 24)), http.StatusServiceUnavailable},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

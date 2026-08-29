@@ -80,6 +80,26 @@ tasks:
         fi
       - buf breaking --against '../.git#branch=main,subdir=contracts'
 
+  envoy:descriptor:
+    desc: Rigenera deterministicamente il descriptor Envoy dal contratto retrieval
+    cmds:
+      - buf build contracts --as-file-descriptor-set -o deploy/envoy/retrieval.pb
+
+  envoy:validate:
+    desc: Valida il bootstrap con l'immagine Envoy T6.6 pinned (richiede Docker)
+    cmds:
+      - >-
+        docker run --rm
+        -v "{{.ROOT_DIR}}/deploy/envoy:/etc/envoy:ro"
+        envoyproxy/envoy:v1.39.0@sha256:d59f7f5fa10cff6d5892b6c5e7df5c9297ddfb2c3683e33fbfb82da24de4fa66
+        --mode validate --config-path /etc/envoy/envoy.yaml
+
+  test:envoy:
+    desc: Test CPU-only dell'edge Envoy reale (richiede Docker)
+    dir: services/api-gateway
+    cmds:
+      - go test -tags=integration ./internal/edge -run TestEnvoyGatewayEndToEnd -v
+
   schema:gen:
     desc: Codegen Pydantic/Go dai JSON Schema via datamodel-code-generator
     cmds:

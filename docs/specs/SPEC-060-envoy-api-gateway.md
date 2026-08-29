@@ -27,6 +27,9 @@ type ImpactClient interface {
 type EdgeConfig struct {
     MaxJSONBodyBytes int64        // default 1 MiB
     RequestTimeout   time.Duration // default 30s
+    Random           io.Reader     // default crypto/rand.Reader
+    Registerer       prometheus.Registerer // required
+    Tracer           trace.Tracer // default OTel provider tracer
 }
 
 func NewEdgeHandler(auth Authenticator, impact ImpactClient, cfg EdgeConfig) (http.Handler, error)

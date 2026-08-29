@@ -17,8 +17,8 @@ func TestLoadConfigRequiresTrustedIdentityAndBackendConfiguration(t *testing.T) 
 
 func TestLoadConfigRejectsUnsafeOrMalformedValues(t *testing.T) {
 	base := map[string]string{
-		"ECI_OIDC_ISSUER":      "https://idp.example.test/realms/eci",
-		"ECI_OIDC_AUDIENCE":    "eci-api",
+		"ECI_OIDC_ISSUER":       "https://idp.example.test/realms/eci",
+		"ECI_OIDC_AUDIENCE":     "eci-api",
 		"RETRIEVAL_ENGINE_ADDR": "retrieval-engine:50053",
 	}
 	tests := []struct {

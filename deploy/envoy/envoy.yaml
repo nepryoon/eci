@@ -1,0 +1,225 @@
+# SPEC-060 / T6.6. Envoy is the sole public listener. The api-gateway and
+# retrieval-engine cluster endpoints are internal-only service names.
+static_resources:
+  listeners:
+    - name: eci_public
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 8080
+      per_connection_buffer_limit_bytes: 1048576
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: eci_public
+                codec_type: AUTO
+                stream_error_on_invalid_http_message: true
+                common_http_protocol_options:
+                  headers_with_underscores_action: REJECT_REQUEST
+                  max_headers_count: 100
+                request_timeout: 30s
+                stream_idle_timeout: 30s
+                route_config:
+                  name: eci_routes
+                  virtual_hosts:
+                    - name: eci
+                      domains: ["*"]
+                      routes:
+                        - match:
+                            path: /healthz
+                            headers:
+                              - name: :method
+                                string_match:
+                                  exact: GET
+                          direct_response:
+                            status: 200
+                            body:
+                              inline_string: '{"status":"ok"}\n'
+                          response_headers_to_add:
+                            - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                              header:
+                                key: content-type
+                                value: application/json
+                          typed_per_filter_config:
+                            envoy.filters.http.ext_authz:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                              disabled: true
+                            envoy.filters.http.grpc_json_transcoder:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_json_transcoder.v3.GrpcJsonTranscoder
+                              proto_descriptor: /etc/envoy/retrieval.pb
+                              services: []
+                        - match:
+                            path: /v1/impact-analysis:stream
+                            headers:
+                              - name: :method
+                                string_match:
+                                  exact: POST
+                          route:
+                            cluster: api_gateway
+                            timeout: 30s
+                            idle_timeout: 30s
+                          typed_per_filter_config:
+                            envoy.filters.http.local_ratelimit:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                              stat_prefix: eci_edge_sse
+                              token_bucket:
+                                max_tokens: 10
+                                tokens_per_fill: 10
+                                fill_interval: 1s
+                              filter_enabled:
+                                default_value:
+                                  numerator: 100
+                                  denominator: HUNDRED
+                              filter_enforced:
+                                default_value:
+                                  numerator: 100
+                                  denominator: HUNDRED
+                              response_headers_to_add:
+                                - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                                  header:
+                                    key: retry-after
+                                    value: "1"
+                            envoy.filters.http.grpc_json_transcoder:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_json_transcoder.v3.GrpcJsonTranscoder
+                              proto_descriptor: /etc/envoy/retrieval.pb
+                              services: []
+                        - match:
+                            prefix: /eci.retrieval.v1.RetrievalEngine/
+                          route:
+                            cluster: retrieval_engine
+                            timeout: 30s
+                            idle_timeout: 30s
+                          typed_per_filter_config:
+                            envoy.filters.http.local_ratelimit:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                              stat_prefix: eci_edge_retrieval
+                              token_bucket:
+                                max_tokens: 10
+                                tokens_per_fill: 10
+                                fill_interval: 1s
+                              filter_enabled:
+                                default_value:
+                                  numerator: 100
+                                  denominator: HUNDRED
+                              filter_enforced:
+                                default_value:
+                                  numerator: 100
+                                  denominator: HUNDRED
+                              response_headers_to_add:
+                                - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                                  header:
+                                    key: retry-after
+                                    value: "1"
+                        - match:
+                            prefix: /
+                          direct_response:
+                            status: 404
+                            body:
+                              inline_string: '{"error":"route not found"}\n'
+                http_filters:
+                  # These removals run before ext_authz and prevent a client
+                  # from supplying trusted binary metadata or trace context.
+                  - name: envoy.filters.http.header_mutation
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
+                      mutations:
+                        request_mutations:
+                          - remove: eci-security-context-bin
+                          - remove: traceparent
+                  - name: envoy.filters.http.ext_authz
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                      failure_mode_allow: false
+                      status_on_error:
+                        code: ServiceUnavailable
+                      validate_mutations: true
+                      max_denied_response_body_bytes: 1024
+                      enforce_response_header_limits: true
+                      allowed_headers:
+                        patterns:
+                          - exact: authorization
+                            ignore_case: true
+                      http_service:
+                        server_uri:
+                          uri: http://api-gateway:8081
+                          cluster: api_gateway
+                          timeout: 1s
+                        path_prefix: /authorize
+                        authorization_response:
+                          allowed_upstream_headers:
+                            patterns:
+                              - exact: eci-security-context-bin
+                                ignore_case: true
+                              - exact: traceparent
+                                ignore_case: true
+                          allowed_client_headers:
+                            patterns:
+                              - exact: content-type
+                                ignore_case: true
+                              - exact: cache-control
+                                ignore_case: true
+                              - exact: www-authenticate
+                                ignore_case: true
+                  - name: envoy.filters.http.local_ratelimit
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                      stat_prefix: eci_edge
+                  - name: envoy.filters.http.buffer
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.buffer.v3.Buffer
+                      max_request_bytes: 1048576
+                  - name: envoy.filters.http.grpc_json_transcoder
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_json_transcoder.v3.GrpcJsonTranscoder
+                      proto_descriptor: /etc/envoy/retrieval.pb
+                      services:
+                        - eci.retrieval.v1.RetrievalEngine
+                      auto_mapping: true
+                      ignore_unknown_query_parameters: false
+                      request_validation_options:
+                        reject_unknown_method: true
+                        reject_unknown_query_parameters: true
+                        reject_binding_body_field_collisions: true
+                      max_request_body_size: 1048576
+                      convert_grpc_status: true
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+    - name: api_gateway
+      type: STRICT_DNS
+      connect_timeout: 1s
+      load_assignment:
+        cluster_name: api_gateway
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: api-gateway
+                      port_value: 8081
+    - name: retrieval_engine
+      type: STRICT_DNS
+      connect_timeout: 1s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: retrieval_engine
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: retrieval-engine
+                      port_value: 50053
+
+admin:
+  address:
+    socket_address:
+      address: 0.0.0.0
+      port_value: 9901

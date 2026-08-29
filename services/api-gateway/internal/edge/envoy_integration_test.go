@@ -1,0 +1,532 @@
+//go:build integration
+
+package edge
+
+import (
+	"bufio"
+	"context"
+	"encoding/base64"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
+	"github.com/eci-project/eci/services/api-gateway/internal/authn"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/wait"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
+)
+
+const envoyImage = "envoyproxy/envoy:v1.39.0@sha256:d59f7f5fa10cff6d5892b6c5e7df5c9297ddfb2c3683e33fbfb82da24de4fa66"
+
+type integrationAuthenticator struct{}
+
+func (integrationAuthenticator) Authenticate(_ context.Context, header, traceID string) (*retrievalv1.SecurityContext, error) {
+	if header != "Bearer integration-valid" {
+		return nil, &authn.AuthError{Code: authn.ErrorInvalidToken}
+	}
+	return &retrievalv1.SecurityContext{
+		TenantId:     "tenant-a",
+		UserId:       "alice",
+		AllowedRepos: []string{"repo-a"},
+		AclGroups:    []string{"dev"},
+		TraceId:      traceID,
+	}, nil
+}
+
+type observedCall struct {
+	method          string
+	securityContext *retrievalv1.SecurityContext
+	bodyContext     *retrievalv1.SecurityContext
+	traceparent     string
+}
+
+type integrationBackend struct {
+	retrievalv1.UnimplementedRetrievalEngineServer
+	mu            sync.Mutex
+	calls         []observedCall
+	releaseSecond chan struct{}
+	cancelled     chan struct{}
+	cancelOnce    sync.Once
+}
+
+func (b *integrationBackend) observe(ctx context.Context, method string, bodyContext *retrievalv1.SecurityContext) {
+	var trusted *retrievalv1.SecurityContext
+	var traceparent string
+	if incoming, ok := metadata.FromIncomingContext(ctx); ok {
+		values := incoming.Get(SecurityContextMetadataKey)
+		if len(values) == 1 {
+			candidate := new(retrievalv1.SecurityContext)
+			if proto.Unmarshal([]byte(values[0]), candidate) == nil {
+				trusted = candidate
+			}
+		}
+		if values := incoming.Get("traceparent"); len(values) == 1 {
+			traceparent = values[0]
+		}
+	}
+	var clonedBody *retrievalv1.SecurityContext
+	if bodyContext != nil {
+		clonedBody = proto.Clone(bodyContext).(*retrievalv1.SecurityContext)
+	}
+	b.mu.Lock()
+	b.calls = append(b.calls, observedCall{method: method, securityContext: trusted, bodyContext: clonedBody, traceparent: traceparent})
+	b.mu.Unlock()
+}
+
+func (b *integrationBackend) GetNode(ctx context.Context, request *retrievalv1.GetNodeRequest) (*retrievalv1.GetNodeResponse, error) {
+	b.observe(ctx, "GetNode", request.GetSecurityContext())
+	return &retrievalv1.GetNodeResponse{Node: &retrievalv1.RetrievedNode{NodeId: request.GetNodeId(), Name: "OrderService.Process"}}, nil
+}
+
+func (b *integrationBackend) ImpactAnalysis(request *retrievalv1.ImpactAnalysisRequest, stream grpc.ServerStreamingServer[retrievalv1.ImpactAnalysisEvent]) error {
+	b.observe(stream.Context(), "ImpactAnalysis", request.GetSecurityContext())
+	if err := stream.Send(progressEvent(1)); err != nil {
+		return err
+	}
+	if request.GetEntryNodeId() == "cancel" {
+		<-stream.Context().Done()
+		b.cancelOnce.Do(func() { close(b.cancelled) })
+		return stream.Context().Err()
+	}
+	select {
+	case <-b.releaseSecond:
+	case <-stream.Context().Done():
+		return stream.Context().Err()
+	}
+	return stream.Send(progressEvent(2))
+}
+
+func progressEvent(nodes uint32) *retrievalv1.ImpactAnalysisEvent {
+	return &retrievalv1.ImpactAnalysisEvent{Event: &retrievalv1.ImpactAnalysisEvent_Progress{Progress: &retrievalv1.ImpactProgress{NodesEmitted: nodes}}}
+}
+
+func (b *integrationBackend) snapshot() []observedCall {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]observedCall(nil), b.calls...)
+}
+
+func TestEnvoyGatewayEndToEnd(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	backend := &integrationBackend{
+		releaseSecond: make(chan struct{}),
+		cancelled:     make(chan struct{}),
+	}
+	grpcListener, grpcServer := startIntegrationGRPC(t, backend)
+	grpcPort := listenerPort(t, grpcListener)
+	helperListener, helperServer := startIntegrationHelper(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(grpcPort)))
+	helperPort := listenerPort(t, helperListener)
+
+	root := filepath.Clean(filepath.Join("..", "..", "..", ".."))
+	configPath := renderIntegrationEnvoyConfig(t, root, helperPort, grpcPort)
+	baseURL, gatewayAddress := startIntegrationEnvoy(t, ctx, root, configPath, helperPort, grpcPort)
+
+	t.Run("health is public and bounded", func(t *testing.T) {
+		response, err := http.Get(baseURL + "/healthz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d", response.StatusCode)
+		}
+	})
+
+	t.Run("missing authentication fails before backend", func(t *testing.T) {
+		before := len(backend.snapshot())
+		response := postJSON(t, baseURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", `{ "nodeId": "A" }`, "")
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusUnauthorized || len(backend.snapshot()) != before {
+			t.Fatalf("status=%d backend calls=%d", response.StatusCode, len(backend.snapshot())-before)
+		}
+	})
+
+	t.Run("JSON is transcoded and reserved metadata is replaced", func(t *testing.T) {
+		body := `{"nodeId":"node-a","securityContext":{"tenantId":"tenant-forged","userId":"mallory","allowedRepos":["repo-secret"],"aclGroups":["admins"],"traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`
+		request, _ := http.NewRequest(http.MethodPost, baseURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer integration-valid")
+		request.Header.Set(SecurityContextHeader, base64.StdEncoding.EncodeToString([]byte("forged")))
+		request.Header.Set("traceparent", "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		payload, _ := io.ReadAll(response.Body)
+		if response.StatusCode != http.StatusOK || !strings.Contains(string(payload), "OrderService.Process") {
+			t.Fatalf("status=%d body=%q", response.StatusCode, payload)
+		}
+		call := lastCall(t, backend, "GetNode")
+		assertTrustedContext(t, call.securityContext)
+		assertTrustedTraceparent(t, call)
+		if call.bodyContext.GetTenantId() != "tenant-forged" {
+			t.Fatalf("expected body provenance to remain distinguishable, got %v", call.bodyContext)
+		}
+	})
+
+	t.Run("native gRPC traverses auth and preserves HTTP2", func(t *testing.T) {
+		connection, err := grpc.NewClient(gatewayAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connection.Close()
+		forged, _ := proto.Marshal(&retrievalv1.SecurityContext{TenantId: "tenant-forged", AllowedRepos: []string{"secret"}})
+		requestContext := metadata.NewOutgoingContext(ctx, metadata.Pairs(
+			"authorization", "Bearer integration-valid",
+			SecurityContextMetadataKey, string(forged),
+		))
+		response, err := retrievalv1.NewRetrievalEngineClient(connection).GetNode(requestContext, &retrievalv1.GetNodeRequest{NodeId: "grpc-node"})
+		if err != nil || response.GetNode().GetNodeId() != "grpc-node" {
+			t.Fatalf("response=%v err=%v", response, err)
+		}
+		call := lastCall(t, backend, "GetNode")
+		assertTrustedContext(t, call.securityContext)
+		assertTrustedTraceparent(t, call)
+
+		streamContext, cancelStream := context.WithCancel(requestContext)
+		stream, err := retrievalv1.NewRetrievalEngineClient(connection).ImpactAnalysis(streamContext, &retrievalv1.ImpactAnalysisRequest{EntryNodeId: "grpc-stream"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, err := stream.Recv()
+		if err != nil || first.GetProgress().GetNodesEmitted() != 1 {
+			t.Fatalf("first stream event=%v err=%v", first, err)
+		}
+		cancelStream()
+	})
+
+	t.Run("SSE flushes before upstream completion", func(t *testing.T) {
+		response := postJSON(t, baseURL+SSEPath, `{"entryNodeId":"stream","securityContext":{"tenantId":"tenant-forged"}}`, "Bearer integration-valid")
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "text/event-stream" {
+			t.Fatalf("status=%d content-type=%q", response.StatusCode, response.Header.Get("Content-Type"))
+		}
+		reader := bufio.NewReader(response.Body)
+		first, err := reader.ReadString('\n')
+		if err != nil || !strings.Contains(first, `"nodesEmitted":1`) {
+			t.Fatalf("first=%q err=%v", first, err)
+		}
+		close(backend.releaseSecond)
+		remainder, err := io.ReadAll(reader)
+		if err != nil || !strings.Contains(string(remainder), `"nodesEmitted":2`) {
+			t.Fatalf("remainder=%q err=%v", remainder, err)
+		}
+		call := lastCall(t, backend, "ImpactAnalysis")
+		assertTrustedContext(t, call.securityContext)
+		if call.bodyContext != nil {
+			t.Fatalf("SSE forwarded body SecurityContext: %v", call.bodyContext)
+		}
+	})
+
+	t.Run("SSE cancellation reaches gRPC backend", func(t *testing.T) {
+		requestContext, cancelRequest := context.WithCancel(ctx)
+		request, _ := http.NewRequestWithContext(requestContext, http.MethodPost, baseURL+SSEPath, strings.NewReader(`{"entryNodeId":"cancel"}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer integration-valid")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader := bufio.NewReader(response.Body)
+		if _, err := reader.ReadString('\n'); err != nil {
+			t.Fatal(err)
+		}
+		cancelRequest()
+		_ = response.Body.Close()
+		select {
+		case <-backend.cancelled:
+		case <-time.After(5 * time.Second):
+			t.Fatal("gRPC backend did not observe SSE cancellation")
+		}
+	})
+
+	t.Run("strict JSON and route validation reject passthrough", func(t *testing.T) {
+		before := len(backend.snapshot())
+		for _, target := range []string{
+			"/eci.retrieval.v1.RetrievalEngine/GetNode?unknown=true",
+			"/eci.retrieval.v1.RetrievalEngine/Unknown",
+			"/not-allow-listed",
+		} {
+			response := postJSON(t, baseURL+target, `{}`, "Bearer integration-valid")
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusBadRequest && response.StatusCode != http.StatusNotFound {
+				t.Fatalf("target=%s status=%d", target, response.StatusCode)
+			}
+		}
+		for name, body := range map[string]string{
+			"malformed": `{`,
+			"oversized": `{"nodeId":"` + strings.Repeat("x", (1<<20)+1) + `"}`,
+		} {
+			response := postJSON(t, baseURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", body, "Bearer integration-valid")
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusBadRequest && response.StatusCode != http.StatusRequestEntityTooLarge {
+				t.Fatalf("%s status=%d", name, response.StatusCode)
+			}
+		}
+		if got := len(backend.snapshot()); got != before {
+			t.Fatalf("strictly rejected requests reached backend: delta=%d", got-before)
+		}
+	})
+
+	t.Run("rate limit returns Retry-After without upstream call", func(t *testing.T) {
+		before := len(backend.snapshot())
+		allowed, limited := 0, 0
+		for index := 0; index < 30; index++ {
+			response := postJSON(t, baseURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", fmt.Sprintf(`{"nodeId":"rate-%d"}`, index), "Bearer integration-valid")
+			if response.StatusCode == http.StatusTooManyRequests {
+				limited++
+				if response.Header.Get("Retry-After") == "" {
+					t.Fatal("429 omitted Retry-After")
+				}
+			} else if response.StatusCode == http.StatusOK {
+				allowed++
+			} else {
+				t.Fatalf("unexpected status=%d", response.StatusCode)
+			}
+			_ = response.Body.Close()
+		}
+		delta := len(backend.snapshot()) - before
+		if limited == 0 || delta != allowed {
+			t.Fatalf("allowed=%d limited=%d backend delta=%d", allowed, limited, delta)
+		}
+	})
+
+	t.Run("auth helper outage fails closed", func(t *testing.T) {
+		if err := helperServer.Shutdown(ctx); err != nil {
+			t.Fatal(err)
+		}
+		before := len(backend.snapshot())
+		response := postJSON(t, baseURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", `{}`, "Bearer integration-valid")
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusServiceUnavailable || len(backend.snapshot()) != before {
+			t.Fatalf("status=%d backend calls=%d", response.StatusCode, len(backend.snapshot())-before)
+		}
+	})
+
+	grpcServer.GracefulStop()
+}
+
+func startIntegrationGRPC(t *testing.T, backend *integrationBackend) (net.Listener, *grpc.Server) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	retrievalv1.RegisterRetrievalEngineServer(server, backend)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { server.Stop(); _ = listener.Close() })
+	return listener, server
+}
+
+func startIntegrationHelper(t *testing.T, retrievalAddress string) (net.Listener, *http.Server) {
+	t.Helper()
+	connection, err := grpc.NewClient(retrievalAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	handler, err := NewEdgeHandler(integrationAuthenticator{}, retrievalv1.NewRetrievalEngineClient(connection), EdgeConfig{
+		Registerer: prometheus.NewRegistry(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: time.Second}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close(); _ = listener.Close() })
+	return listener, server
+}
+
+func startIntegrationEnvoy(t *testing.T, ctx context.Context, root, configPath string, helperPort, grpcPort int) (string, string) {
+	t.Helper()
+	if binary := os.Getenv("ECI_ENVOY_BINARY"); binary != "" {
+		publicPort := availablePort(t)
+		adminPort := availablePort(t)
+		contents, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		config := string(contents)
+		config = strings.ReplaceAll(config, testcontainers.HostInternal, "127.0.0.1")
+		config = strings.Replace(config, "port_value: 8080", "port_value: "+strconv.Itoa(publicPort), 1)
+		config = strings.Replace(config, "port_value: 9901", "port_value: "+strconv.Itoa(adminPort), 1)
+		config = strings.ReplaceAll(config, "/etc/envoy/retrieval.pb", filepath.Join(root, "deploy", "envoy", "retrieval.pb"))
+		nativeConfig := filepath.Join(t.TempDir(), "envoy-native.yaml")
+		if err := os.WriteFile(nativeConfig, []byte(config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		command := exec.CommandContext(ctx, binary, "--config-path", nativeConfig, "--log-level", "warning")
+		output := new(strings.Builder)
+		command.Stdout, command.Stderr = output, output
+		if err := command.Start(); err != nil {
+			t.Fatalf("start native Envoy: %v", err)
+		}
+		t.Cleanup(func() {
+			if command.Process != nil {
+				_ = command.Process.Kill()
+			}
+			_ = command.Wait()
+		})
+		baseURL := "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(publicPort))
+		waitForEnvoyHealth(t, baseURL, output)
+		return baseURL, net.JoinHostPort("127.0.0.1", strconv.Itoa(publicPort))
+	}
+
+	containerRequest := testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image:        envoyImage,
+			ExposedPorts: []string{"8080/tcp"},
+			Cmd:          []string{"--config-path", "/etc/envoy/envoy.yaml", "--log-level", "warning"},
+			Files: []testcontainers.ContainerFile{
+				{HostFilePath: configPath, ContainerFilePath: "/etc/envoy/envoy.yaml", FileMode: 0o644},
+				{HostFilePath: filepath.Join(root, "deploy", "envoy", "retrieval.pb"), ContainerFilePath: "/etc/envoy/retrieval.pb", FileMode: 0o644},
+			},
+			WaitingFor: wait.ForHTTP("/healthz").WithPort("8080/tcp").WithStartupTimeout(time.Minute),
+		},
+		Started: true,
+	}
+	if err := testcontainers.WithHostPortAccess(helperPort, grpcPort)(&containerRequest); err != nil {
+		t.Fatal(err)
+	}
+	container, err := testcontainers.GenericContainer(ctx, containerRequest)
+	if err != nil {
+		t.Fatalf("start %s: %v", envoyImage, err)
+	}
+	t.Cleanup(func() { _ = testcontainers.TerminateContainer(container) })
+	host, err := container.Host(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapped, err := container.MappedPort(ctx, "8080/tcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := net.JoinHostPort(host, mapped.Port())
+	return "http://" + address, address
+}
+
+func availablePort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listenerPort(t, listener)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return port
+}
+
+func waitForEnvoyHealth(t *testing.T, baseURL string, output *strings.Builder) {
+	t.Helper()
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline.C:
+			t.Fatalf("Envoy did not become ready: %s", output.String())
+		case <-ticker.C:
+			response, err := http.Get(baseURL + "/healthz")
+			if err == nil {
+				_ = response.Body.Close()
+				if response.StatusCode == http.StatusOK {
+					return
+				}
+			}
+		}
+	}
+}
+
+func renderIntegrationEnvoyConfig(t *testing.T, root string, helperPort, grpcPort int) string {
+	t.Helper()
+	contents, err := os.ReadFile(filepath.Join(root, "deploy", "envoy", "envoy.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := string(contents)
+	config = strings.ReplaceAll(config, "address: api-gateway", "address: "+testcontainers.HostInternal)
+	config = strings.ReplaceAll(config, "address: retrieval-engine", "address: "+testcontainers.HostInternal)
+	config = strings.ReplaceAll(config, "8081", strconv.Itoa(helperPort))
+	config = strings.ReplaceAll(config, "50053", strconv.Itoa(grpcPort))
+	path := filepath.Join(t.TempDir(), "envoy.yaml")
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func listenerPort(t *testing.T, listener net.Listener) int {
+	t.Helper()
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
+func postJSON(t *testing.T, target, body, authorization string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, target, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if authorization != "" {
+		request.Header.Set("Authorization", authorization)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func lastCall(t *testing.T, backend *integrationBackend, method string) observedCall {
+	t.Helper()
+	calls := backend.snapshot()
+	for index := len(calls) - 1; index >= 0; index-- {
+		if calls[index].method == method {
+			return calls[index]
+		}
+	}
+	t.Fatalf("no backend %s call", method)
+	return observedCall{}
+}
+
+func assertTrustedContext(t *testing.T, context *retrievalv1.SecurityContext) {
+	t.Helper()
+	if context == nil || context.GetTenantId() != "tenant-a" || context.GetUserId() != "alice" ||
+		len(context.GetAllowedRepos()) != 1 || context.GetAllowedRepos()[0] != "repo-a" ||
+		len(context.GetAclGroups()) != 1 || context.GetAclGroups()[0] != "dev" || !validTraceID(context.GetTraceId()) {
+		t.Fatalf("untrusted SecurityContext: %v", context)
+	}
+}
+
+func assertTrustedTraceparent(t *testing.T, call observedCall) {
+	t.Helper()
+	wantPrefix := "00-" + call.securityContext.GetTraceId() + "-"
+	if !strings.HasPrefix(call.traceparent, wantPrefix) || len(call.traceparent) != 55 || strings.Contains(call.traceparent, "bbbbbbbbbbbbbbbb") {
+		t.Fatalf("untrusted traceparent %q for context %v", call.traceparent, call.securityContext)
+	}
+}

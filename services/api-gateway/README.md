@@ -1,21 +1,27 @@
-# API Gateway authentication boundary
+# API Gateway internal edge helper
 
 T6.1/SPEC-055 implements the OIDC authentication component in
 `internal/authn`. It validates Keycloak access tokens before constructing the
 shared protobuf `SecurityContext`; tenant, repositories and ACL groups come
 only from verified claims. There is no implicit tenant or default scope.
 
-The long-running Envoy edge, JSON/gRPC transcoding, SSE and rate limiting are
-T6.6. Until then this module is a reusable internal boundary with no public
-listener of its own.
+T6.6/SPEC-060 wires it into the internal HTTP helper used by Envoy ext-authz
+and adds the browser SSE adapter. This process is not a public gateway: Envoy
+is the sole external listener and removes reserved metadata before calling it.
 
-Required production-facing configuration for callers of `authn.New`:
+Required process configuration:
 
-| Field | Meaning |
-|---|---|
-| `Issuer` | Exact trusted OIDC issuer; HTTPS required outside loopback dev |
-| `Audience` | Required JWT audience (`eci-gateway` in the dev realm) |
-| `AllowHTTPForDevelopment` | Explicit loopback-only exception; default false |
+- `ECI_OIDC_ISSUER`: exact trusted issuer; HTTPS outside loopback dev;
+- `ECI_OIDC_AUDIENCE`: required JWT audience;
+- `RETRIEVAL_ENGINE_ADDR`: internal gRPC `host:port`, with no default.
+
+Optional bounded configuration:
+
+- `ECI_OIDC_ALLOW_HTTP_DEV` (default `false`);
+- `API_GATEWAY_ADDR` (default `:8081`, internal only);
+- `API_GATEWAY_METRICS_ADDR` (default `:9107`, internal only);
+- `API_GATEWAY_MAX_JSON_BODY_BYTES` (default/max `1048576`);
+- `API_GATEWAY_REQUEST_TIMEOUT` (default/max `30s`).
 
 `Authenticate` additionally requires a valid W3C trace-id supplied by the
 gateway tracing layer. It never reads a trace, tenant, repository or group
@@ -26,3 +32,7 @@ The local IdP is documented in
 cryptographic tests are CPU-only. The Keycloak import/token integration test
 uses Docker and the pinned image `quay.io/keycloak/keycloak:26.7.2`; all test
 credentials are generated in memory at runtime.
+
+The public listener, pinned image and deterministic descriptor are documented
+in [`deploy/envoy/README.md`](../../deploy/envoy/README.md). Never expose the
+helper, metrics, retrieval gRPC or Envoy admin port directly.
