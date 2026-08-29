@@ -5,6 +5,7 @@ package authn
 import (
 	"context"
 	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,14 +25,16 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/oauth2"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
-	maxAuthorizationHeaderBytes = 16 * 1024
-	maxIdentityBytes            = 256
-	maxScopeValueBytes          = 256
-	maxScopeValues              = 256
-	maxJWKSBytes                = 1 << 20
+	maxAuthorizationHeaderBytes   = 16 * 1024
+	maxIdentityBytes              = 256
+	maxScopeValueBytes            = 256
+	maxScopeValues                = 256
+	maxSecurityContextHeaderBytes = 12 * 1024
+	maxJWKSBytes                  = 1 << 20
 )
 
 // Config contains trusted process configuration. None of these fields may be
@@ -236,6 +239,11 @@ func (a *Authenticator) Authenticate(
 		AllowedRepos: canonicalScope(*claims.AllowedRepos),
 		AclGroups:    canonicalScope(*claims.ACLGroups),
 		TraceId:      trustedTraceID,
+	}
+	encoded, err := proto.Marshal(securityContext)
+	if err != nil || base64.StdEncoding.EncodedLen(len(encoded)) > maxSecurityContextHeaderBytes {
+		a.record(span, "failure", ErrorInvalidClaims)
+		return nil, &AuthError{Code: ErrorInvalidClaims}
 	}
 	a.record(span, "success", "success")
 	return securityContext, nil

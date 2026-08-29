@@ -106,6 +106,8 @@ static_resources:
                         - match:
                             safe_regex:
                               regex: ^/eci\.retrieval\.v1\.RetrievalEngine/(HybridSearch|GetNode|ExpandNeighbors|ImpactAnalysis)$
+                          request_headers_to_remove:
+                            - x-eci-request-deadline-unix-ms
                           route:
                             cluster: retrieval_engine
                             timeout: 30s
@@ -164,6 +166,7 @@ static_resources:
                           - remove: tracestate
                           - remove: baggage
                           - remove: x-eci-rate-limit-key
+                          - remove: x-eci-request-deadline-unix-ms
                   # A coarse process-wide ceiling protects ext_authz/JWKS from
                   # unauthenticated floods. Authenticated fairness is enforced
                   # by the separate caller-partitioned limiter below.
@@ -215,6 +218,8 @@ static_resources:
                               - exact: traceparent
                                 ignore_case: true
                               - exact: x-eci-rate-limit-key
+                                ignore_case: true
+                              - exact: x-eci-request-deadline-unix-ms
                                 ignore_case: true
                           allowed_client_headers:
                             patterns:

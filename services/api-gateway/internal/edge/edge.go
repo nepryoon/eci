@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -32,14 +33,16 @@ import (
 )
 
 const (
-	SecurityContextHeader      = "Eci-Security-Context-Bin"
-	SecurityContextMetadataKey = "eci-security-context-bin"
-	RateLimitKeyHeader         = "X-Eci-Rate-Limit-Key"
-	SSEPath                    = "/v1/impact-analysis:stream"
-	defaultMaxJSONBodyBytes    = 1 << 20
-	defaultRequestTimeout      = 30 * time.Second
-	maxScopeValues             = 256
-	maxScopeValueBytes         = 256
+	SecurityContextHeader         = "Eci-Security-Context-Bin"
+	SecurityContextMetadataKey    = "eci-security-context-bin"
+	RateLimitKeyHeader            = "X-Eci-Rate-Limit-Key"
+	RequestDeadlineHeader         = "X-Eci-Request-Deadline-Unix-Ms"
+	SSEPath                       = "/v1/impact-analysis:stream"
+	defaultMaxJSONBodyBytes       = 1 << 20
+	defaultRequestTimeout         = 30 * time.Second
+	maxScopeValues                = 256
+	maxScopeValueBytes            = 256
+	maxSecurityContextHeaderBytes = 12 * 1024
 )
 
 type Authenticator interface {
@@ -116,6 +119,7 @@ func NewEdgeHandler(auth Authenticator, impact ImpactClient, cfg EdgeConfig) (ht
 }
 
 func (h *handler) authorize(w http.ResponseWriter, r *http.Request) {
+	requestDeadline := time.Now().Add(h.timeout)
 	traceID, parentSpanID, identifierErr := h.identifiers()
 	spanParent := r.Context()
 	if identifierErr == nil {
@@ -173,13 +177,14 @@ func (h *handler) authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw, err := proto.Marshal(canonical)
-	if err != nil {
+	if err != nil || base64.StdEncoding.EncodedLen(len(raw)) > maxSecurityContextHeaderBytes {
 		writeError(w, http.StatusServiceUnavailable, "authentication unavailable")
 		outcome = "unavailable"
 		return
 	}
 	w.Header().Set(SecurityContextHeader, base64.StdEncoding.EncodeToString(raw))
 	w.Header().Set(RateLimitKeyHeader, authenticatedCallerRateLimitKey(canonical.GetTenantId(), canonical.GetUserId()))
+	w.Header().Set(RequestDeadlineHeader, strconv.FormatInt(requestDeadline.UnixMilli(), 10))
 	w.Header().Set("Traceparent", "00-"+authorizeSpan.TraceID().String()+"-"+authorizeSpan.SpanID().String()+"-01")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
@@ -207,6 +212,7 @@ func (h *handler) identifiers() (string, string, error) {
 
 func (h *handler) sse(w http.ResponseWriter, r *http.Request) {
 	rawContext, securityContext, metadataOK := decodeSecurityContext(r.Header.Get(SecurityContextHeader))
+	requestDeadline, deadlineOK := trustedRequestDeadline(r.Header.Get(RequestDeadlineHeader), time.Now(), h.timeout)
 	parentContext := r.Context()
 	if metadataOK {
 		parent, ok := trustedTraceparent(r.Header.Get("traceparent"), securityContext.GetTraceId())
@@ -215,7 +221,9 @@ func (h *handler) sse(w http.ResponseWriter, r *http.Request) {
 			parentContext = trace.ContextWithRemoteSpanContext(parentContext, parent)
 		}
 	}
-	ctx, span := h.tracer.Start(parentContext, "eci.gateway.sse")
+	requestContext, cancel := context.WithDeadline(parentContext, requestDeadline)
+	defer cancel()
+	ctx, span := h.tracer.Start(requestContext, "eci.gateway.sse")
 	defer span.End()
 	outcome := "error"
 	defer func() { h.record(span, "sse", outcome) }()
@@ -226,7 +234,7 @@ func (h *handler) sse(w http.ResponseWriter, r *http.Request) {
 		outcome = "invalid"
 		return
 	}
-	if !metadataOK {
+	if !metadataOK || !deadlineOK {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		outcome = "denied"
 		return
@@ -254,9 +262,11 @@ func (h *handler) sse(w http.ResponseWriter, r *http.Request) {
 	// sole scope input for downstream PEP/query enforcement.
 	request.SecurityContext = nil
 
-	requestContext := ctx
-	ctx, cancel := context.WithTimeout(requestContext, h.timeout)
-	defer cancel()
+	if ctx.Err() != nil {
+		writeError(w, http.StatusGatewayTimeout, "request deadline exceeded")
+		outcome = "deadline"
+		return
+	}
 	ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs(
 		SecurityContextMetadataKey, string(rawContext),
 	))
@@ -343,6 +353,19 @@ func decodeSecurityContext(encoded string) ([]byte, *retrievalv1.SecurityContext
 		return nil, nil, false
 	}
 	return raw, securityContext, true
+}
+
+func trustedRequestDeadline(header string, now time.Time, maximum time.Duration) (time.Time, bool) {
+	unixMillis, err := strconv.ParseInt(header, 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	deadline := time.UnixMilli(unixMillis)
+	maximumDeadline := now.Add(maximum)
+	if deadline.After(maximumDeadline) {
+		deadline = maximumDeadline
+	}
+	return deadline, true
 }
 
 func trustedTraceparent(header, expectedTraceID string) (trace.SpanContext, bool) {

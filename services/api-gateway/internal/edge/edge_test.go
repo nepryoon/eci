@@ -82,6 +82,7 @@ func setTrustedRequestHeaders(t *testing.T, request *http.Request, sc *retrieval
 	t.Helper()
 	request.Header.Set(SecurityContextHeader, encodedContext(t, sc))
 	request.Header.Set("traceparent", "00-"+sc.GetTraceId()+"-1111111111111111-01")
+	request.Header.Set(RequestDeadlineHeader, strconv.FormatInt(time.Now().Add(time.Second).UnixMilli(), 10))
 }
 
 func newTestHandler(t *testing.T, auth Authenticator, impact ImpactClient, random io.Reader) http.Handler {
@@ -167,7 +168,7 @@ func TestAuthorizeDerivesAndReplacesReservedMetadata(t *testing.T) {
 func TestAuthorizeRejectsContextOutsideTransportBudget(t *testing.T) {
 	largeScope := make([]string, 80)
 	for index := range largeScope {
-		largeScope[index] = strings.Repeat("r", 200) + string(rune('a'+index%26))
+		largeScope[index] = strings.Repeat("r", 200) + strconv.Itoa(index)
 	}
 	auth := &fakeAuthenticator{result: &retrievalv1.SecurityContext{
 		TenantId: "tenant-a", UserId: "alice", AllowedRepos: largeScope,
@@ -382,7 +383,9 @@ func TestSSEMapsPreHeaderErrorAndCancelsOpenStream(t *testing.T) {
 
 	t.Run("cancel", func(t *testing.T) {
 		observed := make(chan struct{})
+		started := make(chan struct{})
 		client := &fakeImpactClient{call: func(ctx context.Context, _ *retrievalv1.ImpactAnalysisRequest) (grpc.ServerStreamingClient[retrievalv1.ImpactAnalysisEvent], error) {
+			close(started)
 			return &fakeStream{ctx: ctx, recv: func() (*retrievalv1.ImpactAnalysisEvent, error) {
 				<-ctx.Done()
 				close(observed)
@@ -395,6 +398,7 @@ func TestSSEMapsPreHeaderErrorAndCancelsOpenStream(t *testing.T) {
 		setTrustedRequestHeaders(t, req, testSecurityContext())
 		done := make(chan struct{})
 		go func() { handler.ServeHTTP(httptest.NewRecorder(), req); close(done) }()
+		<-started
 		cancel()
 		select {
 		case <-observed:
@@ -431,6 +435,7 @@ func TestSSERejectsMalformedOversizedOrMissingAuthenticatedMetadata(t *testing.T
 			req := httptest.NewRequest(http.MethodPost, SSEPath, strings.NewReader(test.body))
 			req.Header.Set(SecurityContextHeader, test.header)
 			req.Header.Set("traceparent", test.trace)
+			req.Header.Set(RequestDeadlineHeader, strconv.FormatInt(time.Now().Add(time.Second).UnixMilli(), 10))
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, req)
 			if response.Code != test.want {

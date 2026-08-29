@@ -54,7 +54,11 @@ avviare lo span `eci.gateway.authorize` e propaga un `traceparent` che identific
 lo span effettivamente registrato nello stesso trace. Quindi valida il bearer
 token con `authn.Authenticator`, serializza il solo
 `SecurityContext` derivato dai claim e restituisce header autorizzati con
-semantica replace. Envoy fallisce chiuso se l'helper è indisponibile. Le porte
+semantica replace. La rappresentazione base64 è limitata a 12 KiB per restare
+entro il più piccolo budget header interno con margine per trace e protocollo.
+L'helper crea inoltre una deadline assoluta trusted prima della verifica token;
+Envoy rimuove il corrispondente header client, lo propaga soltanto alla route
+SSE e lo rimuove sulle route gRPC dirette. Envoy fallisce chiuso se l'helper è indisponibile. Le porte
 dell'helper e dei servizi gRPC sono cluster-internal e non pubblicate.
 
 Il transcoder usa un descriptor set deterministico derivato dal proto
@@ -72,6 +76,10 @@ qualsiasi `securityContext` nel JSON, propaga soltanto il metadata autenticato
 al client gRPC e converte ogni `ImpactAnalysisEvent` con `protojson` in un
 frame `data: <json>\n\n`, con `Content-Type: text/event-stream`, flush per
 evento e cancellazione/deadline propagate.
+La deadline SSE include autenticazione e buffering del body: il tempo trascorso
+prima dell'ingresso nell'adapter non viene riaccreditato. Un header deadline
+mancante o malformato è rifiutato; un valore futuro oltre il massimo configurato
+viene ristretto al massimo, mai esteso.
 
 Il rate limit T6.6 usa bucket dinamici locali per caller autenticato, derivati
 da SHA-256 della coppia canonica `(tenant_id, user_id)` prodotta dal validator:

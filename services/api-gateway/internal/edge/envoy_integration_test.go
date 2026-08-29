@@ -78,6 +78,7 @@ type observedCall struct {
 	baggage         string
 	authorization   string
 	rateLimitKey    string
+	requestDeadline string
 }
 
 type integrationBackend struct {
@@ -97,6 +98,7 @@ func (b *integrationBackend) observe(ctx context.Context, method string, bodyCon
 	var baggage string
 	var authorization string
 	var rateLimitKey string
+	var requestDeadline string
 	if incoming, ok := metadata.FromIncomingContext(ctx); ok {
 		values := incoming.Get(SecurityContextMetadataKey)
 		if len(values) == 1 {
@@ -120,6 +122,9 @@ func (b *integrationBackend) observe(ctx context.Context, method string, bodyCon
 		if values := incoming.Get("x-eci-rate-limit-key"); len(values) == 1 {
 			rateLimitKey = values[0]
 		}
+		if values := incoming.Get("x-eci-request-deadline-unix-ms"); len(values) == 1 {
+			requestDeadline = values[0]
+		}
 	}
 	var clonedBody *retrievalv1.SecurityContext
 	if bodyContext != nil {
@@ -128,7 +133,8 @@ func (b *integrationBackend) observe(ctx context.Context, method string, bodyCon
 	b.mu.Lock()
 	b.calls = append(b.calls, observedCall{
 		method: method, securityContext: trusted, bodyContext: clonedBody,
-		traceparent: traceparent, tracestate: tracestate, baggage: baggage,
+		requestDeadline: requestDeadline,
+		traceparent:     traceparent, tracestate: tracestate, baggage: baggage,
 		authorization: authorization,
 		rateLimitKey:  rateLimitKey,
 	})
@@ -280,6 +286,7 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 		request.Header.Set("tracestate", "attacker=value")
 		request.Header.Set("baggage", "tenant=tenant-forged")
 		request.Header.Set(RateLimitKeyHeader, "forged-shared-bucket")
+		request.Header.Set(RequestDeadlineHeader, "4102444800000")
 		response, err := http.DefaultClient.Do(request)
 		if err != nil {
 			t.Fatal(err)
@@ -300,6 +307,9 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 		}
 		if call.rateLimitKey != "" {
 			t.Fatalf("internal rate-limit key reached backend: %q", call.rateLimitKey)
+		}
+		if call.requestDeadline != "" {
+			t.Fatalf("internal request deadline reached backend: %q", call.requestDeadline)
 		}
 		if call.bodyContext.GetTenantId() != "tenant-forged" {
 			t.Fatalf("expected body provenance to remain distinguishable, got %v", call.bodyContext)
@@ -363,6 +373,43 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 		if response.StatusCode != http.StatusOK || !strings.Contains(string(payload), "event: error") ||
 			!strings.Contains(string(payload), `{"code":"stream_error"}`) {
 			t.Fatalf("status=%d body=%q", response.StatusCode, payload)
+		}
+	})
+
+	t.Run("SSE deadline includes body buffering time", func(t *testing.T) {
+		before := len(backend.snapshot())
+		connection, err := tls.Dial("tcp", gatewayAddress, &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    roots,
+			ServerName: "localhost",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connection.Close()
+		if err := connection.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"entryNodeId":"slow-body"}`
+		headers := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer integration-valid\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", SSEPath, len(body))
+		if _, err := io.WriteString(connection, headers+body[:1]); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(250 * time.Millisecond)
+		if _, err := io.WriteString(connection, body[1:]); err != nil {
+			t.Fatal(err)
+		}
+		response, err := http.ReadResponse(bufio.NewReader(connection), &http.Request{Method: http.MethodPost})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusGatewayTimeout {
+			payload, _ := io.ReadAll(response.Body)
+			t.Fatalf("status=%d body=%q", response.StatusCode, payload)
+		}
+		if len(backend.snapshot()) != before {
+			t.Fatal("slow body reached gRPC backend after absolute deadline")
 		}
 	})
 

@@ -54,6 +54,7 @@ GET  /healthz                                              200 (no identity data
 trusted upstream metadata:
   eci-security-context-bin: base64(protobuf SecurityContext)
   traceparent: 00-<gateway-generated-trace-id>-<gateway-generated-span-id>-01
+  x-eci-request-deadline-unix-ms: <trusted absolute deadline; SSE route only>
 ```
 
 ## 3. Comportamento
@@ -104,6 +105,11 @@ trusted upstream metadata:
     generato dal gateway è il parent trusted dello span
     `eci.gateway.authorize` e il `traceparent` propagato identifica quello span,
     senza segmenti orfani o contesto controllato dal client.
+11. **Deadline SSE assoluta.** Given un body SSE caricato lentamente, When il
+    tempo da ext-auth alla fine del buffering supera 30s, Then l'adapter riceve
+    la deadline trusted già scaduta, risponde 504 e non chiama gRPC. Header
+    deadline forgiati sono rimossi; il metadata è conservato solo sulla route
+    SSE e rimosso prima delle route gRPC dirette.
 
 ## 4. Errori & edge case
 
@@ -119,6 +125,9 @@ trusted upstream metadata:
 | ext_authz timeout | deny 503; mai failure-mode allow |
 | header bucket forgiato | rimosso prima di ext_authz; chiave nuova solo da identità validata |
 | header HTTP incompleti/Slowloris | 408/close entro 5s; zero chiamate ext_authz/upstream |
+| scope autenticato con `SecurityContext` base64 >12 KiB | `invalid_claims`/deny bounded prima del trasporto |
+| deadline SSE assente/malformata | 401; nessuna deadline client-controlled |
+| deadline SSE già trascorsa durante buffering | 504; zero RPC |
 | certificato/chiave TLS assente o invalido | Envoy non parte; nessun fallback cleartext |
 | route/servizio non allow-listed | 404; transcoder non passthrough |
 
@@ -161,7 +170,8 @@ error body allow-listed e test Envoy reale.
   backend gRPC reale: TLS/cleartext rejection, JSON→gRPC metadata, SSE
   incremental, gRPC passthrough, 401/503, forged headers, 429 isolato tra due
   caller, header parziali chiusi prima dell'auth, continuità tra auth span e
-  `traceparent`, e route unknown. `envoy --mode validate` sulla
+  `traceparent`, upload SSE lento incluso nella deadline assoluta, scope fuori
+  dal budget trasporto, e route unknown. `envoy --mode validate` sulla
   config effettiva prima del test.
 
 ## 8. Osservabilità

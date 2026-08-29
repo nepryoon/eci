@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -260,7 +261,7 @@ func TestRequiredClaimsAndLimitsFailClosed(t *testing.T) {
 func TestSecurityContextTransportBudgetFailsClosed(t *testing.T) {
 	largeScope := make([]string, 80)
 	for index := range largeScope {
-		largeScope[index] = strings.Repeat("r", 200) + string(rune('a'+index%26))
+		largeScope[index] = strings.Repeat("r", 200) + strconv.Itoa(index)
 	}
 	raw, err := json.Marshal(map[string]any{
 		"sub": "user-7", "typ": "Bearer", "tenant_id": "tenant-42",
