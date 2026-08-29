@@ -110,6 +110,11 @@ trusted upstream metadata:
     la deadline trusted già scaduta, risponde 504 e non chiama gRPC. Header
     deadline forgiati sono rimossi; il metadata è conservato solo sulla route
     SSE e rimosso prima delle route gRPC dirette.
+12. **Proxy trust boundary.** Given XFF loopback e control header router
+    `x-envoy-*` forgiati, When una richiesta raggiunge il listener pubblico,
+    Then l'origine deriva dall'indirizzo remoto con zero hop trusted, i control
+    header vengono rimossi e una richiesta produce al massimo un tentativo
+    upstream senza estendere o abbreviare la deadline configurata.
 
 ## 4. Errori & edge case
 
@@ -128,6 +133,7 @@ trusted upstream metadata:
 | scope autenticato con `SecurityContext` base64 >12 KiB | `invalid_claims`/deny bounded prima del trasporto |
 | deadline SSE assente/malformata | 401; nessuna deadline client-controlled |
 | deadline SSE già trascorsa durante buffering | 504; zero RPC |
+| XFF / retry / timeout router forgiati | rimossi prima di auth/routing; nessuna amplification |
 | certificato/chiave TLS assente o invalido | Envoy non parte; nessun fallback cleartext |
 | route/servizio non allow-listed | 404; transcoder non passthrough |
 
@@ -151,7 +157,7 @@ trusted upstream metadata:
 ext_auth bypass/failure o resource exhaustion JWKS tramite token invalidi,
 intercettazione/replay del bearer in cleartext,
 replay/esposizione del bearer sull'hop interno, starvation cross-tenant, route
-passthrough, oversized body, Slowloris/header trickle, slow stream, rate limit bypass, direct
+passthrough, forged proxy classification/router controls, oversized body, Slowloris/header trickle, slow stream, rate limit bypass, direct
 helper/backend exposure, prompt injection che tenta scope, error leakage.
 Controlli: TLS obbligatorio al listener, rimozione metadata forgiabili e ceiling
 coarse prima di auth, stripping del bearer subito dopo ext_authz, bucket opaco
@@ -171,7 +177,8 @@ error body allow-listed e test Envoy reale.
   incremental, gRPC passthrough, 401/503, forged headers, 429 isolato tra due
   caller, header parziali chiusi prima dell'auth, continuità tra auth span e
   `traceparent`, upload SSE lento incluso nella deadline assoluta, scope fuori
-  dal budget trasporto, e route unknown. `envoy --mode validate` sulla
+  dal budget trasporto, XFF/retry/timeout forgiati senza amplification, e route
+  unknown. `envoy --mode validate` sulla
   config effettiva prima del test.
 
 ## 8. Osservabilità

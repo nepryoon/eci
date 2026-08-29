@@ -15,6 +15,8 @@ static_resources:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                 stat_prefix: eci_public
                 codec_type: AUTO
+                use_remote_address: true
+                xff_num_trusted_hops: 0
                 stream_error_on_invalid_http_message: true
                 common_http_protocol_options:
                   headers_with_underscores_action: REJECT_REQUEST
@@ -167,6 +169,22 @@ static_resources:
                           - remove: baggage
                           - remove: x-eci-rate-limit-key
                           - remove: x-eci-request-deadline-unix-ms
+                          - remove: x-forwarded-for
+                          - remove: x-envoy-internal
+                          - remove: x-envoy-external-address
+                          - remove: x-envoy-retry-on
+                          - remove: x-envoy-retry-grpc-on
+                          - remove: x-envoy-max-retries
+                          - remove: x-envoy-retriable-header-names
+                          - remove: x-envoy-retriable-status-codes
+                          - remove: x-envoy-upstream-rq-timeout-ms
+                          - remove: x-envoy-upstream-rq-per-try-timeout-ms
+                          - remove: x-envoy-upstream-rq-timeout-alt-response
+                          - remove: x-envoy-hedge-on-per-try-timeout
+                          - remove: x-envoy-upstream-alt-stat-name
+                          - remove: x-envoy-decorator-operation
+                          - remove: x-envoy-expected-rq-timeout-ms
+                          - remove: x-envoy-attempt-count
                   # A coarse process-wide ceiling protects ext_authz/JWKS from
                   # unauthenticated floods. Authenticated fairness is enforced
                   # by the separate caller-partitioned limiter below.

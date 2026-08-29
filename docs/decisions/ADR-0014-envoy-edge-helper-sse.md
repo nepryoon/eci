@@ -48,7 +48,10 @@ header sanitization → coarse pre-auth load-shedding → ext_authz (fail closed
 ```
 
 Il filtro di sanitizzazione rimuove ogni `eci-security-context-bin` e trace
-context in ingresso. L'helper genera un trace id e uno span id
+context in ingresso. Poiché il listener è l'edge pubblico diretto, HCM usa
+l'indirizzo remoto con zero proxy hop trusted; XFF, classificazione interna e
+control header router `x-envoy-*` client vengono rimossi prima di ext-auth, così
+un singolo token di rate limit non può amplificare retry o deadline. L'helper genera un trace id e uno span id
 crittograficamente casuali, li installa come parent remoto trusted prima di
 avviare lo span `eci.gateway.authorize` e propaga un `traceparent` che identifica
 lo span effettivamente registrato nello stesso trace. Quindi valida il bearer
@@ -110,6 +113,8 @@ Fonti primarie:
   il listener pubblico rifiuta il cleartext prima dell'autenticazione.
 - Il validatore OIDC è protetto da un ceiling pre-auth; il limite per caller
   autenticato resta separato e non deriva da token/header non verificati.
+- Nessun proxy hop è trusted implicitamente: un futuro ingress davanti a Envoy
+  richiederà una decisione/configurazione esplicita invece di riusare XFF client.
 - JSON unary e SSE hanno due data path edge, ma condividono autenticazione,
   deadline, metadata e test end-to-end.
 - L'API JSON auto-mapped è stabile ma non usa URL REST cosmetici; annotations
