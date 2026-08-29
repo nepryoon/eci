@@ -89,12 +89,13 @@ func TestHybridGraphVectorSearchContentHydration(t *testing.T) {
 
 		// Prova diretta di "una query batch, non N separate" (SPEC-045 §3
 		// scenario 2): entry_node_id isolato -> GraphTraversal fa UNA
-		// query (risultato vuoto); DUE nodi vector-only mancano di Name ->
-		// se l'hydration fosse una query PER NODO, il totale sarebbe
-		// 1+2=3. Una hydration batch corretta produce 1+1=2.
+		// query (risultato vuoto); il re-check ACL T6.3 fa UNA query batch;
+		// DUE nodi vector-only mancano di Name -> se l'hydration fosse una
+		// query PER NODO, il totale sarebbe 1+1+2=4. Una hydration batch
+		// corretta produce 1+1+1=3.
 		queriesUsed := after - before
-		if queriesUsed > 2 {
-			t.Errorf("query Neo4j eseguite = %d, want <= 2 (1 GraphTraversal + 1 hydration BATCH, non 1 per nodo mancante)", queriesUsed)
+		if queriesUsed > 3 {
+			t.Errorf("query Neo4j eseguite = %d, want <= 3 (1 GraphTraversal + 1 ACL re-check BATCH + 1 hydration BATCH, non 1 per nodo mancante)", queriesUsed)
 		}
 	})
 
