@@ -1,7 +1,7 @@
 # SPEC-061 — Security adversarial suite e GDS per-ACL
-Stato: verified
+Stato: implemented
 Task-tree: T6.7 · Servizi: `tools/gds-impact`, `services/retrieval-engine`, `services/orchestrator`, suite security esistente · ADD: Modulo 3 §2.1–§2.6
-Contratti: `contracts/proto/eci/retrieval/v1/retrieval.proto` (sola lettura), `contracts/cypher/schema.cypher` (sola lettura)
+Contratti: `contracts/proto/eci/retrieval/v1/retrieval.proto` (sola lettura), `contracts/cypher/schema.cypher` (vincolo additivo ADR-0015)
 
 ## 1. Obiettivo
 
@@ -58,12 +58,15 @@ Il write-back salva anche la provenance del calcolo:
 ```cypher
 n.impact_tenant_id = $tenant_id,
 n.impact_repo = $repo,
-n.impact_acl_group = $acl_group
+n.impact_acl_group = $acl_group,
+n.impact_generation = captured_partition_generation
 ```
 
-Il fetch del reranker usa `impact_score` soltanto se queste tre proprietà
-coincidono con le label correnti del nodo e con lo scope autenticato. Un
-punteggio assente/stale vale `0.0`, come già previsto da SPEC-044.
+Un nodo metadata `GDSPartition`, unico per le tre label grazie al contratto D3,
+mantiene una generation monotona. Il fetch del reranker usa `impact_score`
+soltanto se provenance e label coincidono con lo scope autenticato e
+`impact_generation` coincide con la generation corrente. Un punteggio
+assente/stale vale `0.0`, come già previsto da SPEC-044.
 
 Registry tool autorevole e immutabile:
 
@@ -89,12 +92,12 @@ non è mai derivato da `query`, argomenti tool, risposta LLM o stato del grafo.
    proiezioni GDS, algoritmi e write-back contengono solo A; B non riceve
    proprietà e nessuna cardinalità/nome di B compare nel risultato o log.
 3. **Revoca/ownership e mutazioni topologiche.** Given punteggi GDS scritti per
-   una partizione A, When un nodo cambia tenant/repo/ACL, Then lo stesso write
-   invalida atomicamente score, community, kind e provenance su tutti i nodi
-   della vecchia e nuova partizione. When viene materializzata o aggiornata una
-   relazione, Then lo stesso write invalida entrambe le partizioni endpoint.
-   Fino a un nuovo run il reranker usa `0.0`; dopo il run usa soltanto la nuova
-   provenance. L'invalidazione non attraversa partizioni non coinvolte.
+   una partizione A, When un nodo cambia tenant/repo/ACL o una relazione viene
+   materializzata/aggiornata, Then lo stesso write incrementa in O(1) la
+   generation di ogni partizione coinvolta. I vecchi score restano fisicamente
+   invariati ma il reranker usa `0.0`. Given una mutazione fra proiezione e
+   write-back, Then il fence sotto lock rifiuta l'intero write-back; dopo un
+   nuovo run usa soltanto generation e provenance correnti.
 4. **Prompt/tool isolation.** Given testo che ordina di usare shell, cambiare
    `allowed_repos`/`acl_groups` o chiamare un tool inventato, When l'agente
    esegue, Then la sequenza contiene soltanto nomi allow-listed e ogni client
@@ -126,8 +129,10 @@ non è mai derivato da `query`, argomenti tool, risposta LLM o stato del grafo.
 | arco verso nodo fuori partizione | traversal arrestata; nodo/arco non proiettato |
 | proiezione/algoritmo/write-back fallisce | errore esplicito; drop delle proiezioni sempre tentato |
 | score con provenance mancante o non coincidente | ignorato deterministicamente (`0.0`) |
-| nodo cambia ownership | invalida nello stesso write l'intera partizione vecchia e nuova |
-| relazione creata/aggiornata | invalida nello stesso write le partizioni dei due endpoint |
+| generation assente/non coincidente | ignorato deterministicamente (`0.0`) |
+| nodo cambia ownership | incrementa nello stesso write le generation vecchia e nuova |
+| relazione creata/aggiornata | incrementa nello stesso write le generation endpoint |
+| partizione muta durante il calcolo | write-back interamente rifiutato come stale |
 | azione tool sconosciuta | `ValueError` prima di qualunque client/store |
 | query tenta di serializzare scope | testo trattato solo come query; context invariato |
 | JWT/metadata/OPA invalidi o backend auth non disponibile | deny bounded; zero store call |
@@ -145,11 +150,11 @@ body, metadata client e valori expected/eval non sono autorità. **Attacchi:**
 cross-tenant/repo, confused deputy, forged metadata, prompt-to-tool escalation,
 GDS globale, score stale dopo revoca, not-found oracle, PDP fail-open.
 **Mitigazioni:** allow-list chiusa, scope immutabile, predicati positivi su ogni
-nodo GDS, provenance del calcolo, invalidazione atomica delle partizioni su
-mutazioni di nodo/relazione, re-check prima del consumo, deny uniforme, test
-reali e osservabilità senza label identitarie.
+nodo GDS, provenance del calcolo, generation fencing O(1), lock condiviso fra
+sink e write-back, re-check prima del consumo, deny uniforme, test reali e
+osservabilità senza label identitarie.
 
-Non-goals: nessuna nuova policy prodotto, modifica ADD/contratti, LLM judge,
+Non-goals: nessuna nuova policy prodotto, modifica ADD/proto, LLM judge,
 embedding/fuzzy matching, GPU, nuovo datastore, mTLS/Kubernetes (T7.1),
 dashboard/alert completi (T7.3) o modifica della baseline T5.6. La suite non
 presenta Neo4j Community come prova delle grant Enterprise; prova il filtro
@@ -172,9 +177,9 @@ applicativo e GDS Community con partizionamento esplicito.
 - Unit Go GDS: validazione `ProjectionScope` e presenza parametri/predicati in
   discovery/projection/write-back; `Run` rifiuta config costruita a mano.
 - Integration Neo4j+GDS reale: fixture A/B, edge cross-boundary, write-back e
-  catalog cleanup; cambio ACL e mutazione di relazione invalidano tutti i
-  risultati derivati nelle sole partizioni coinvolte; il reranker ignora anche
-  qualunque score con provenance stale.
+  catalog cleanup; cambio ACL e mutazione di relazione avanzano solo le
+  generation coinvolte senza scansione, una mutazione interveniente fa fallire
+  il write-back e il reranker ignora provenance/generation stale.
 - Unit Python orchestrator: registry esatto, tool ignoto pre-network, prompt
   injection non modifica azioni ammesse né l'oggetto `SecurityContext`.
 - Regression matrix versionata: riferimenti test esistenti per gateway JWT,
@@ -206,15 +211,15 @@ applicativo e GDS Community con partizionamento esplicito.
       scoped.
 - [x] Fixture reale prova che edge/nodi B non entrano nelle proiezioni di A.
 - [x] Write-back porta provenance e score stale non influenza il reranker.
-- [x] Mutazioni di ownership e topologia invalidano atomicamente l'intera
-      partizione derivata, non soltanto il nodo aggiornato.
+- [x] Mutazioni di ownership/topologia avanzano generation in O(1); il
+      write-back è fenced/atomico e nessuna query sink scansiona la partizione.
 - [x] Prompt injection/tool sconosciuto non altera scope e non raggiunge rete.
 - [x] Matrice nomina test reali per ogni superficie T6.7, senza skip/xfail.
 - [x] JWT/forged metadata/PDP outage e audit WORM restano fail-closed in CI.
 - [x] Baseline T5.6 e golden dataset byte-identici; nessuna GPU.
-- [x] `task build`, `task lint`, `task test`, `task test:integration`,
+- [ ] `task build`, `task lint`, `task test`, `task test:integration`,
       `task guard` e job security CI verdi.
-- [x] SPEC `verified` dopo review risolta, evidenza CI verde e PR merge-ready.
+- [ ] SPEC `verified` dopo review risolta, evidenza CI verde e PR merge-ready.
 
 ## 10. Review avversariale di approvazione
 
@@ -228,13 +233,12 @@ garanzie deterministiche e valutazione probabilistica resta intatta.
 L'attacco più pericoloso individuato nel secondo passaggio è la revoca ACL dopo
 il write-back: filtrare soltanto il nodo non basta perché un vecchio score può
 codificare topologia non più autorizzata. Per questo la SPEC richiede provenance
-tenant/repo/ACL del calcolo, verifica al consumo e invalidazione dell'intera
-partizione derivata a ogni mutazione di ownership o topologia. Le alternative
-scartate sono invalidare solo il nodo mutato, invalidare globalmente tutte le
-partizioni, proiezione globale con post-filter, score senza provenance e
-canonicalizzazione dello scope da prompt: tutte lasciano dati derivati stale o
-contraddicono l'ADD. Non emerge una decisione architetturale nuova che richieda
-ADR; è enforcement della regola GDS per-ACL già prescritta.
+tenant/repo/ACL del calcolo e verifica al consumo. La prima implementazione di
+invalidazione eager è stata poi scartata: è quadratica e non chiude la race con
+un job già proiettato. ADR-0015 documenta il registro generation per partizione,
+il fencing sotto lock e il vincolo D3 additivo. Sono scartate anche
+invalidazione globale, proiezione globale con post-filter, timestamp/TTL, score
+senza provenance e scope da prompt: lasciano dati stale o contraddicono l'ADD.
 
 ## 11. Evidenza di implementazione
 
@@ -245,14 +249,20 @@ entrambe le proiezioni e write-back, sostituisce la vecchia stima globale con
 le `.stream.estimate` sui graph name autorizzati e verifica la provenance al
 consumo del reranker.
 
-La review automatizzata ha poi riprodotto un caso più forte: il punteggio di un
-nodo invariato può incorporare la topologia di un altro nodo che cambia scope.
-Il test integration `T6_7_GDSPartitionInvalidatedOnScopeAndTopologyMutation`,
-aggiunto red nel commit `a655fe3`, falliva perché quei valori restavano nel
-grafo. Il sink graph ora cattura lo scope precedente e invalida nello stesso
-Cypher vecchia e nuova partizione; una mutazione di relazione invalida le
-partizioni di entrambi gli endpoint. La regressione è verde senza rerun GPU e
-senza modifiche a baseline o golden.
+La prima review automatizzata ha riprodotto un caso più forte: il punteggio di
+un nodo invariato può incorporare la topologia di un altro nodo che cambia
+scope. Il test integration aggiunto red nel commit `a655fe3` ha portato a una
+prima invalidazione eager. La fresh review dell'head finale ha correttamente
+rifiutato quella soluzione: una proiezione già creata poteva riscrivere score
+stale dopo l'invalidazione e ogni evento visitava l'intera partizione.
+
+Le regressioni del commit `8f596e2` dimostrano separatamente i tre failure:
+generation non avanzata dal sink, score con generation stale ancora consumato
+e write-back accettato dopo una mutazione interveniente. ADR-0015 introduce il
+fence: sink e job acquisiscono il lock di `GDSPartition` prima dei CodeNode,
+ogni mutazione incrementa O(1) il contatore, il write-back è all-or-nothing e il
+reranker richiede la generation corrente. Le prove mirate sono verdi su Neo4j
+reale; nessun rerun GPU e nessuna modifica a baseline/golden.
 
 Evidenza locale verde:
 
@@ -269,14 +279,7 @@ entrambi i test sono passati subito isolati senza modifiche. Una terza
 esecuzione integrale di `task test:integration` è verde; la verifica CI e la
 review successive sono registrate qui sotto.
 
-Verifica finale: [GitHub Actions run 33263671444](https://github.com/nepryoon/eci/actions/runs/33263671444)
-verde sull'head `9cfbbb7`: `build-lint-test` PASS (8m18s), `guard` e codegen
-deterministico PASS (1m49s), `envoy-gateway-integration` PASS (2m12s),
-`worm-audit-integration` PASS (29s), `datastore-security-integration` PASS
-(16m16s). Quest'ultimo ha completato materializzazione isolata, retrieval
-cross-store, semantic-cache autenticata e GDS per-ACL/stale-score reali.
-
-Il finding P1 sullo score di un peer invariato dopo ownership change è stato
-risolto soltanto dopo la regressione red-before-green e questa prova CI; il
-thread GitHub è risolto e non restano finding legittimi aperti. Baseline T5.6,
-metriche storiche e `queries_v0.json` sono rimasti byte-identici.
+La run intermedia [33263671444](https://github.com/nepryoon/eci/actions/runs/33263671444)
+era verde sull'head eager `9cfbbb7`, ma non è evidenza finale per ADR-0015. I
+due nuovi thread P1 restano aperti fino ai gate e alla fresh review del nuovo
+head. Baseline T5.6, metriche storiche e `queries_v0.json` restano byte-identici.
