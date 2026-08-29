@@ -96,7 +96,8 @@ tasks:
           -keyout "${ECI_ENVOY_TLS_DIR}/tls.key" -out "${ECI_ENVOY_TLS_DIR}/tls.crt" \
           >/dev/null 2>&1
         docker run --rm \
-          -v "{{.ROOT_DIR}}/deploy/envoy:/etc/envoy:ro" \
+          -v "{{.ROOT_DIR}}/deploy/envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro" \
+          -v "{{.ROOT_DIR}}/deploy/envoy/retrieval.pb:/etc/envoy/retrieval.pb:ro" \
           -v "${ECI_ENVOY_TLS_DIR}:/etc/envoy/tls:ro" \
           envoyproxy/envoy:v1.39.0@sha256:d59f7f5fa10cff6d5892b6c5e7df5c9297ddfb2c3683e33fbfb82da24de4fa66 \
           --mode validate --config-path /etc/envoy/envoy.yaml
