@@ -51,6 +51,7 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 		"reject_unknown_method: true",
 		"ignore_unknown_query_parameters: false",
 		"eci.retrieval.v1.RetrievalEngine",
+		`regex: ^/eci\.retrieval\.v1\.RetrievalEngine/(HybridSearch|GetNode|ExpandNeighbors|ImpactAnalysis)$`,
 		"key: retry-after",
 		"address: 127.0.0.1",
 		"timeout: 0s",
@@ -67,6 +68,9 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 	}
 	if strings.Contains(config, "failure_mode_allow: true") || strings.Contains(config, "match_incoming_request_route: true") {
 		t.Fatal("gateway contains fail-open or route-cache-sensitive configuration")
+	}
+	if strings.Contains(config, "prefix: /eci.retrieval.v1.RetrievalEngine/") {
+		t.Fatal("native gRPC route is a prefix rather than a method allow-list")
 	}
 }
 

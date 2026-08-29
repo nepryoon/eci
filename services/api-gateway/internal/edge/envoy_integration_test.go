@@ -35,9 +35,11 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -80,6 +82,7 @@ type integrationBackend struct {
 	releaseSecond chan struct{}
 	cancelled     chan struct{}
 	cancelOnce    sync.Once
+	unknownCalls  int
 }
 
 func (b *integrationBackend) observe(ctx context.Context, method string, bodyContext *retrievalv1.SecurityContext) {
@@ -162,6 +165,12 @@ func (b *integrationBackend) snapshot() []observedCall {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return append([]observedCall(nil), b.calls...)
+}
+
+func (b *integrationBackend) unknownCallCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.unknownCalls
 }
 
 func TestEnvoyGatewayEndToEnd(t *testing.T) {
@@ -283,6 +292,15 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 		assertTrustedTraceparent(t, call)
 		if call.authorization != "" {
 			t.Fatalf("gRPC bearer token reached backend: %q", call.authorization)
+		}
+		beforeUnknown := backend.unknownCallCount()
+		unknownResponse := new(retrievalv1.GetNodeResponse)
+		err = connection.Invoke(requestContext, "/eci.retrieval.v1.RetrievalEngine/Unknown", &retrievalv1.GetNodeRequest{}, unknownResponse)
+		if err == nil {
+			t.Fatal("unknown native gRPC method was accepted")
+		}
+		if backend.unknownCallCount() != beforeUnknown {
+			t.Fatal("unknown native gRPC method reached backend")
 		}
 
 		streamContext, cancelStream := context.WithCancel(requestContext)
@@ -433,7 +451,12 @@ func startIntegrationGRPC(t *testing.T, backend *integrationBackend) (net.Listen
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := grpc.NewServer()
+	server := grpc.NewServer(grpc.UnknownServiceHandler(func(_ any, _ grpc.ServerStream) error {
+		backend.mu.Lock()
+		backend.unknownCalls++
+		backend.mu.Unlock()
+		return status.Error(codes.Unimplemented, "unknown method")
+	}))
 	retrievalv1.RegisterRetrievalEngineServer(server, backend)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { server.Stop(); _ = listener.Close() })
