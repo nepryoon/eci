@@ -67,7 +67,7 @@ func TestMigrationAgainstRealNeo4j(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = driver.Close(ctx) })
 
-	// Scenario 3: SHOW CONSTRAINTS elenca esattamente i tre constraint di
+	// Scenario 3: SHOW CONSTRAINTS include i quattro constraint di D3
 	// D3 (i property existence constraint code_node_id_exists/
 	// code_node_domain_exists sono stati rimossi, vedi ADR-0004: richiedono
 	// Neo4j Enterprise Edition, non disponibili su Community; il property
@@ -75,7 +75,7 @@ func TestMigrationAgainstRealNeo4j(t *testing.T) {
 	// ADR-0005: VECTOR<FLOAT32>(1536) come tipo di proprietà è sintassi
 	// Cypher 25-only non disponibile su neo4j:5-community).
 	assertNamesPresent(t, ctx, driver, "SHOW CONSTRAINTS YIELD name", []string{
-		"code_node_id", "file_path_unique", "method_symbol_unique",
+		"code_node_id", "file_path_unique", "method_symbol_unique", "gds_partition_scope_unique",
 	})
 
 	// Scenario 4: SHOW INDEXES elenca range + full-text + vector index di D3.

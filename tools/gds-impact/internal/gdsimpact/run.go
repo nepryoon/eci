@@ -23,6 +23,10 @@ func Run(ctx context.Context, driver neo4j.DriverWithContext, cfg Config, logf f
 	if cfg.MaxDepth <= 0 {
 		return Result{}, fmt.Errorf("gdsimpact: max_depth deve essere >= 1, ricevuto %d", cfg.MaxDepth)
 	}
+	partitionGeneration, err := capturePartitionGeneration(ctx, driver, cfg.Scope)
+	if err != nil {
+		return Result{}, err
+	}
 
 	deps, err := discoverSubgraph(ctx, driver, cfg.EntryNodeID, cfg.Scope, cfg.MaxDepth)
 	if err != nil {
@@ -78,7 +82,7 @@ func Run(ctx context.Context, driver neo4j.DriverWithContext, cfg Config, logf f
 
 	scores := combineScores(deps, pprRaw, bcRaw, communities, cfg)
 
-	if err := writeBack(ctx, driver, cfg.Scope, scores); err != nil {
+	if err := writeBack(ctx, driver, cfg.Scope, partitionGeneration, scores); err != nil {
 		return Result{}, err
 	}
 	logf("gdsimpact: impact_score scritto su %d nodi", len(scores))

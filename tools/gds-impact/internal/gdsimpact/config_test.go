@@ -44,6 +44,7 @@ func TestStoreBackedQueriesCarryFullProjectionScope(t *testing.T) {
 		query string
 	}{
 		{name: "discovery", query: levelCypher},
+		{name: "partition generation", query: capturePartitionGenerationQuery},
 		{name: "reverse projection", query: projectReverseQuery},
 		{name: "undirected projection", query: projectUndirectedQuery},
 		{name: "page rank seed", query: pageRankQuery},
@@ -54,6 +55,18 @@ func TestStoreBackedQueriesCarryFullProjectionScope(t *testing.T) {
 			if !strings.Contains(item.query, parameter) {
 				t.Errorf("%s query is missing mandatory scope parameter %s", item.name, parameter)
 			}
+		}
+	}
+}
+
+func TestWriteBackUsesGenerationFenceAndSinglePartitionLock(t *testing.T) {
+	for _, fragment := range []string{
+		"GDSPartition", "write_lock", "$partition_generation",
+		"n.impact_generation = $partition_generation",
+		"size(targets) = size($rows)",
+	} {
+		if !strings.Contains(writeBackQuery, fragment) {
+			t.Errorf("write-back query missing generation fence fragment %q", fragment)
 		}
 	}
 }

@@ -10,6 +10,9 @@ FOR (f:File) REQUIRE (f.repo, f.path) IS UNIQUE;
 CREATE CONSTRAINT method_symbol_unique IF NOT EXISTS
 FOR (m:Method) REQUIRE m.symbol_id IS UNIQUE;
 
+CREATE CONSTRAINT gds_partition_scope_unique IF NOT EXISTS
+FOR (p:GDSPartition) REQUIRE (p.tenant_id, p.repo, p.acl_group) IS UNIQUE;
+
 // ============================================================
 // RANGE INDEXES
 // ============================================================

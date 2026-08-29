@@ -264,7 +264,12 @@ func assertImpactScope(t *testing.T, ctx context.Context, driver neo4j.DriverWit
 	t.Helper()
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session.Close(ctx)
-	record, err := session.Run(ctx, `MATCH (n:CodeNode {id: $id}) RETURN n.impact_tenant_id AS tenant, n.impact_repo AS repo, n.impact_acl_group AS acl`, map[string]any{"id": id})
+	record, err := session.Run(ctx, `
+		MATCH (n:CodeNode {id: $id})
+		MATCH (p:GDSPartition {tenant_id: n.tenant_id, repo: n.repo, acl_group: n.acl_group})
+		RETURN n.impact_tenant_id AS tenant, n.impact_repo AS repo, n.impact_acl_group AS acl,
+		       n.impact_generation AS impact_generation, p.generation AS current_generation
+	`, map[string]any{"id": id})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,6 +282,17 @@ func assertImpactScope(t *testing.T, ctx context.Context, driver neo4j.DriverWit
 	gotACL, _ := single.Get("acl")
 	if gotTenant != tenant || gotRepo != repo || gotACL != acl {
 		t.Fatalf("impact scope for %s = (%v,%v,%v), want (%s,%s,%s)", id, gotTenant, gotRepo, gotACL, tenant, repo, acl)
+	}
+	impactGeneration, _, err := neo4j.GetRecordValue[int64](single, "impact_generation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentGeneration, _, err := neo4j.GetRecordValue[int64](single, "current_generation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if impactGeneration != currentGeneration {
+		t.Fatalf("impact generation for %s = %d, current partition generation = %d", id, impactGeneration, currentGeneration)
 	}
 }
 
