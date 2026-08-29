@@ -188,7 +188,7 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 	grpcListener, grpcServer := startIntegrationGRPC(t, backend)
 	grpcPort := listenerPort(t, grpcListener)
 	authenticator := new(integrationAuthenticator)
-	helperListener, helperServer := startIntegrationHelper(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(grpcPort)), authenticator)
+	helperListener, _ := startIntegrationHelper(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(grpcPort)), authenticator)
 	helperPort := listenerPort(t, helperListener)
 
 	root := filepath.Clean(filepath.Join("..", "..", "..", ".."))
@@ -461,24 +461,11 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 	})
 
 	t.Run("auth helper outage fails closed", func(t *testing.T) {
-		refillDeadline := time.Now().Add(2 * time.Second)
-		for {
-			response := postJSON(t, baseURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", `{}`, "Bearer integration-valid")
-			statusCode := response.StatusCode
-			_ = response.Body.Close()
-			if statusCode == http.StatusOK {
-				break
-			}
-			if statusCode != http.StatusTooManyRequests || time.Now().After(refillDeadline) {
-				t.Fatalf("pre-auth limiter did not become ready: status=%d", statusCode)
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		if err := helperServer.Shutdown(ctx); err != nil {
-			t.Fatal(err)
-		}
+		deadHelperPort := availablePort(t)
+		outageConfigPath := renderIntegrationEnvoyConfig(t, root, deadHelperPort, grpcPort)
+		outageURL, _ := startIntegrationEnvoy(t, ctx, root, outageConfigPath, certificatePath, keyPath, deadHelperPort, grpcPort)
 		before := len(backend.snapshot())
-		response := postJSON(t, baseURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", `{}`, "Bearer integration-valid")
+		response := postJSON(t, outageURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", `{}`, "Bearer integration-valid")
 		defer response.Body.Close()
 		if response.StatusCode != http.StatusServiceUnavailable || len(backend.snapshot()) != before {
 			t.Fatalf("status=%d backend calls=%d", response.StatusCode, len(backend.snapshot())-before)
@@ -560,7 +547,7 @@ func startIntegrationEnvoy(t *testing.T, ctx context.Context, root, configPath, 
 		if err := os.WriteFile(nativeConfig, []byte(config), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		command := exec.CommandContext(ctx, binary, "--config-path", nativeConfig, "--log-level", "warning")
+		command := exec.CommandContext(ctx, binary, "--config-path", nativeConfig, "--log-level", "warning", "--use-dynamic-base-id")
 		output := new(strings.Builder)
 		command.Stdout, command.Stderr = output, output
 		if err := command.Start(); err != nil {
