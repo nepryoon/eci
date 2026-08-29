@@ -74,13 +74,13 @@ func TestMigrationAgainstRealNeo4j(t *testing.T) {
 	// type constraint emb_vector_type è stato rimosso a sua volta, vedi
 	// ADR-0005: VECTOR<FLOAT32>(1536) come tipo di proprietà è sintassi
 	// Cypher 25-only non disponibile su neo4j:5-community).
-	assertNamesPresent(t, ctx, driver, "SHOW CONSTRAINTS YIELD name", []string{
+	assertNamesExactly(t, ctx, driver, "SHOW CONSTRAINTS YIELD name", []string{
 		"code_node_id", "file_path_unique", "method_symbol_unique", "gds_partition_scope_unique",
 	})
 
 	// Scenario 4: SHOW INDEXES elenca range + full-text + vector index di D3.
 	assertNamesPresent(t, ctx, driver, "SHOW INDEXES YIELD name", []string{
-		"code_node_ast_hash", "code_node_domain", "method_name", "rel_commit",
+		"code_node_ast_hash", "code_node_domain", "code_node_security_scope", "method_name", "rel_commit",
 		"code_fulltext", "doc_fulltext", "code_embeddings",
 	})
 
@@ -127,6 +127,42 @@ func assertNamesPresent(t *testing.T, ctx context.Context, driver neo4j.DriverWi
 	for _, name := range want {
 		if !got[name] {
 			t.Errorf("%s: %q non trovato (trovati: %v)", query, name, got)
+		}
+	}
+}
+
+func assertNamesExactly(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, query string, want []string) {
+	t.Helper()
+	session := driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+
+	result, err := session.Run(ctx, query, nil)
+	if err != nil {
+		t.Fatalf("%s: %v", query, err)
+	}
+	records, err := result.Collect(ctx)
+	if err != nil {
+		t.Fatalf("%s (collect): %v", query, err)
+	}
+
+	got := make(map[string]bool, len(records))
+	for _, rec := range records {
+		name, _, err := neo4j.GetRecordValue[string](rec, "name")
+		if err != nil {
+			t.Fatalf("record senza campo name: %v", err)
+		}
+		got[name] = true
+	}
+	wanted := make(map[string]bool, len(want))
+	for _, name := range want {
+		wanted[name] = true
+		if !got[name] {
+			t.Errorf("%s: %q non trovato (trovati: %v)", query, name, got)
+		}
+	}
+	for name := range got {
+		if !wanted[name] {
+			t.Errorf("%s: constraint inatteso %q (attesi: %v)", query, name, want)
 		}
 	}
 }

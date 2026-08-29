@@ -59,14 +59,26 @@ avvengono nello stesso Cypher della mutazione, quindi non esiste una finestra
 tra cambio dati e invalidazione. Placeholder senza security label non creano
 partizioni.
 
-Il job GDS cattura la generation prima di discovery/proiezione. Prima del
-write-back acquisisce un write lock sullo stesso `GDSPartition` incrementando
-`write_lock`, poi verifica che la generation sia ancora identica. Solo allora,
-nella stessa transazione, scrive tutti gli score con `impact_generation` uguale
-alla generation catturata. Se la generation è cambiata o anche un solo target
-non appartiene più allo scope, non scrive alcuno score e restituisce un errore
-stale esplicito. La serializzazione sul nodo metadata produce due soli ordini
-possibili:
+Tutte le mutation seguono un ordine globale di lock: `CodeNode` in ordine
+lessicografico di `id`, poi `GDSPartition` in ordine lessicografico di
+`tenant_id`/`repo`/`acl_group`. Il sink acquisisce il write lock dei nodi in un
+primo statement e legge gli scope soltanto in un secondo statement della
+stessa explicit transaction. In questo modo un update ownership concorrente
+non può lasciare al consumer uno snapshot pre-lock. Anche gli endpoint di una
+relazione sono bloccati e poi riletti prima di derivare le partizioni. Le
+partizioni distinte sono ordinate prima dei `MERGE`, così move opposti non
+acquisiscono gli stessi lock in ordine inverso. Il driver ritenta bounded le
+transazioni su errori transient Neo4j.
+
+Il job GDS cattura la generation prima di discovery/proiezione. Al write-back
+blocca prima tutti i `CodeNode` target in ordine di `id`, quindi acquisisce il
+write lock sullo stesso `GDSPartition` incrementando `write_lock` e verifica
+che la generation sia ancora identica. Questo rispetta lo stesso ordine
+globale del sink ed evita deadlock nodo/partizione. Solo allora, nella stessa
+transazione, scrive tutti gli score con `impact_generation` uguale alla
+generation catturata. Se la generation è cambiata, un target manca o anche un
+solo target non appartiene più allo scope, non scrive alcuno score e restituisce
+un errore stale esplicito. La serializzazione produce due soli ordini possibili:
 
 - write-back prima della mutazione: gli score vengono scritti, poi la mutazione
   incrementa la generation e li rende immediatamente invisibili;
@@ -105,11 +117,13 @@ la prescrizione esistente di GDS per-ACL e revoca fail-closed.
 
 ## Review avversariale
 
-Il pass avversariale ha verificato ownership change, edge concorrente,
-write-back concorrente, partizione mancante, target spostato, duplicazione
-concurrente, scope forgiato, datastore failure e costo su milioni di nodi. Il
-vincolo composito impedisce due contatori concorrenti per lo stesso scope; il
-lock condiviso chiude la race; il confronto al consumo conserva defense in
-depth. Non vengono introdotti traversal unbounded, write a viste da input LLM,
-default tenant, fail-open, cambi di deadline/idempotenza o mescolanza fra
-garanzie deterministiche e metriche probabilistiche.
+Il pass avversariale ha verificato ownership change sovrapposti, endpoint che
+cambiano scope durante una relation mutation, move fra partizioni in direzioni
+opposte, edge e write-back concorrenti, partizione mancante, target spostato,
+duplicazione concorrente, scope forgiato, datastore failure e costo su milioni
+di nodi. Il vincolo composito impedisce due contatori per lo stesso scope;
+l'ordine totale dei lock e la rilettura post-lock chiudono snapshot race e
+deadlock; il confronto al consumo conserva defense in depth. Non vengono
+introdotti traversal unbounded, write a viste da input LLM, default tenant,
+fail-open, cambi di deadline/idempotenza o mescolanza fra garanzie
+deterministiche e metriche probabilistiche.

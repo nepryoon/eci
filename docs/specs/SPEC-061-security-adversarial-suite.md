@@ -259,10 +259,18 @@ stale dopo l'invalidazione e ogni evento visitava l'intera partizione.
 Le regressioni del commit `8f596e2` dimostrano separatamente i tre failure:
 generation non avanzata dal sink, score con generation stale ancora consumato
 e write-back accettato dopo una mutazione interveniente. ADR-0015 introduce il
-fence: sink e job acquisiscono il lock di `GDSPartition` prima dei CodeNode,
-ogni mutazione incrementa O(1) il contatore, il write-back è all-or-nothing e il
-reranker richiede la generation corrente. Le prove mirate sono verdi su Neo4j
-reale; nessun rerun GPU e nessuna modifica a baseline/golden.
+fence generation. Il protocollo finale, descritto sotto, usa un ordine globale
+dei lock, incrementa O(1) il contatore, rende il write-back all-or-nothing e fa
+richiedere al reranker la generation corrente. Le prove mirate sono verdi su
+Neo4j reale; nessun rerun GPU e nessuna modifica a baseline/golden.
+
+Una review successiva ha reso più forte il protocollo: leggere lo scope prima
+del lock permetteva a due ownership update sovrapposti o a un endpoint spostato
+di invalidare la partizione sbagliata; inoltre partizioni acquisite senza
+ordine totale potevano produrre deadlock. Le regressioni del commit `1a5a3b4`
+richiedono ora l'ordine globale `CodeNode.id` poi scope partizione, rilettura
+post-lock nella stessa explicit transaction e lo stesso ordine nel write-back
+GDS. I test concorrenti su Neo4j reale coprono sia node move sia endpoint move.
 
 Evidenza locale verde:
 
