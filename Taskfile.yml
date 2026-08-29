@@ -95,6 +95,10 @@ tasks:
           -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
           -keyout "${ECI_ENVOY_TLS_DIR}/tls.key" -out "${ECI_ENVOY_TLS_DIR}/tls.crt" \
           >/dev/null 2>&1
+        # This identity exists only for config validation. Make the bind-mounted
+        # files readable by the image's non-root Envoy UID; the trap removes them.
+        chmod 0755 "${ECI_ENVOY_TLS_DIR}"
+        chmod 0644 "${ECI_ENVOY_TLS_DIR}/tls.key" "${ECI_ENVOY_TLS_DIR}/tls.crt"
         docker run --rm \
           -v "{{.ROOT_DIR}}/deploy/envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro" \
           -v "{{.ROOT_DIR}}/deploy/envoy/retrieval.pb:/etc/envoy/retrieval.pb:ro" \
