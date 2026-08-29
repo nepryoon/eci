@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,9 +46,12 @@ import (
 
 const envoyImage = "envoyproxy/envoy:v1.39.0@sha256:d59f7f5fa10cff6d5892b6c5e7df5c9297ddfb2c3683e33fbfb82da24de4fa66"
 
-type integrationAuthenticator struct{}
+type integrationAuthenticator struct {
+	calls atomic.Int64
+}
 
-func (integrationAuthenticator) Authenticate(_ context.Context, header, traceID string) (*retrievalv1.SecurityContext, error) {
+func (a *integrationAuthenticator) Authenticate(_ context.Context, header, traceID string) (*retrievalv1.SecurityContext, error) {
+	a.calls.Add(1)
 	identity := map[string][2]string{
 		"Bearer integration-valid": {"tenant-a", "alice"},
 		"Bearer integration-bob":   {"tenant-b", "bob"},
@@ -183,7 +187,8 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 	}
 	grpcListener, grpcServer := startIntegrationGRPC(t, backend)
 	grpcPort := listenerPort(t, grpcListener)
-	helperListener, helperServer := startIntegrationHelper(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(grpcPort)))
+	authenticator := new(integrationAuthenticator)
+	helperListener, helperServer := startIntegrationHelper(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(grpcPort)), authenticator)
 	helperPort := listenerPort(t, helperListener)
 
 	root := filepath.Clean(filepath.Join("..", "..", "..", ".."))
@@ -430,6 +435,31 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 		}
 	})
 
+	t.Run("coarse pre-auth limit protects verifier and backend", func(t *testing.T) {
+		beforeBackend := len(backend.snapshot())
+		beforeAuth := authenticator.calls.Load()
+		limited := 0
+		const attempts = 150
+		for index := 0; index < attempts; index++ {
+			response := postJSON(t, baseURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", `{}`, fmt.Sprintf("Bearer invalid-%d", index))
+			if response.StatusCode == http.StatusTooManyRequests {
+				limited++
+				if response.Header.Get("Retry-After") == "" {
+					t.Fatal("pre-auth 429 omitted Retry-After")
+				}
+			} else if response.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("unexpected invalid-token status=%d", response.StatusCode)
+			}
+			_ = response.Body.Close()
+		}
+		if limited == 0 || authenticator.calls.Load()-beforeAuth >= attempts {
+			t.Fatalf("limited=%d verifier calls=%d attempts=%d", limited, authenticator.calls.Load()-beforeAuth, attempts)
+		}
+		if len(backend.snapshot()) != beforeBackend {
+			t.Fatal("unauthenticated flood reached backend")
+		}
+	})
+
 	t.Run("auth helper outage fails closed", func(t *testing.T) {
 		if err := helperServer.Shutdown(ctx); err != nil {
 			t.Fatal(err)
@@ -463,7 +493,7 @@ func startIntegrationGRPC(t *testing.T, backend *integrationBackend) (net.Listen
 	return listener, server
 }
 
-func startIntegrationHelper(t *testing.T, retrievalAddress string) (net.Listener, *http.Server) {
+func startIntegrationHelper(t *testing.T, retrievalAddress string, authenticator Authenticator) (net.Listener, *http.Server) {
 	t.Helper()
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
 	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
@@ -479,7 +509,7 @@ func startIntegrationHelper(t *testing.T, retrievalAddress string) (net.Listener
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = connection.Close() })
-	handler, err := NewEdgeHandler(integrationAuthenticator{}, retrievalv1.NewRetrievalEngineClient(connection), EdgeConfig{
+	handler, err := NewEdgeHandler(authenticator, retrievalv1.NewRetrievalEngineClient(connection), EdgeConfig{
 		RequestTimeout: 200 * time.Millisecond,
 		Registerer:     prometheus.NewRegistry(),
 		Tracer:         provider.Tracer("integration"),

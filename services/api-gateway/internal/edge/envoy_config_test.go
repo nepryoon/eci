@@ -19,6 +19,7 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 	config := string(contents)
 	ordered := []string{
 		"envoy.filters.http.header_mutation",
+		"eci.filters.http.pre_auth_local_ratelimit",
 		"envoy.filters.http.ext_authz",
 		"envoy.filters.http.header_mutation",
 		"envoy.filters.http.local_ratelimit",
@@ -46,6 +47,7 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 		"descriptor_key: authenticated_caller",
 		"key: authenticated_caller",
 		"max_dynamic_descriptors: 10000",
+		"stat_prefix: eci_edge_pre_auth",
 		"failure_mode_allow: false",
 		"max_request_bytes: 1048576",
 		"reject_unknown_method: true",
