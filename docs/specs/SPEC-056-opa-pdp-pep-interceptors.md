@@ -40,6 +40,7 @@ type DecisionClient interface {
 
 func New(ctx context.Context, cfg Config, registerer prometheus.Registerer) (*Client, error)
 func UnaryServerInterceptor(client DecisionClient) grpc.UnaryServerInterceptor
+func StreamServerInterceptor(client DecisionClient) grpc.StreamServerInterceptor
 ```
 
 Richiesta OPA, costruita internamente e non esposta come input del chiamante:
@@ -109,9 +110,10 @@ OPA_ALLOW_INSECURE_HTTP  default false; true solo nello stack dev/test
    `acl_groups` vuoti, **quando** la policy è valutata, **allora** il risultato è
    deterministico `allow=false` con la reason chiusa appropriata; nessun default
    tenant/repository/gruppo è inventato.
-7. **Dato** Retrieval Engine o Semantic Cache avviato, **quando** serve una RPC,
-   **allora** la catena esegue prima l'estrazione `secctx`, poi il PEP OPA, poi
-   l'handler; entrambi i server hanno lo stesso comportamento fail-closed.
+7. **Dato** Retrieval Engine o Semantic Cache avviato, **quando** serve una RPC
+   unary o server-streaming, **allora** la catena esegue prima l'estrazione
+   `secctx`, poi il PEP OPA, poi l'handler; entrambi i server hanno lo stesso
+   comportamento fail-closed e `ImpactAnalysis` non può bypassare il PEP.
 8. **Dato** il file Rego reale, **quando** viene eseguito il corpus di test OPA,
    **allora** allow, deny, scope vuoto, azione sconosciuta, confusione tra tenant
    e input controllato e ordinamento irrilevante degli scope sono verificati
@@ -175,8 +177,9 @@ nessuna cache decisionale, enforcement server-side su ogni server gRPC.
 
 ## 7. Test plan
 
-- Unit Go `libs/go/eci/authz`: scenari 1–7 con `bufconn`, fake PDP osservabile,
-  server HTTP controllato, deadline, redirect, response bound/schema e metriche.
+- Unit Go `libs/go/eci/authz`: scenari 1–7 unary e stream con fake PDP
+  osservabile, server HTTP controllato, deadline, redirect, response
+  bound/schema e metriche.
 - Policy `deploy/compose/opa/policies/eci_authz_test.rego`: scenario 8 e tabella
   completa allow/deny; eseguita con immagine ufficiale pin
   `openpolicyagent/opa:1.20.1`.
@@ -212,6 +215,8 @@ package/file/wiring assente prima dell'implementazione.
 - [ ] Missing/malformed context, deny, timeout, outage e malformed PDP response
   sono fail-closed e non invocano l'handler.
 - [ ] Retrieval Engine e Semantic Cache installano `secctx -> authz`.
+- [ ] `ImpactAnalysis` server-streaming attraversa il PEP; non esiste un path
+  stream non protetto.
 - [ ] Lo stack dev include OPA pin, healthcheck e policy read-only; nessun secret.
 - [ ] Metriche/span hanno nomi e cardinalità conformi a §8.
 - [ ] Nessun file in `docs/add/**` o `contracts/**` cambia.

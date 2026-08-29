@@ -165,3 +165,37 @@ func (c *recordingDecisionClient) errString() string {
 	}
 	return c.err.Error()
 }
+
+type testServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *testServerStream) Context() context.Context { return s.ctx }
+
+func TestStreamPEPProtectsImpactAnalysis(t *testing.T) {
+	const impactMethod = "/eci.retrieval.v1.RetrievalEngine/ImpactAnalysis"
+	sc := &retrievalv1.SecurityContext{
+		TenantId: "tenant-a", UserId: "user-a",
+		AllowedRepos: []string{"repo-a"}, AclGroups: []string{"engineering"},
+	}
+	client := &recordingDecisionClient{decision: Decision{Allow: true, Reason: "allow"}}
+	stream := &testServerStream{ctx: incomingContext(t, sc)}
+	info := &grpc.StreamServerInfo{FullMethod: impactMethod, IsServerStream: true}
+	handlerCalls := 0
+
+	extract := secctx.StreamServerInterceptor()
+	pep := StreamServerInterceptor(client)
+	err := extract(nil, stream, info, func(srv any, extracted grpc.ServerStream) error {
+		return pep(srv, extracted, info, func(any, grpc.ServerStream) error {
+			handlerCalls++
+			return nil
+		})
+	})
+	if err != nil {
+		t.Fatalf("stream chain: %v", err)
+	}
+	if handlerCalls != 1 || client.calls != 1 || client.method != impactMethod {
+		t.Fatalf("handler=%d PDP=%d method=%q", handlerCalls, client.calls, client.method)
+	}
+}
