@@ -17,6 +17,8 @@ import (
 	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
 	"github.com/eci-project/eci/services/api-gateway/internal/authn"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/sdk/trace"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -71,6 +73,12 @@ func encodedContext(t *testing.T, sc *retrievalv1.SecurityContext) string {
 		t.Fatal(err)
 	}
 	return base64.StdEncoding.EncodeToString(raw)
+}
+
+func setTrustedRequestHeaders(t *testing.T, request *http.Request, sc *retrievalv1.SecurityContext) {
+	t.Helper()
+	request.Header.Set(SecurityContextHeader, encodedContext(t, sc))
+	request.Header.Set("traceparent", "00-"+sc.GetTraceId()+"-1111111111111111-01")
 }
 
 func newTestHandler(t *testing.T, auth Authenticator, impact ImpactClient, random io.Reader) http.Handler {
@@ -167,6 +175,33 @@ func TestAuthorizeFailsClosedForAuthAndEntropyErrors(t *testing.T) {
 	}
 }
 
+func TestAuthorizePreservesValidAuthenticatedEmptyScopeForDownstreamPEP(t *testing.T) {
+	securityContext := testSecurityContext()
+	securityContext.AllowedRepos = nil
+	securityContext.AclGroups = nil
+	handler := newTestHandler(t, &fakeAuthenticator{result: securityContext}, noStreamClient(), bytes.NewReader(bytes.Repeat([]byte{0x11}, 24)))
+	request := httptest.NewRequest(http.MethodGet, "/authorize/x", nil)
+	request.Header.Set("Authorization", "Bearer valid-no-access-token")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	raw, err := base64.StdEncoding.DecodeString(response.Header().Get(SecurityContextHeader))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := new(retrievalv1.SecurityContext)
+	if err := proto.Unmarshal(raw, got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.GetAllowedRepos()) != 0 || len(got.GetAclGroups()) != 0 {
+		t.Fatalf("empty authenticated scope was defaulted: %v", got)
+	}
+}
+
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, errors.New("entropy unavailable") }
@@ -175,9 +210,11 @@ func TestSSEUsesOnlyAuthenticatedMetadataAndClearsForgedBodyScope(t *testing.T) 
 	sc := testSecurityContext()
 	var captured *retrievalv1.ImpactAnalysisRequest
 	var capturedMD metadata.MD
+	var capturedTraceID string
 	client := &fakeImpactClient{call: func(ctx context.Context, req *retrievalv1.ImpactAnalysisRequest) (grpc.ServerStreamingClient[retrievalv1.ImpactAnalysisEvent], error) {
 		captured = proto.Clone(req).(*retrievalv1.ImpactAnalysisRequest)
 		capturedMD, _ = metadata.FromOutgoingContext(ctx)
+		capturedTraceID = oteltrace.SpanContextFromContext(ctx).TraceID().String()
 		done := false
 		return &fakeStream{ctx: ctx, recv: func() (*retrievalv1.ImpactAnalysisEvent, error) {
 			if done {
@@ -187,10 +224,21 @@ func TestSSEUsesOnlyAuthenticatedMetadataAndClearsForgedBodyScope(t *testing.T) 
 			return &retrievalv1.ImpactAnalysisEvent{Event: &retrievalv1.ImpactAnalysisEvent_Progress{Progress: &retrievalv1.ImpactProgress{NodesEmitted: 1}}}, nil
 		}}, nil
 	}}
-	handler := newTestHandler(t, &fakeAuthenticator{}, client, bytes.NewReader(make([]byte, 24)))
+	provider := trace.NewTracerProvider(trace.WithSampler(trace.AlwaysSample()))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	handler, err := NewEdgeHandler(&fakeAuthenticator{}, client, EdgeConfig{
+		MaxJSONBodyBytes: 1024,
+		RequestTimeout:   time.Second,
+		Random:           bytes.NewReader(make([]byte, 24)),
+		Registerer:       prometheus.NewRegistry(),
+		Tracer:           provider.Tracer("test"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	body := `{"securityContext":{"tenantId":"tenant-b","allowedRepos":["secret"]},"entryNodeId":"A","maxDepth":2}`
 	req := httptest.NewRequest(http.MethodPost, SSEPath, strings.NewReader(body))
-	req.Header.Set(SecurityContextHeader, encodedContext(t, sc))
+	setTrustedRequestHeaders(t, req, sc)
 	response := httptest.NewRecorder()
 
 	handler.ServeHTTP(response, req)
@@ -208,6 +256,9 @@ func TestSSEUsesOnlyAuthenticatedMetadataAndClearsForgedBodyScope(t *testing.T) 
 	raw, _ := proto.Marshal(sc)
 	if values[0] != string(raw) {
 		t.Fatal("outgoing SecurityContext did not match authenticated header")
+	}
+	if capturedTraceID != sc.GetTraceId() {
+		t.Fatalf("downstream trace=%q security trace=%q", capturedTraceID, sc.GetTraceId())
 	}
 	if !strings.Contains(response.Body.String(), "data: {") || strings.Contains(response.Body.String(), "tenant-b") {
 		t.Fatalf("SSE body=%q", response.Body.String())
@@ -234,7 +285,7 @@ func TestSSEFlushesFirstFrameBeforeStreamCompletes(t *testing.T) {
 	server := httptest.NewServer(newTestHandler(t, &fakeAuthenticator{}, client, bytes.NewReader(make([]byte, 24))))
 	defer server.Close()
 	req, _ := http.NewRequest(http.MethodPost, server.URL+SSEPath, strings.NewReader(`{"entryNodeId":"A"}`))
-	req.Header.Set(SecurityContextHeader, encodedContext(t, testSecurityContext()))
+	setTrustedRequestHeaders(t, req, testSecurityContext())
 	ctx, cancel := context.WithTimeout(req.Context(), 2*time.Second)
 	defer cancel()
 	response, err := http.DefaultClient.Do(req.WithContext(ctx))
@@ -261,7 +312,7 @@ func TestSSEMapsPreHeaderErrorAndCancelsOpenStream(t *testing.T) {
 		}}
 		handler := newTestHandler(t, &fakeAuthenticator{}, client, bytes.NewReader(make([]byte, 24)))
 		req := httptest.NewRequest(http.MethodPost, SSEPath, strings.NewReader(`{"entryNodeId":"A"}`))
-		req.Header.Set(SecurityContextHeader, encodedContext(t, testSecurityContext()))
+		setTrustedRequestHeaders(t, req, testSecurityContext())
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, req)
 		if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), "database") {
@@ -281,7 +332,7 @@ func TestSSEMapsPreHeaderErrorAndCancelsOpenStream(t *testing.T) {
 		handler := newTestHandler(t, &fakeAuthenticator{}, client, bytes.NewReader(make([]byte, 24)))
 		ctx, cancel := context.WithCancel(context.Background())
 		req := httptest.NewRequest(http.MethodPost, SSEPath, strings.NewReader(`{"entryNodeId":"A"}`)).WithContext(ctx)
-		req.Header.Set(SecurityContextHeader, encodedContext(t, testSecurityContext()))
+		setTrustedRequestHeaders(t, req, testSecurityContext())
 		done := make(chan struct{})
 		go func() { handler.ServeHTTP(httptest.NewRecorder(), req); close(done) }()
 		cancel()
@@ -298,24 +349,28 @@ func TestSSERejectsMalformedOversizedOrMissingAuthenticatedMetadata(t *testing.T
 	var calls int
 	client := &fakeImpactClient{call: func(context.Context, *retrievalv1.ImpactAnalysisRequest) (grpc.ServerStreamingClient[retrievalv1.ImpactAnalysisEvent], error) {
 		calls++
-		return nil, nil
+		return nil, status.Error(codes.Unavailable, "must not be reached")
 	}}
 	handler := newTestHandler(t, &fakeAuthenticator{}, client, bytes.NewReader(make([]byte, 24)))
 	tests := []struct {
 		name   string
 		body   string
 		header string
+		trace  string
 		want   int
 	}{
-		{"missing metadata", `{}`, "", http.StatusUnauthorized},
-		{"bad metadata", `{}`, "%%%", http.StatusUnauthorized},
-		{"bad json", `{`, encodedContext(t, testSecurityContext()), http.StatusBadRequest},
-		{"too large", `{"entryNodeId":"` + strings.Repeat("x", 1100) + `"}`, encodedContext(t, testSecurityContext()), http.StatusRequestEntityTooLarge},
+		{"missing metadata", `{}`, "", "", http.StatusUnauthorized},
+		{"bad metadata", `{}`, "%%%", trustedTraceparent(testSecurityContext()), http.StatusUnauthorized},
+		{"missing traceparent", `{}`, encodedContext(t, testSecurityContext()), "", http.StatusUnauthorized},
+		{"mismatched traceparent", `{}`, encodedContext(t, testSecurityContext()), "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1111111111111111-01", http.StatusUnauthorized},
+		{"bad json", `{`, encodedContext(t, testSecurityContext()), trustedTraceparent(testSecurityContext()), http.StatusBadRequest},
+		{"too large", `{"entryNodeId":"` + strings.Repeat("x", 1100) + `"}`, encodedContext(t, testSecurityContext()), trustedTraceparent(testSecurityContext()), http.StatusRequestEntityTooLarge},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, SSEPath, strings.NewReader(test.body))
 			req.Header.Set(SecurityContextHeader, test.header)
+			req.Header.Set("traceparent", test.trace)
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, req)
 			if response.Code != test.want {
@@ -325,5 +380,40 @@ func TestSSERejectsMalformedOversizedOrMissingAuthenticatedMetadata(t *testing.T
 	}
 	if calls != 0 {
 		t.Fatalf("backend calls=%d", calls)
+	}
+}
+
+func trustedTraceparent(sc *retrievalv1.SecurityContext) string {
+	return "00-" + sc.GetTraceId() + "-1111111111111111-01"
+}
+
+func TestSSEEmitsBoundedErrorWhenHelperDeadlineExpiresAfterFirstFrame(t *testing.T) {
+	client := &fakeImpactClient{call: func(ctx context.Context, _ *retrievalv1.ImpactAnalysisRequest) (grpc.ServerStreamingClient[retrievalv1.ImpactAnalysisEvent], error) {
+		count := 0
+		return &fakeStream{ctx: ctx, recv: func() (*retrievalv1.ImpactAnalysisEvent, error) {
+			count++
+			if count == 1 {
+				return &retrievalv1.ImpactAnalysisEvent{Event: &retrievalv1.ImpactAnalysisEvent_Progress{Progress: &retrievalv1.ImpactProgress{NodesEmitted: 1}}}, nil
+			}
+			<-ctx.Done()
+			return nil, status.FromContextError(ctx.Err()).Err()
+		}}, nil
+	}}
+	handler, err := NewEdgeHandler(&fakeAuthenticator{}, client, EdgeConfig{
+		RequestTimeout: 10 * time.Millisecond,
+		Registerer:     prometheus.NewRegistry(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, SSEPath, strings.NewReader(`{"entryNodeId":"A"}`))
+	setTrustedRequestHeaders(t, request, testSecurityContext())
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "event: error") ||
+		!strings.Contains(response.Body.String(), `{"code":"stream_error"}`) {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
 	}
 }

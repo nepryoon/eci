@@ -36,6 +36,8 @@ func TestEnvoyConfigurationPreservesSecurityFilterOrderAndStrictness(t *testing.
 	for _, required := range []string{
 		"remove: eci-security-context-bin",
 		"remove: traceparent",
+		"remove: tracestate",
+		"remove: baggage",
 		"failure_mode_allow: false",
 		"max_request_bytes: 1048576",
 		"reject_unknown_method: true",
