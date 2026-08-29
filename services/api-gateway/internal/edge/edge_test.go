@@ -1,0 +1,328 @@
+package edge
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/base64"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
+	"github.com/eci-project/eci/services/api-gateway/internal/authn"
+	"github.com/prometheus/client_golang/prometheus"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+)
+
+type fakeAuthenticator struct {
+	result       *retrievalv1.SecurityContext
+	err          error
+	header       string
+	trustedTrace string
+	calls        int
+}
+
+func (f *fakeAuthenticator) Authenticate(_ context.Context, header, trace string) (*retrievalv1.SecurityContext, error) {
+	f.calls++
+	f.header = header
+	f.trustedTrace = trace
+	return f.result, f.err
+}
+
+type fakeImpactClient struct {
+	call func(context.Context, *retrievalv1.ImpactAnalysisRequest) (grpc.ServerStreamingClient[retrievalv1.ImpactAnalysisEvent], error)
+}
+
+func (f *fakeImpactClient) ImpactAnalysis(ctx context.Context, req *retrievalv1.ImpactAnalysisRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[retrievalv1.ImpactAnalysisEvent], error) {
+	return f.call(ctx, req)
+}
+
+type fakeStream struct {
+	grpc.ClientStream
+	ctx  context.Context
+	recv func() (*retrievalv1.ImpactAnalysisEvent, error)
+}
+
+func (s *fakeStream) Context() context.Context                        { return s.ctx }
+func (s *fakeStream) Recv() (*retrievalv1.ImpactAnalysisEvent, error) { return s.recv() }
+
+func testSecurityContext() *retrievalv1.SecurityContext {
+	return &retrievalv1.SecurityContext{
+		TenantId: "tenant-a", UserId: "alice",
+		AllowedRepos: []string{"repo-a"}, AclGroups: []string{"dev"},
+		TraceId: "0123456789abcdef0123456789abcdef",
+	}
+}
+
+func encodedContext(t *testing.T, sc *retrievalv1.SecurityContext) string {
+	t.Helper()
+	raw, err := proto.Marshal(sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
+func newTestHandler(t *testing.T, auth Authenticator, impact ImpactClient, random io.Reader) http.Handler {
+	t.Helper()
+	handler, err := NewEdgeHandler(auth, impact, EdgeConfig{
+		MaxJSONBodyBytes: 1024,
+		RequestTimeout:   time.Second,
+		Random:           random,
+		Registerer:       prometheus.NewRegistry(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return handler
+}
+
+func noStreamClient() ImpactClient {
+	return &fakeImpactClient{call: func(context.Context, *retrievalv1.ImpactAnalysisRequest) (grpc.ServerStreamingClient[retrievalv1.ImpactAnalysisEvent], error) {
+		return nil, status.Error(codes.Unavailable, "unused")
+	}}
+}
+
+func TestAuthorizeDerivesAndReplacesReservedMetadata(t *testing.T) {
+	auth := &fakeAuthenticator{result: testSecurityContext()}
+	random := bytes.NewReader(bytes.Repeat([]byte{0x11}, 24))
+	handler := newTestHandler(t, auth, noStreamClient(), random)
+	req := httptest.NewRequest(http.MethodPost, "/authorize/eci.retrieval.v1.RetrievalEngine/GetNode", strings.NewReader("secret prompt must not be read"))
+	req.Header.Set("Authorization", "Bearer signed-token")
+	req.Header.Set(SecurityContextHeader, "forged")
+	req.Header.Set("traceparent", "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, req)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	if auth.header != "Bearer signed-token" || auth.calls != 1 {
+		t.Fatalf("auth call=%d header=%q", auth.calls, auth.header)
+	}
+	if auth.trustedTrace != strings.Repeat("11", 16) {
+		t.Fatalf("trusted trace=%q", auth.trustedTrace)
+	}
+	if got := response.Header().Get("traceparent"); got != "00-"+strings.Repeat("11", 16)+"-"+strings.Repeat("11", 8)+"-01" {
+		t.Fatalf("traceparent=%q", got)
+	}
+	raw, err := base64.StdEncoding.DecodeString(response.Header().Get(SecurityContextHeader))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := new(retrievalv1.SecurityContext)
+	if err := proto.Unmarshal(raw, got); err != nil {
+		t.Fatal(err)
+	}
+	want := testSecurityContext()
+	want.TraceId = strings.Repeat("11", 16)
+	if !proto.Equal(got, want) {
+		t.Fatalf("context=%v", got)
+	}
+	if strings.Contains(response.Body.String(), "signed-token") || strings.Contains(response.Body.String(), "secret prompt") {
+		t.Fatal("secret reflected in auth response")
+	}
+}
+
+func TestAuthorizeFailsClosedForAuthAndEntropyErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		auth   *fakeAuthenticator
+		random io.Reader
+		want   int
+	}{
+		{"invalid token", &fakeAuthenticator{err: &authn.AuthError{Code: authn.ErrorInvalidToken}}, bytes.NewReader(make([]byte, 24)), http.StatusUnauthorized},
+		{"auth backend", &fakeAuthenticator{err: errors.New("oidc down")}, bytes.NewReader(make([]byte, 24)), http.StatusServiceUnavailable},
+		{"entropy", &fakeAuthenticator{result: testSecurityContext()}, errReader{}, http.StatusServiceUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := newTestHandler(t, test.auth, noStreamClient(), test.random)
+			req := httptest.NewRequest(http.MethodGet, "/authorize/x", nil)
+			req.Header.Set("Authorization", "Bearer token")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, req)
+			if response.Code != test.want {
+				t.Fatalf("status=%d want=%d body=%q", response.Code, test.want, response.Body.String())
+			}
+			if response.Header().Get(SecurityContextHeader) != "" {
+				t.Fatal("security metadata emitted on failure")
+			}
+			if strings.Contains(response.Body.String(), "oidc down") {
+				t.Fatal("internal auth error leaked")
+			}
+		})
+	}
+}
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("entropy unavailable") }
+
+func TestSSEUsesOnlyAuthenticatedMetadataAndClearsForgedBodyScope(t *testing.T) {
+	sc := testSecurityContext()
+	var captured *retrievalv1.ImpactAnalysisRequest
+	var capturedMD metadata.MD
+	client := &fakeImpactClient{call: func(ctx context.Context, req *retrievalv1.ImpactAnalysisRequest) (grpc.ServerStreamingClient[retrievalv1.ImpactAnalysisEvent], error) {
+		captured = proto.Clone(req).(*retrievalv1.ImpactAnalysisRequest)
+		capturedMD, _ = metadata.FromOutgoingContext(ctx)
+		done := false
+		return &fakeStream{ctx: ctx, recv: func() (*retrievalv1.ImpactAnalysisEvent, error) {
+			if done {
+				return nil, io.EOF
+			}
+			done = true
+			return &retrievalv1.ImpactAnalysisEvent{Event: &retrievalv1.ImpactAnalysisEvent_Progress{Progress: &retrievalv1.ImpactProgress{NodesEmitted: 1}}}, nil
+		}}, nil
+	}}
+	handler := newTestHandler(t, &fakeAuthenticator{}, client, bytes.NewReader(make([]byte, 24)))
+	body := `{"securityContext":{"tenantId":"tenant-b","allowedRepos":["secret"]},"entryNodeId":"A","maxDepth":2}`
+	req := httptest.NewRequest(http.MethodPost, SSEPath, strings.NewReader(body))
+	req.Header.Set(SecurityContextHeader, encodedContext(t, sc))
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, req)
+
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("status=%d content-type=%q body=%q", response.Code, response.Header().Get("Content-Type"), response.Body.String())
+	}
+	if captured.GetSecurityContext() != nil || captured.GetEntryNodeId() != "A" || captured.GetMaxDepth() != 2 {
+		t.Fatalf("captured request=%v", captured)
+	}
+	values := capturedMD.Get(SecurityContextMetadataKey)
+	if len(values) != 1 {
+		t.Fatalf("metadata=%v", capturedMD)
+	}
+	raw, _ := proto.Marshal(sc)
+	if values[0] != string(raw) {
+		t.Fatal("outgoing SecurityContext did not match authenticated header")
+	}
+	if !strings.Contains(response.Body.String(), "data: {") || strings.Contains(response.Body.String(), "tenant-b") {
+		t.Fatalf("SSE body=%q", response.Body.String())
+	}
+}
+
+func TestSSEFlushesFirstFrameBeforeStreamCompletes(t *testing.T) {
+	release := make(chan struct{})
+	var once sync.Once
+	client := &fakeImpactClient{call: func(ctx context.Context, _ *retrievalv1.ImpactAnalysisRequest) (grpc.ServerStreamingClient[retrievalv1.ImpactAnalysisEvent], error) {
+		count := 0
+		return &fakeStream{ctx: ctx, recv: func() (*retrievalv1.ImpactAnalysisEvent, error) {
+			count++
+			if count == 1 {
+				return &retrievalv1.ImpactAnalysisEvent{Event: &retrievalv1.ImpactAnalysisEvent_Progress{Progress: &retrievalv1.ImpactProgress{NodesEmitted: 1}}}, nil
+			}
+			<-release
+			if count == 2 {
+				return &retrievalv1.ImpactAnalysisEvent{Event: &retrievalv1.ImpactAnalysisEvent_Progress{Progress: &retrievalv1.ImpactProgress{NodesEmitted: 2}}}, nil
+			}
+			return nil, io.EOF
+		}}, nil
+	}}
+	server := httptest.NewServer(newTestHandler(t, &fakeAuthenticator{}, client, bytes.NewReader(make([]byte, 24))))
+	defer server.Close()
+	req, _ := http.NewRequest(http.MethodPost, server.URL+SSEPath, strings.NewReader(`{"entryNodeId":"A"}`))
+	req.Header.Set(SecurityContextHeader, encodedContext(t, testSecurityContext()))
+	ctx, cancel := context.WithTimeout(req.Context(), 2*time.Second)
+	defer cancel()
+	response, err := http.DefaultClient.Do(req.WithContext(ctx))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	reader := bufio.NewReader(response.Body)
+	first, err := reader.ReadString('\n')
+	if err != nil || !strings.Contains(first, `"nodesEmitted":1`) {
+		t.Fatalf("first frame line=%q err=%v", first, err)
+	}
+	once.Do(func() { close(release) })
+	rest, err := io.ReadAll(reader)
+	if err != nil || !strings.Contains(string(rest), `"nodesEmitted":2`) {
+		t.Fatalf("remaining=%q err=%v", rest, err)
+	}
+}
+
+func TestSSEMapsPreHeaderErrorAndCancelsOpenStream(t *testing.T) {
+	t.Run("pre-header", func(t *testing.T) {
+		client := &fakeImpactClient{call: func(context.Context, *retrievalv1.ImpactAnalysisRequest) (grpc.ServerStreamingClient[retrievalv1.ImpactAnalysisEvent], error) {
+			return nil, status.Error(codes.Unavailable, "database details")
+		}}
+		handler := newTestHandler(t, &fakeAuthenticator{}, client, bytes.NewReader(make([]byte, 24)))
+		req := httptest.NewRequest(http.MethodPost, SSEPath, strings.NewReader(`{"entryNodeId":"A"}`))
+		req.Header.Set(SecurityContextHeader, encodedContext(t, testSecurityContext()))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), "database") {
+			t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("cancel", func(t *testing.T) {
+		observed := make(chan struct{})
+		client := &fakeImpactClient{call: func(ctx context.Context, _ *retrievalv1.ImpactAnalysisRequest) (grpc.ServerStreamingClient[retrievalv1.ImpactAnalysisEvent], error) {
+			return &fakeStream{ctx: ctx, recv: func() (*retrievalv1.ImpactAnalysisEvent, error) {
+				<-ctx.Done()
+				close(observed)
+				return nil, ctx.Err()
+			}}, nil
+		}}
+		handler := newTestHandler(t, &fakeAuthenticator{}, client, bytes.NewReader(make([]byte, 24)))
+		ctx, cancel := context.WithCancel(context.Background())
+		req := httptest.NewRequest(http.MethodPost, SSEPath, strings.NewReader(`{"entryNodeId":"A"}`)).WithContext(ctx)
+		req.Header.Set(SecurityContextHeader, encodedContext(t, testSecurityContext()))
+		done := make(chan struct{})
+		go func() { handler.ServeHTTP(httptest.NewRecorder(), req); close(done) }()
+		cancel()
+		select {
+		case <-observed:
+		case <-time.After(time.Second):
+			t.Fatal("downstream context was not cancelled")
+		}
+		<-done
+	})
+}
+
+func TestSSERejectsMalformedOversizedOrMissingAuthenticatedMetadata(t *testing.T) {
+	var calls int
+	client := &fakeImpactClient{call: func(context.Context, *retrievalv1.ImpactAnalysisRequest) (grpc.ServerStreamingClient[retrievalv1.ImpactAnalysisEvent], error) {
+		calls++
+		return nil, nil
+	}}
+	handler := newTestHandler(t, &fakeAuthenticator{}, client, bytes.NewReader(make([]byte, 24)))
+	tests := []struct {
+		name   string
+		body   string
+		header string
+		want   int
+	}{
+		{"missing metadata", `{}`, "", http.StatusUnauthorized},
+		{"bad metadata", `{}`, "%%%", http.StatusUnauthorized},
+		{"bad json", `{`, encodedContext(t, testSecurityContext()), http.StatusBadRequest},
+		{"too large", `{"entryNodeId":"` + strings.Repeat("x", 1100) + `"}`, encodedContext(t, testSecurityContext()), http.StatusRequestEntityTooLarge},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, SSEPath, strings.NewReader(test.body))
+			req.Header.Set(SecurityContextHeader, test.header)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, req)
+			if response.Code != test.want {
+				t.Fatalf("status=%d want=%d body=%q", response.Code, test.want, response.Body.String())
+			}
+		})
+	}
+	if calls != 0 {
+		t.Fatalf("backend calls=%d", calls)
+	}
+}
