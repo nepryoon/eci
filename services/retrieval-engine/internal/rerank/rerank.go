@@ -101,9 +101,9 @@ func candidateText(n hybridsearch.RetrievedNode) string {
 
 // neo4jImpactScoreFetcher — SPEC-044 §2 punto 3: UNA sola query batch
 // (UNWIND) per l'intero candidate set, non N query separate.
-// OPTIONAL MATCH copre sia "nodo esistente ma impact_score mai scritto"
-// sia "nodo non trovato affatto" — in ENTRAMBI i casi il chiamante vede
-// semplicemente l'assenza dalla mappa ritornata (SPEC-044 §3 scenario 4).
+// MATCH restituisce soltanto nodi con scope, provenance e generation correnti;
+// nodo assente, score mai scritto o fence stale producono tutti assenza dalla
+// mappa e quindi boost 0.0, senza existence oracle (ADR-0015).
 func neo4jImpactScoreFetcher(driver neo4j.DriverWithContext) impactScoreFetchFunc {
 	return func(ctx context.Context, nodeIDs []string) (map[string]float64, error) {
 		scope, err := accessscope.FromContext(ctx)
@@ -117,10 +117,19 @@ func neo4jImpactScoreFetcher(driver neo4j.DriverWithContext) impactScoreFetchFun
 		params["node_ids"] = nodeIDs
 		result, err := session.Run(ctx, `
 			UNWIND $node_ids AS id
-			OPTIONAL MATCH (n:CodeNode {id: id})
+			MATCH (n:CodeNode {id: id})
+			MATCH (p:GDSPartition {
+			  tenant_id: n.tenant_id,
+			  repo: n.repo,
+			  acl_group: n.acl_group
+			})
 			WHERE n.tenant_id = $tenant_id
 			  AND n.repo IN $allowed_repos
 			  AND n.acl_group IN $acl_groups
+			  AND n.impact_tenant_id = n.tenant_id
+			  AND n.impact_repo = n.repo
+			  AND n.impact_acl_group = n.acl_group
+			  AND n.impact_generation = p.generation
 			RETURN id AS node_id, n.impact_score AS impact_score
 		`, params)
 		if err != nil {

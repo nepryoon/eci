@@ -51,6 +51,8 @@ tasks:
       - cd services/retrieval-engine && go test -tags=integration ./internal/server -run TestRetrievalEngineServer -v
       - cd services/retrieval-engine && go test -tags=integration ./internal/hybridsearch -run 'TestHybridSearchIntegration|TestHybridGraphVectorSearchContentHydration' -v
       - cd services/semantic-cache && go test -tags=integration ./internal/server -run TestSemanticCacheServer -v
+      - cd tools/gds-impact && go test -tags=integration ./internal/gdsimpact/... -run TestGDSImpact -v
+      - cd services/retrieval-engine && go test -tags=integration ./internal/rerank -run TestRerankIntegration -v
       - bash scripts/test-minio-worm.sh
 
   proto:gen:

@@ -25,8 +25,8 @@ Target Taskfile: `task db:neo4j:migrate` (sostituisce il placeholder di SPEC-001
 
 1. **Dato** un'istanza Neo4j vuota, **quando** eseguo `task db:neo4j:migrate`, **allora** tutti i constraint e gli indici elencati in D3 vengono creati (verifica via `SHOW CONSTRAINTS` e `SHOW INDEXES`).
 2. **Dato** lo stesso DB già migrato, **quando** rieseguo `task db:neo4j:migrate`, **allora** il comando termina con successo senza errori (idempotenza garantita da `IF NOT EXISTS` nel DDL).
-3. **Dato** il DB migrato, **quando** interrogo `SHOW CONSTRAINTS`, **allora** trovo esattamente: `code_node_id`, `file_path_unique`, `method_symbol_unique` (i property existence constraint `code_node_id_exists`/`code_node_domain_exists` sono stati rimossi, vedi [ADR-0004](../decisions/ADR-0004-rimuovi-existence-constraint-neo4j.md) e §10.7; il property type constraint `emb_vector_type` è stato rimosso a sua volta, vedi [ADR-0005](../decisions/ADR-0005-rimuovi-emb-vector-type-constraint.md) e §10.8).
-4. **Dato** il DB migrato, **quando** interrogo `SHOW INDEXES`, **allora** trovo gli indici range (`code_node_ast_hash`, `code_node_domain`, `method_name`, `rel_commit`), full-text (`code_fulltext`, `doc_fulltext`) e l'indice vettoriale nativo (`code_embeddings`, 1536 dimensioni, cosine).
+3. **Dato** il DB migrato, **quando** interrogo `SHOW CONSTRAINTS`, **allora** trovo esattamente: `code_node_id`, `file_path_unique`, `method_symbol_unique`, `gds_partition_scope_unique` (quest'ultimo è l'estensione D3 additiva di [ADR-0015](../decisions/ADR-0015-gds-partition-generations.md); i property existence constraint `code_node_id_exists`/`code_node_domain_exists` sono stati rimossi, vedi [ADR-0004](../decisions/ADR-0004-rimuovi-existence-constraint-neo4j.md) e §10.7; il property type constraint `emb_vector_type` è stato rimosso a sua volta, vedi [ADR-0005](../decisions/ADR-0005-rimuovi-emb-vector-type-constraint.md) e §10.8).
+4. **Dato** il DB migrato, **quando** interrogo `SHOW INDEXES`, **allora** trovo gli indici range (`code_node_ast_hash`, `code_node_domain`, `code_node_security_scope`, `method_name`, `rel_commit`), full-text (`code_fulltext`, `doc_fulltext`) e l'indice vettoriale nativo (`code_embeddings`, 1536 dimensioni, cosine).
 5. **Dato** `examples.cypher`, **quando** eseguo `task db:neo4j:migrate`, **allora** NESSUno dei blocchi MERGE al suo interno viene eseguito (verifica: il DB post-migrazione ha zero nodi `Method`/`Class`/ecc., solo lo schema).
 
 ## 4. Errori & edge case
@@ -53,10 +53,10 @@ Il runner stampa un riepilogo finale: N statement eseguiti, M già esistenti, 0 
 
 ## 9. Criteri di accettazione
 - [x] `schema.cypher` contiene solo DDL; `examples.cypher` contiene i MERGE spostati verbatim con l'intestazione di reference.
-- [ ] `task db:neo4j:migrate` verde su Neo4j Community vuoto (scenario 1, 3, 4) — **non verificato in questa sessione**, nessun daemon Docker disponibile nella sandbox (vedi §10.3). Runner e integration test sono scritti e compilano (`go build`/`go vet -tags=integration`); vanno eseguiti contro un Neo4j reale prima del merge.
-- [ ] Riesecuzione idempotente verificata (scenario 2) — coperta da `TestRunAllCountsCreatedAndAlreadyExists`/`TestMigrationAgainstRealNeo4j` a livello di logica (`runAll`, classificazione `Counters()`), ma non end-to-end contro un DB reale (stesso motivo di cui sopra).
-- [ ] Test che conferma zero nodi applicativi post-migrazione (scenario 5) — `assertNodeCountZero` scritto in `runner_integration_test.go`, non eseguito (nessun Docker).
-- [ ] README `deploy/compose` annota la nota Community/Enterprise di §6 — **non fatto**, `deploy/` è fuori dal perimetro di file assegnato per questa sessione (solo `contracts/cypher`, `tools/migrate-neo4j`, `Taskfile.yml`, `tests/`).
+- [x] `task db:neo4j:migrate` verde su Neo4j Community vuoto (scenario 1, 3, 4), verificato nuovamente da `TestMigrationAgainstRealNeo4j` durante T6.7 il 2026-08-29.
+- [x] Riesecuzione idempotente verificata end-to-end (scenario 2) dallo stesso test reale.
+- [x] Test che conferma zero nodi applicativi post-migrazione (scenario 5) eseguito sul Neo4j reale.
+- [x] README `deploy/compose` annota la nota Community/Enterprise di §6.
 
 ## 10. Deviazioni rispetto alla SPEC
 
@@ -160,4 +160,7 @@ Il runner stampa un riepilogo finale: N statement eseguiti, M già esistenti, 0 
    sull'applicazione (sink writer), coerente con la deviazione #7. Dettagli
    in [ADR-0005](../decisions/ADR-0005-rimuovi-emb-vector-type-constraint.md).
    Lo scenario 3 (§3) e i test di integrazione sono stati aggiornati di
-   conseguenza (3 constraint attesi, 10 statement totali).
+   conseguenza. ADR-0015 ha poi aggiunto il vincolo composito
+   `gds_partition_scope_unique`: il contratto corrente contiene 4 constraint
+   e 12 statement totali (incluso anche il range index security scope aggiunto
+   dalla Fase 6), entrambi verificati dal parser e dall'integration test.

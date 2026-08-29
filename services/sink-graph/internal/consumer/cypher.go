@@ -42,6 +42,26 @@ var allowedRelTypes = map[string]bool{
 	"CITES":        true,
 }
 
+// Tutte le mutation sink e il write-back GDS seguono lo stesso ordine totale:
+// CodeNode (per id) -> GDSPartition (per scope). Il primo statement viene
+// consumato nella stessa explicit transaction della mutation, quindi il lock
+// resta acquisito mentre lo scope precedente viene letto. Questo impedisce di
+// usare uno snapshot pre-lock durante update di ownership concorrenti.
+const lockCodeNodeQuery = `// sink-graph-lock-code-node
+MERGE (n:CodeNode {id: $id})
+SET n._eci_write_lock = coalesce(n._eci_write_lock, 0) + 1
+REMOVE n._eci_write_lock
+RETURN n.id AS id`
+
+const lockCodeRelationEndpointsQuery = `// sink-graph-lock-relation-endpoints
+UNWIND [$from_id, $to_id] AS endpoint_id
+WITH DISTINCT endpoint_id
+ORDER BY endpoint_id
+MERGE (endpoint:CodeNode {id: endpoint_id})
+SET endpoint._eci_write_lock = coalesce(endpoint._eci_write_lock, 0) + 1
+REMOVE endpoint._eci_write_lock
+RETURN count(endpoint) AS locked`
+
 // mergeCodeNodeQuery costruisce la query di MERGE per un CodeNode (SPEC-015
 // §2). I tre frammenti Cypher illustrativi della SPEC (query base + "SOLO
 // per Method" + "SOLO per File") sono unificati qui in una singola query
@@ -59,7 +79,24 @@ func mergeCodeNodeQuery(nodeType string) (string, error) {
 		)
 	}
 
-	query := "MERGE (n:CodeNode {id: $id})\n" +
+	// lockCodeNodeQuery ha già creato/bloccato n nella stessa transazione. Lo
+	// scope viene letto solo ora, dopo l'acquisizione del lock, quindi due move
+	// concorrenti non possono invalidare una partizione precedente obsoleta.
+	query := "MATCH (n:CodeNode {id: $id})\n" +
+		"WITH n, n.tenant_id AS old_tenant_id, n.repo AS old_repo, n.acl_group AS old_acl_group\n" +
+		"WITH n, [\n" +
+		"  {tenant_id: old_tenant_id, repo: old_repo, acl_group: old_acl_group},\n" +
+		"  {tenant_id: $tenant_id, repo: $repo, acl_group: $acl_group}\n" +
+		"] AS scopes\n" +
+		"UNWIND scopes AS scope\n" +
+		"WITH DISTINCT n, scope.tenant_id AS scope_tenant_id, scope.repo AS scope_repo, scope.acl_group AS scope_acl_group\n" +
+		"ORDER BY scope_tenant_id, scope_repo, scope_acl_group\n" +
+		"FOREACH (_ IN CASE WHEN scope_tenant_id IS NOT NULL AND scope_repo IS NOT NULL AND scope_acl_group IS NOT NULL THEN [1] ELSE [] END |\n" +
+		"  MERGE (p:GDSPartition {tenant_id: scope_tenant_id, repo: scope_repo, acl_group: scope_acl_group})\n" +
+		"  ON CREATE SET p.generation = 1, p.write_lock = 0\n" +
+		"  ON MATCH SET p.generation = coalesce(p.generation, 0) + 1\n" +
+		")\n" +
+		"WITH DISTINCT n\n" +
 		"SET n:" + nodeType + ", n.domain = $domain, n.name = $name, n.ast_hash = $ast_hash,\n" +
 		"    n.tenant_id = $tenant_id, n.repo = $repo, n.acl_group = $acl_group, n.path = $path"
 
@@ -78,6 +115,9 @@ func mergeCodeNodeQuery(nodeType string) (string, error) {
 // :CodeNode (mai una label specifica — non è garantito sapere il tipo
 // reale a questo punto del consumo, vedi commento in §2), weight
 // aggregato con lo stesso pattern del Cypher di riferimento D3 (SPEC-004).
+// Ogni mutazione della topologia incrementa inoltre la generation di entrambe
+// le partizioni endpoint: un singolo edge può cambiare lo score di qualunque
+// nodo della proiezione, non soltanto dei suoi estremi (ADR-0015).
 func mergeCodeRelationQuery(relType string) (string, error) {
 	if !allowedRelTypes[relType] {
 		return "", fmt.Errorf(
@@ -86,8 +126,27 @@ func mergeCodeRelationQuery(relType string) (string, error) {
 		)
 	}
 
-	query := "MERGE (from:CodeNode {id: $from_id})\n" +
-		"MERGE (to:CodeNode {id: $to_id})\n" +
+	// Gli endpoint sono già stati creati e bloccati, in ordine di id, da
+	// lockCodeRelationEndpointsQuery nella stessa transazione. Le label vengono
+	// quindi lette dalla versione committed più recente e non da uno snapshot
+	// precedente al lock.
+	query := "MATCH (from:CodeNode {id: $from_id})\n" +
+		"MATCH (to:CodeNode {id: $to_id})\n" +
+		"WITH from, to, from.tenant_id AS from_tenant_id, from.repo AS from_repo, from.acl_group AS from_acl_group,\n" +
+		"     to.tenant_id AS to_tenant_id, to.repo AS to_repo, to.acl_group AS to_acl_group\n" +
+		"WITH from, to, [\n" +
+		"  {tenant_id: from_tenant_id, repo: from_repo, acl_group: from_acl_group},\n" +
+		"  {tenant_id: to_tenant_id, repo: to_repo, acl_group: to_acl_group}\n" +
+		"] AS scopes\n" +
+		"UNWIND scopes AS scope\n" +
+		"WITH DISTINCT from, to, scope.tenant_id AS scope_tenant_id, scope.repo AS scope_repo, scope.acl_group AS scope_acl_group\n" +
+		"ORDER BY scope_tenant_id, scope_repo, scope_acl_group\n" +
+		"FOREACH (_ IN CASE WHEN scope_tenant_id IS NOT NULL AND scope_repo IS NOT NULL AND scope_acl_group IS NOT NULL THEN [1] ELSE [] END |\n" +
+		"  MERGE (p:GDSPartition {tenant_id: scope_tenant_id, repo: scope_repo, acl_group: scope_acl_group})\n" +
+		"  ON CREATE SET p.generation = 1, p.write_lock = 0\n" +
+		"  ON MATCH SET p.generation = coalesce(p.generation, 0) + 1\n" +
+		")\n" +
+		"WITH DISTINCT from, to\n" +
 		"MERGE (from)-[r:" + relType + "]->(to)\n" +
 		"ON CREATE SET r.weight = coalesce($weight, 1)\n" +
 		"ON MATCH SET r.weight = coalesce(r.weight, 0) + coalesce($weight, 1)"

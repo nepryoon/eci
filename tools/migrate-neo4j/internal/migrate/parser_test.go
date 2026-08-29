@@ -69,7 +69,7 @@ func TestParseStatementsEmptySourceYieldsNoStatements(t *testing.T) {
 // Il vero contracts/cypher/schema.cypher (dopo lo split §2: solo DDL, la
 // rimozione dei due existence constraint per ADR-0004 e la rimozione del
 // property type constraint emb_vector_type per ADR-0005) deve produrre
-// esattamente 11 statement: 3 constraint + 5 range index (incluso l'indice
+// esattamente 12 statement: 4 constraint + 5 range index (incluso l'indice
 // security-scope di T6.3) + 2 full-text index + 1 vector index (scenario 3/4).
 func TestParseStatementsRealSchemaFile(t *testing.T) {
 	data, err := os.ReadFile(schemaFixturePath(t))
@@ -78,8 +78,8 @@ func TestParseStatementsRealSchemaFile(t *testing.T) {
 	}
 
 	got := ParseStatements(string(data))
-	if len(got) != 11 {
-		t.Fatalf("len(got) = %d, want 11 statements from schema.cypher: %v", len(got), got)
+	if len(got) != 12 {
+		t.Fatalf("len(got) = %d, want 12 statements from schema.cypher: %v", len(got), got)
 	}
 	for _, stmt := range got {
 		if !strings.Contains(stmt, "IF NOT EXISTS") {

@@ -8,6 +8,7 @@ set -uo pipefail
 status=0
 
 GO_SERVICES=(sink-graph sink-vector sink-search retrieval-engine llm-gateway semantic-cache api-gateway)
+GO_TOOLS=(gds-impact)
 RUST_SERVICES=(ingestion)
 PY_SERVICES=(orchestrator verification summarization)
 
@@ -42,6 +43,11 @@ for svc in "${GO_SERVICES[@]}"; do
   fi
   echo "== lint (go vet) ${svc} =="
   (cd "${dir}" && go vet ./...) || status=1
+done
+
+for tool in "${GO_TOOLS[@]}"; do
+  echo "== lint (go vet tool) ${tool} =="
+  (cd "tools/${tool}" && go vet ./...) || status=1
 done
 
 for svc in "${RUST_SERVICES[@]}"; do

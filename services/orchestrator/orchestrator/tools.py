@@ -142,11 +142,12 @@ async def summarize_subgraph(ctx: RunContext[Deps], node_ids: list[str]) -> str:
     raise SummarizationNotYetAvailable(",".join(node_ids))
 
 
-AGENT_TOOLS = [
-    Tool(get_node), Tool(get_callers), Tool(get_callees),
-    Tool(expand_dependencies), Tool(semantic_search), Tool(read_source),
-    Tool(summarize_subgraph),
-]
+_TOOL_FUNCTIONS = (
+    get_node, get_callers, get_callees, expand_dependencies,
+    semantic_search, read_source, summarize_subgraph,
+)
+ALLOWED_TOOL_NAMES = frozenset(function.__name__ for function in _TOOL_FUNCTIONS)
+AGENT_TOOLS = [Tool(function) for function in _TOOL_FUNCTIONS]
 
 
 # The fake used before T5.3 does not implement structured tool calls.  This
@@ -163,6 +164,8 @@ class RetrievalToolRuntime:
         self.raw_nodes: dict[str, object] = {}
 
     def execute(self, action: str, query: str, node_id: str | None) -> list[NodeResult]:
+        if action not in ALLOWED_TOOL_NAMES:
+            raise ValueError(f"tool non consentito: {action}")
         if action == "semantic_search":
             values = retrieval_client.hybrid_search(
                 self.deps.retrieval_addr,
@@ -206,7 +209,7 @@ class RetrievalToolRuntime:
                 raise SourceNotAvailable(node_id)
             values = [value]
         else:
-            raise ValueError(f"tool non consentito: {action}")
+            raise ValueError(f"tool non disponibile nel runtime: {action}")
         for value in values:
             self.raw_nodes[value.node_id] = value
         return [_node(value) for value in values]

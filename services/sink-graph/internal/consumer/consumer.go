@@ -187,7 +187,7 @@ func mergeCodeNode(ctx context.Context, deps Deps, value []byte, eventID string)
 		"path":      node.Provenance.Path,
 	}
 
-	if err := runWrite(ctx, deps.Neo4j, query, params); err != nil {
+	if err := runWrite(ctx, deps.Neo4j, lockCodeNodeQuery, query, params); err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("MERGE CodeNode id=%s: %w", node.ID, err)
 	}
 	return OutcomeMerged, nil
@@ -242,27 +242,31 @@ func mergeCodeRelation(ctx context.Context, deps Deps, value []byte, eventID str
 		"weight":  weight,
 	}
 
-	if err := runWrite(ctx, deps.Neo4j, query, params); err != nil {
+	if err := runWrite(ctx, deps.Neo4j, lockCodeRelationEndpointsQuery, query, params); err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("MERGE CodeRelation %s %s->%s: %w", rel.RelType, rel.FromID, rel.ToID, err)
 	}
 	return OutcomeMerged, nil
 }
 
-// runWrite esegue una query Cypher già costruita (label/tipo relazione già
-// validati dal chiamante) in una sessione auto-commit, stesso pattern di
-// tools/migrate-neo4j/internal/migrate/runner.go: session.Run ritorna un
-// Result "lazy", gli errori dell'esecuzione reale emergono solo al
-// Consume, non vanno ignorati fermandosi al solo errore di Run.
-func runWrite(ctx context.Context, driver neo4j.DriverWithContext, query string, params map[string]any) error {
+// runWrite acquisisce prima i lock CodeNode in ordine totale e poi esegue la
+// mutation nella stessa explicit transaction. ExecuteWrite applica inoltre il
+// retry bounded del driver agli errori transient Neo4j; entrambi i Result sono
+// consumati perché gli errori reali emergono solo al Consume.
+func runWrite(ctx context.Context, driver neo4j.DriverWithContext, lockQuery, mutationQuery string, params map[string]any) error {
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session.Close(ctx)
 
-	result, err := session.Run(ctx, query, params)
-	if err != nil {
-		return err
-	}
-	if _, err := result.Consume(ctx); err != nil {
-		return err
-	}
-	return nil
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		for _, query := range []string{lockQuery, mutationQuery} {
+			result, err := tx.Run(ctx, query, params)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := result.Consume(ctx); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
+	})
+	return err
 }

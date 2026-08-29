@@ -9,7 +9,7 @@ Job batch (non un servizio long-running, invocabile manualmente o da un trigger 
 
 **Compose, modifica dichiarata**: `deploy/compose/docker-compose.yml`, servizio `neo4j`, aggiunta `NEO4J_PLUGINS=["graph-data-science"]` — verificato (non presunto) che GDS non è incluso di default nell'immagine `neo4j:5-community` già in uso da Fase 0; tutti e tre gli algoritmi usati qui sono tier production (namespace `gds.` senza prefisso `beta`/`alpha`), nessuna licenza Enterprise richiesta.
 
-**CLI** `tools/gds-impact --entry-node-id=<id> [--max-depth=4] [--sampling-size=N]` (stesso pattern di `tools/reconcile`) — un'invocazione, un nodo di ingresso, un job che termina.
+**CLI storica T4.3** `tools/gds-impact --entry-node-id=<id> [--max-depth=4] [--sampling-size=N]`. Da T6.7/SPEC-061 l'interfaccia richiede inoltre `--tenant-id`, `--repo` e `--acl-group`: il requisito di sicurezza successivo restringe il job a una partizione e non reinterpreta l'evidenza T4.3.
 
 **Pipeline** (tutta via Cypher/GDS procedure attraverso il driver Neo4j già stabilito nel progetto — nessun nuovo client, GDS si invoca come procedure Cypher):
 1. `gds.graph.project.estimate` (stima memoria, log del risultato — nessun abort automatico in questa SPEC, solo visibilità, coerente con l'assenza di un budget di memoria configurato altrove nel progetto).
@@ -89,16 +89,21 @@ Log testuale del job (nodi proiettati, tempo per fase, risultato di `.estimate`)
    forme (REVERSE via sorgente/target scambiati, UNDIRECTED via
    configurazione) prima di scriverci sopra qualunque codice Go.
 
-3. **`gds.graph.project.estimate` (§2 punto 1) chiamato sull'INTERA label
+3. **Deviazione storica T4.3, superseded da T6.7/SPEC-061 —
+   `gds.graph.project.estimate` (§2 punto 1) chiamato sull'INTERA label
    `:CodeNode`, non sul sottografo filtrato**: la procedura `.estimate`
    accetta solo la forma nativa label-based (nessun equivalente per la
    forma "subquery" usata per la proiezione reale, deviazione 2) —
    verificato che non esiste una `.estimate` per un filtro Cypher
    arbitrario. La stima loggata è quindi un limite SUPERIORE sull'intera
    label, non sul sottografo effettivamente proiettato (più piccolo) —
-   dichiarato esplicitamente nel log stesso (`logProjectionEstimate`),
+   era dichiarato esplicitamente nel log stesso (`logProjectionEstimate`),
    mai usata per un abort automatico (§2: "nessun abort automatico ...
-   solo visibilità", requisito comunque rispettato).
+   solo visibilità", requisito comunque rispettato). T6.7 rimuove questa
+   lettura globale: dopo le proiezioni Cypher per-ACL esegue
+   `gds.*.stream.estimate` sui graph name autorizzati prima degli algoritmi.
+   Il requisito ADD della stima resta soddisfatto senza osservare cardinalità
+   cross-tenant.
 
 4. **Discovery del sottografo: BFS livello-per-livello duplicata da
    T4.1/T4.2, non importata**: `tools/gds-impact` è un modulo Go separato

@@ -7,7 +7,9 @@
 // un servizio long-running (stesso principio di tools/reconcile/
 // tools/gc-postgres).
 //
-// Uso: gds-impact --entry-node-id=<id> [--max-depth=4] [--sampling-size=N]
+// Uso: gds-impact --entry-node-id=<id> --tenant-id=<tenant> --repo=<repo>
+//
+//	--acl-group=<group> [--max-depth=4] [--sampling-size=N]
 //
 //	[--w-ppr=0.5] [--w-prox=0.3] [--w-bc=0.2]
 //

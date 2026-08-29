@@ -8,17 +8,27 @@ import (
 )
 
 // Run esegue l'intera pipeline (SPEC-043 §2): discovery del sottografo,
-// stima memoria (log-only), proiezione in-memory (REVERSE + UNDIRECTED),
+// proiezione in-memory (REVERSE + UNDIRECTED), stima memoria (log-only),
 // PPR seedata + betweenness campionata + Leiden, combinazione dei
 // punteggi, write-back, pulizia SEMPRE eseguita delle proiezioni (anche in
 // caso di errore). logf non è mai nil-checked dai chiamanti interni:
 // passare un no-op se non serve logging.
 func Run(ctx context.Context, driver neo4j.DriverWithContext, cfg Config, logf func(format string, args ...any), hooks Hooks) (Result, error) {
+	if cfg.EntryNodeID == "" {
+		return Result{}, fmt.Errorf("gdsimpact: entry_node_id obbligatorio")
+	}
+	if err := cfg.Scope.validate(); err != nil {
+		return Result{}, fmt.Errorf("gdsimpact: projection scope non valido: %w", err)
+	}
 	if cfg.MaxDepth <= 0 {
 		return Result{}, fmt.Errorf("gdsimpact: max_depth deve essere >= 1, ricevuto %d", cfg.MaxDepth)
 	}
+	partitionGeneration, err := capturePartitionGeneration(ctx, driver, cfg.Scope)
+	if err != nil {
+		return Result{}, err
+	}
 
-	deps, err := discoverSubgraph(ctx, driver, cfg.EntryNodeID, cfg.MaxDepth)
+	deps, err := discoverSubgraph(ctx, driver, cfg.EntryNodeID, cfg.Scope, cfg.MaxDepth)
 	if err != nil {
 		return Result{}, err
 	}
@@ -26,14 +36,12 @@ func Run(ctx context.Context, driver neo4j.DriverWithContext, cfg Config, logf f
 		// entry_node_id inesistente O senza dipendenti: stesso trattamento
 		// (SPEC-043 §3 scenario 4) — nessuna proiezione creata (nulla da
 		// pulire), nessun impact_score scritto, nessun errore.
-		logf("gdsimpact: nessun dipendente scoperto da entry_node_id=%s entro max_depth=%d — nessuna proiezione GDS creata", cfg.EntryNodeID, cfg.MaxDepth)
+		logf("gdsimpact: nessun dipendente scoperto entro max_depth=%d — nessuna proiezione GDS creata", cfg.MaxDepth)
 		return Result{}, nil
 	}
-	logf("gdsimpact: %d dipendenti scoperti da entry_node_id=%s entro max_depth=%d", len(deps), cfg.EntryNodeID, cfg.MaxDepth)
+	logf("gdsimpact: %d dipendenti scoperti entro max_depth=%d", len(deps), cfg.MaxDepth)
 
-	logProjectionEstimate(ctx, driver, logf)
-
-	proj, err := createProjections(ctx, driver, cfg.EntryNodeID, deps)
+	proj, err := createProjections(ctx, driver, cfg.EntryNodeID, cfg.Scope, deps)
 	// SPEC-043 §4: se la proiezione (anche solo quella REVERSE) è già
 	// stata creata, un tentativo di gds.graph.drop viene comunque eseguito
 	// PRIMA di propagare l'errore originale — defer copre esattamente
@@ -43,7 +51,7 @@ func Run(ctx context.Context, driver neo4j.DriverWithContext, cfg Config, logf f
 	if err != nil {
 		return Result{}, err
 	}
-	logf("gdsimpact: proiezioni create (reverse=%s, undirected=%s, nodeCount=%d)", proj.ReverseName, proj.UndirectedName, proj.NodeCount)
+	logf("gdsimpact: proiezioni autorizzate create (nodeCount=%d)", proj.NodeCount)
 
 	if hooks.AfterProject != nil {
 		if err := hooks.AfterProject(); err != nil {
@@ -57,8 +65,9 @@ func Run(ctx context.Context, driver neo4j.DriverWithContext, cfg Config, logf f
 		// della proiezione (risultati esatti).
 		samplingSize = int(proj.NodeCount)
 	}
+	logAlgorithmEstimates(ctx, driver, proj, samplingSize, logf)
 
-	pprRaw, err := runPageRank(ctx, driver, proj.ReverseName, cfg.EntryNodeID)
+	pprRaw, err := runPageRank(ctx, driver, proj.ReverseName, cfg.EntryNodeID, cfg.Scope)
 	if err != nil {
 		return Result{}, err
 	}
@@ -73,7 +82,7 @@ func Run(ctx context.Context, driver neo4j.DriverWithContext, cfg Config, logf f
 
 	scores := combineScores(deps, pprRaw, bcRaw, communities, cfg)
 
-	if err := writeBack(ctx, driver, scores); err != nil {
+	if err := writeBack(ctx, driver, cfg.Scope, partitionGeneration, scores); err != nil {
 		return Result{}, err
 	}
 	logf("gdsimpact: impact_score scritto su %d nodi", len(scores))

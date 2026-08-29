@@ -7,21 +7,27 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
+const pageRankQuery = `
+		MATCH (seed:CodeNode {id: $entry_node_id})
+		WHERE seed.tenant_id = $tenant_id AND seed.repo = $repo AND seed.acl_group = $acl_group
+		CALL gds.pageRank.stream($graph_name, {sourceNodes: [seed], maxIterations: 20, dampingFactor: 0.85})
+		YIELD nodeId, score
+		RETURN gds.util.asNode(nodeId).id AS node_id, score
+	`
+
 // runPageRank — gds.pageRank.stream seedata su entryNodeID (ADD §1.4: "Su
 // proiezione a orientamento REVERSE, il PPR misura quanto ciascun
 // dipendente è 'esposto' al target"). maxIterations/dampingFactor: valori
 // dichiarati dall'ADD (SPEC-043 §2 punto 3), non configurabili via flag
 // (SPEC non li elenca tra i parametri CLI).
-func runPageRank(ctx context.Context, driver neo4j.DriverWithContext, graphName, entryNodeID string) (map[string]float64, error) {
+func runPageRank(ctx context.Context, driver neo4j.DriverWithContext, graphName, entryNodeID string, scope ProjectionScope) (map[string]float64, error) {
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer session.Close(ctx)
 
-	result, err := session.Run(ctx, `
-		MATCH (seed:CodeNode {id: $entry_node_id})
-		CALL gds.pageRank.stream($graph_name, {sourceNodes: [seed], maxIterations: 20, dampingFactor: 0.85})
-		YIELD nodeId, score
-		RETURN gds.util.asNode(nodeId).id AS node_id, score
-	`, map[string]any{"graph_name": graphName, "entry_node_id": entryNodeID})
+	result, err := session.Run(ctx, pageRankQuery, map[string]any{
+		"graph_name": graphName, "entry_node_id": entryNodeID,
+		"tenant_id": scope.TenantID, "repo": scope.Repo, "acl_group": scope.ACLGroup,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("gdsimpact: gds.pageRank.stream: %w", err)
 	}

@@ -116,6 +116,13 @@ jobs:
           cd services/semantic-cache
           go test -tags=integration ./internal/server -run TestSemanticCacheServer -v
 
+      - name: T6.7 GDS per-ACL and stale-score isolation
+        run: |
+          cd tools/gds-impact
+          go test -tags=integration ./internal/gdsimpact/... -run TestGDSImpact -v
+          cd ../../services/retrieval-engine
+          go test -tags=integration ./internal/rerank -run TestRerankIntegration -v
+
   worm-audit-integration:
     runs-on: ubuntu-latest
     steps:

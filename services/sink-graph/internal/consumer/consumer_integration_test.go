@@ -81,6 +81,127 @@ func TestSinkGraphConsumer(t *testing.T) {
 	t.Run("Scenario5_InvalidEnumDiscardedNoNeo4jWrite", func(t *testing.T) {
 		scenario5InvalidEnumDiscardedNoNeo4jWrite(t, ctx, st)
 	})
+	t.Run("T6_7_GDSPartitionInvalidatedOnScopeAndTopologyMutation", func(t *testing.T) {
+		t67GDSPartitionInvalidatedOnScopeAndTopologyMutation(t, ctx, st)
+	})
+	t.Run("T6_7_ConcurrentScopeReadsSerializeAfterEntityLocks", func(t *testing.T) {
+		t67ConcurrentScopeReadsSerializeAfterEntityLocks(t, ctx, st)
+	})
+}
+
+func t67GDSPartitionInvalidatedOnScopeAndTopologyMutation(t *testing.T, ctx context.Context, st *stack) {
+	oldPeer := uniqueID(t, "gds-old-peer")
+	moving := uniqueID(t, "gds-moving")
+	newPeer := uniqueID(t, "gds-new-peer")
+	relationPeer := uniqueID(t, "gds-relation-peer")
+	seedImpactPartition(t, ctx, st.driver, oldPeer, moving, newPeer, relationPeer)
+
+	movePayload := codeNodePayloadWithScope(
+		moving, "Moved", "Function", "go", "moved.go",
+		tenantPlaceholder, repoPlaceholder, "admins",
+	)
+	outcome, err := consumer.ProcessMessage(ctx, newDeps(st), consumer.TopicCodeNode, movePayload,
+		[]kafka.Header{{Key: "event_id", Value: []byte(uniqueEventID(t))}})
+	if err != nil || outcome != consumer.OutcomeMerged {
+		t.Fatalf("scope move outcome=%v err=%v", outcome, err)
+	}
+	assertPartitionGeneration(t, ctx, st.driver, "developers", 42)
+	assertPartitionGeneration(t, ctx, st.driver, "admins", 8)
+	assertImpactGenerationStale(t, ctx, st.driver, oldPeer, moving, newPeer)
+	assertImpactPropertiesRetained(t, ctx, st.driver, oldPeer, newPeer)
+
+	setImpactProperties(t, ctx, st.driver, oldPeer, relationPeer)
+	relationPayload := codeRelationPayload(oldPeer, relationPeer, "CALLS", intPtr(1))
+	outcome, err = consumer.ProcessMessage(ctx, newDeps(st), consumer.TopicCodeRelation, relationPayload,
+		[]kafka.Header{{Key: "event_id", Value: []byte(uniqueEventID(t))}})
+	if err != nil || outcome != consumer.OutcomeMerged {
+		t.Fatalf("relation mutation outcome=%v err=%v", outcome, err)
+	}
+	assertPartitionGeneration(t, ctx, st.driver, "developers", 43)
+	assertImpactGenerationStale(t, ctx, st.driver, oldPeer, relationPeer)
+	assertImpactPropertiesRetained(t, ctx, st.driver, oldPeer, relationPeer)
+}
+
+func t67ConcurrentScopeReadsSerializeAfterEntityLocks(t *testing.T, ctx context.Context, st *stack) {
+	t.Run("CodeNodeMoveReadsCommittedPreviousScope", func(t *testing.T) {
+		nodeID := uniqueID(t, "gds-concurrent-node")
+		oldACL := uniqueID(t, "acl-old")
+		intermediateACL := uniqueID(t, "acl-intermediate")
+		finalACL := uniqueID(t, "acl-final")
+		seedConcurrentScopeFixture(t, ctx, st.driver, oldACL, nodeID)
+
+		session, tx := holdScopeMove(t, ctx, st.driver, oldACL, intermediateACL, nodeID)
+		defer session.Close(ctx)
+
+		type processResult struct {
+			outcome consumer.Outcome
+			err     error
+		}
+		completed := make(chan processResult, 1)
+		go func() {
+			payload := codeNodePayloadWithScope(
+				nodeID, "Concurrent", "Function", "go", "concurrent.go",
+				tenantPlaceholder, repoPlaceholder, finalACL,
+			)
+			outcome, err := consumer.ProcessMessage(ctx, newDeps(st), consumer.TopicCodeNode, payload,
+				[]kafka.Header{{Key: "event_id", Value: []byte(uniqueEventID(t))}})
+			completed <- processResult{outcome: outcome, err: err}
+		}()
+
+		blocked := waitForSinkLockQuery(ctx, st.driver, "sink-graph-lock-code-node", 5*time.Second)
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit intervening node move: %v", err)
+		}
+		result := <-completed
+		if !blocked {
+			t.Fatal("concurrent CodeNode mutation never reached the entity lock")
+		}
+		if result.err != nil || result.outcome != consumer.OutcomeMerged {
+			t.Fatalf("concurrent CodeNode outcome=%v err=%v", result.outcome, result.err)
+		}
+
+		assertPartitionGenerationForScope(t, ctx, st.driver, oldACL, 11)
+		assertPartitionGenerationForScope(t, ctx, st.driver, intermediateACL, 2)
+		assertPartitionGenerationForScope(t, ctx, st.driver, finalACL, 1)
+	})
+
+	t.Run("CodeRelationReadsCommittedEndpointScopes", func(t *testing.T) {
+		fromID := uniqueID(t, "gds-concurrent-from")
+		toID := uniqueID(t, "gds-concurrent-to")
+		oldACL := uniqueID(t, "acl-rel-old")
+		newACL := uniqueID(t, "acl-rel-new")
+		seedConcurrentScopeFixture(t, ctx, st.driver, oldACL, fromID, toID)
+
+		session, tx := holdScopeMove(t, ctx, st.driver, oldACL, newACL, fromID, toID)
+		defer session.Close(ctx)
+
+		type processResult struct {
+			outcome consumer.Outcome
+			err     error
+		}
+		completed := make(chan processResult, 1)
+		go func() {
+			payload := codeRelationPayload(fromID, toID, "CALLS", intPtr(1))
+			outcome, err := consumer.ProcessMessage(ctx, newDeps(st), consumer.TopicCodeRelation, payload,
+				[]kafka.Header{{Key: "event_id", Value: []byte(uniqueEventID(t))}})
+			completed <- processResult{outcome: outcome, err: err}
+		}()
+
+		blocked := waitForSinkLockQuery(ctx, st.driver, "sink-graph-lock-relation-endpoints", 5*time.Second)
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit intervening endpoint move: %v", err)
+		}
+		result := <-completed
+		if !blocked {
+			t.Fatal("concurrent CodeRelation mutation never reached the endpoint locks")
+		}
+		if result.err != nil || result.outcome != consumer.OutcomeMerged {
+			t.Fatalf("concurrent CodeRelation outcome=%v err=%v", result.outcome, result.err)
+		}
+
+		assertPartitionGenerationForScope(t, ctx, st.driver, oldACL, 11)
+		assertPartitionGenerationForScope(t, ctx, st.driver, newACL, 2)
+	})
 }
 
 // ============================================================
@@ -797,14 +918,21 @@ func newReaderWithGroup(brokers []string, groupID string) *kafka.Reader {
 // ============================================================
 
 func codeNodePayload(id, name, nodeType, language, path string) []byte {
+	return codeNodePayloadWithScope(
+		id, name, nodeType, language, path,
+		tenantPlaceholder, repoPlaceholder, aclPlaceholder,
+	)
+}
+
+func codeNodePayloadWithScope(id, name, nodeType, language, path, tenant, repo, acl string) []byte {
 	payload := map[string]any{
 		"id":       id,
 		"domain":   "code",
 		"name":     name,
 		"ast_hash": language, // valore placeholder qualunque, non verificato dal consumer
 		"provenance": map[string]any{
-			"path": path, "tenant_id": tenantPlaceholder,
-			"repo": repoPlaceholder, "acl_group": aclPlaceholder,
+			"path": path, "tenant_id": tenant,
+			"repo": repo, "acl_group": acl,
 		},
 		"ext": map[string]any{
 			"node_type": nodeType,
@@ -858,6 +986,206 @@ func readNode(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext,
 		t.Fatalf("readNode id=%s: campo props: %v", id, err)
 	}
 	return labels, rawProps
+}
+
+func seedImpactPartition(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, oldPeer, moving, newPeer, relationPeer string) {
+	t.Helper()
+	session := driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+	_, err := session.Run(ctx, `
+		MERGE (developers:GDSPartition {tenant_id: $tenant, repo: $repo, acl_group: 'developers'})
+		SET developers.generation = 41, developers.write_lock = 0
+		MERGE (admins:GDSPartition {tenant_id: $tenant, repo: $repo, acl_group: 'admins'})
+		SET admins.generation = 7, admins.write_lock = 0
+		WITH developers, admins
+		UNWIND [
+		  {id: $old_peer, acl: 'developers'},
+		  {id: $moving, acl: 'developers'},
+		  {id: $new_peer, acl: 'admins'},
+		  {id: $relation_peer, acl: 'developers'}
+		] AS row
+		MERGE (n:CodeNode {id: row.id})
+		SET n.tenant_id = $tenant, n.repo = $repo, n.acl_group = row.acl,
+		    n.impact_score = 0.9, n.community_id = 7, n.impact_kind = 'behavioral',
+		    n.impact_tenant_id = $tenant, n.impact_repo = $repo, n.impact_acl_group = row.acl,
+		    n.impact_generation = CASE row.acl WHEN 'developers' THEN developers.generation ELSE admins.generation END
+	`, map[string]any{
+		"old_peer": oldPeer, "moving": moving, "new_peer": newPeer, "relation_peer": relationPeer,
+		"tenant": tenantPlaceholder, "repo": repoPlaceholder,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedConcurrentScopeFixture(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, acl string, nodeIDs ...string) {
+	t.Helper()
+	session := driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+	result, err := session.Run(ctx, `
+		MERGE (p:GDSPartition {tenant_id: $tenant, repo: $repo, acl_group: $acl})
+		SET p.generation = 10, p.write_lock = 0
+		WITH p
+		UNWIND $node_ids AS node_id
+		MERGE (n:CodeNode {id: node_id})
+		SET n.tenant_id = $tenant, n.repo = $repo, n.acl_group = $acl
+	`, map[string]any{
+		"tenant": tenantPlaceholder, "repo": repoPlaceholder, "acl": acl, "node_ids": nodeIDs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := result.Consume(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// holdScopeMove applica un cambio di ownership in una explicit transaction
+// senza committarlo. Il test può così attendere meccanicamente che la mutation
+// concorrente sia bloccata sul CodeNode: il vecchio codice aveva già letto lo
+// scope a quel punto, mentre il protocollo ADR-0015 corretto lo legge dopo il
+// lock e dopo questo commit.
+func holdScopeMove(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, oldACL, newACL string, nodeIDs ...string) (neo4j.SessionWithContext, neo4j.ExplicitTransaction) {
+	t.Helper()
+	session := driver.NewSession(ctx, neo4j.SessionConfig{})
+	tx, err := session.BeginTransaction(ctx)
+	if err != nil {
+		session.Close(ctx)
+		t.Fatal(err)
+	}
+	result, err := tx.Run(ctx, `
+		UNWIND $node_ids AS node_id
+		WITH node_id ORDER BY node_id
+		MATCH (n:CodeNode {id: node_id})
+		SET n._eci_write_lock = coalesce(n._eci_write_lock, 0) + 1
+		WITH collect(n) AS nodes
+		MATCH (old:GDSPartition {tenant_id: $tenant, repo: $repo, acl_group: $old_acl})
+		SET old.generation = coalesce(old.generation, 0) + 1
+		MERGE (next:GDSPartition {tenant_id: $tenant, repo: $repo, acl_group: $new_acl})
+		ON CREATE SET next.generation = 1, next.write_lock = 0
+		ON MATCH SET next.generation = coalesce(next.generation, 0) + 1
+		FOREACH (n IN nodes | SET n.acl_group = $new_acl)
+		RETURN size(nodes) AS moved
+	`, map[string]any{
+		"node_ids": nodeIDs, "tenant": tenantPlaceholder, "repo": repoPlaceholder,
+		"old_acl": oldACL, "new_acl": newACL,
+	})
+	if err != nil {
+		tx.Close(ctx)
+		session.Close(ctx)
+		t.Fatal(err)
+	}
+	if _, err := result.Consume(ctx); err != nil {
+		tx.Close(ctx)
+		session.Close(ctx)
+		t.Fatal(err)
+	}
+	return session, tx
+}
+
+func waitForSinkLockQuery(ctx context.Context, driver neo4j.DriverWithContext, marker string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		session := driver.NewSession(ctx, neo4j.SessionConfig{})
+		result, err := session.Run(ctx, `
+			SHOW TRANSACTIONS YIELD currentQuery
+			WHERE currentQuery CONTAINS $marker
+			RETURN count(*) AS active
+		`, map[string]any{"marker": marker})
+		if err == nil {
+			record, singleErr := result.Single(ctx)
+			if singleErr == nil {
+				active, _, valueErr := neo4j.GetRecordValue[int64](record, "active")
+				if valueErr == nil && active > 0 {
+					session.Close(ctx)
+					return true
+				}
+			}
+		}
+		session.Close(ctx)
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+func setImpactProperties(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, ids ...string) {
+	t.Helper()
+	session := driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+	_, err := session.Run(ctx, `
+		MATCH (n:CodeNode) WHERE n.id IN $ids
+		MATCH (p:GDSPartition {tenant_id: n.tenant_id, repo: n.repo, acl_group: n.acl_group})
+		SET n.impact_score = 0.8, n.community_id = 8, n.impact_kind = 'syntactic',
+		    n.impact_tenant_id = n.tenant_id, n.impact_repo = n.repo, n.impact_acl_group = n.acl_group,
+		    n.impact_generation = p.generation
+	`, map[string]any{"ids": ids})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertPartitionGeneration(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, acl string, want int64) {
+	t.Helper()
+	current := readPartitionGeneration(t, ctx, driver, acl)
+	if current != want {
+		t.Fatalf("partition acl=%s generation=%d, want %d", acl, current, want)
+	}
+}
+
+func assertPartitionGenerationForScope(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, acl string, want int64) {
+	t.Helper()
+	current := readPartitionGeneration(t, ctx, driver, acl)
+	if current != want {
+		t.Fatalf("partition acl=%s generation=%d, want %d", acl, current, want)
+	}
+}
+
+func assertImpactGenerationStale(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		_, props := readNode(t, ctx, driver, id)
+		generation, ok := props["impact_generation"].(int64)
+		if !ok {
+			t.Errorf("node %s missing impact_generation", id)
+			continue
+		}
+		acl, _ := props["acl_group"].(string)
+		if current := readPartitionGeneration(t, ctx, driver, acl); current == generation {
+			t.Errorf("partition acl=%s still accepts stale generation %d", acl, generation)
+		}
+	}
+}
+
+func readPartitionGeneration(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, acl string) int64 {
+	t.Helper()
+	session := driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+	result, err := session.Run(ctx, `
+		MATCH (p:GDSPartition {tenant_id: $tenant, repo: $repo, acl_group: $acl})
+		RETURN p.generation AS generation
+	`, map[string]any{"tenant": tenantPlaceholder, "repo": repoPlaceholder, "acl": acl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := result.Single(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, _, err := neo4j.GetRecordValue[int64](record, "generation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return current
+}
+
+func assertImpactPropertiesRetained(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		_, props := readNode(t, ctx, driver, id)
+		if _, exists := props["impact_score"]; !exists {
+			t.Errorf("node %s was eagerly rewritten instead of O(1) generation invalidation", id)
+		}
+	}
 }
 
 func countNodesWithID(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, id string) int64 {
