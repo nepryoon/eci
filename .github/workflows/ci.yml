@@ -115,3 +115,15 @@ jobs:
         run: |
           cd services/semantic-cache
           go test -tags=integration ./internal/server -run TestSemanticCacheServer -v
+
+  worm-audit-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: T6.5 MinIO Object Lock COMPLIANCE
+        run: bash scripts/test-minio-worm.sh
