@@ -167,8 +167,13 @@ requires a valid CA plus the workload's certificate/private-key pair on both
 kafka-go readers and writers; the broker denies unauthenticated clients and
 literal `KafkaUser` ACLs deny sibling topics/groups. HTTPS OpenSearch requires CA,
 username and password. Redis is deployed with `requirepass`, so Semantic Cache
-also requires the explicit `redis-password` mapping. Each client fails before
-serving/consuming if its trust or credential input is absent.
+also requires the explicit `redis-password` mapping. Semantic Cache startup
+and readiness call `/ready` on its metrics listener; that endpoint performs an
+authenticated Redis PING and returns only 204/503. A missing password fails
+configuration, while a stale password or unavailable Redis keeps the pod Not
+Ready. Liveness remains a local TCP check. Each client fails before
+serving/consuming, or remains fail-closed Not Ready, if its trust or credential
+input is absent or invalid.
 Redis deliberately has one standalone StatefulSet replica: a ClusterIP never
 balances one logical cache across independent stores. AOF `everysec` persists
 to a 20 GiB standard PVC (1 GiB dev), and restart persistence is part of the

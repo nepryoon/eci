@@ -56,7 +56,10 @@ limit topic/group access. `dev-up.sh` copies each generated identity into the
 consumer namespace without ever copying a CA private key.
 OpenSearch clients mount only the generated public HTTP CA and require Basic
 Auth. Semantic Cache maps `redis-password` explicitly to `REDIS_PASSWORD`.
-Missing keys or CA files remain a fail-closed rollout failure.
+Its `/ready` pings Redis through the configured authenticated client; a stale
+password or unavailable Redis therefore blocks startup/readiness without
+leaking backend details. Liveness remains local. Missing keys or CA files
+remain a fail-closed rollout failure.
 The standalone Redis Service has exactly one PVC-backed StatefulSet backend
 with AOF `everysec`; the chart does not claim replication by load-balancing
 independent caches. The bundled dev Keycloak

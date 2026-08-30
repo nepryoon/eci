@@ -150,7 +150,9 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    stesso transport del consumer e verifica metadata di ogni topic,
    coordinator e offset access del gruppo. Errori TLS/topic/group rispondono
    503 senza dettagli; liveness resta locale per evitare restart storm durante
-   un outage recuperabile del broker.
+   un outage recuperabile del broker. Semantic Cache applica lo stesso
+   principio: `/ready` esegue PING Redis con il client autenticato e risponde
+   soltanto 204/503, mentre liveness resta locale.
 5. **Overlay dev onesto.** Given `values-dev.yaml`, When il bootstrap gira su
    kind, Then usa repliche/storage/resource ridotti e Neo4j Community come
    previsto dagli ADR dev esistenti. I workload ECI senza immagini pubblicate
@@ -219,6 +221,7 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
 | client Kafka tenta topic/gruppo sibling | broker nega tramite ACL literal; smoke e verifica falliscono se viene consentito |
 | CA o credenziali OpenSearch assenti su HTTPS | retrieval/sink-search terminano prima di servire/consumare |
 | password Redis assente con auth richiesta | semantic-cache termina prima di aprire il listener |
+| password Redis errata/stale o Redis indisponibile | startup/readiness resta 503 senza dettagli backend; liveness locale non causa restart storm |
 | CRD operatore assente | apply dei CR attende/fallisce bounded; non passa a readiness dati |
 | store non Ready | verifica non-zero con namespace/kind/nome; nessun retry infinito |
 | cluster con risorse insufficienti | stato non verificato; raccoglie describe/events senza ridurre soglie standard |
@@ -334,7 +337,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       Redis `requirepass` è propagato esplicitamente, con unit test fail-closed.
 - [x] Kafka Connect loopback-only è vincolato a una replica ed è omesso con il
       data plane; i quattro worker sono Ready solo dopo topic+group access via
-      il transport Kafka autenticato, mentre liveness resta locale.
+      il transport Kafka autenticato; Semantic Cache è Ready solo dopo PING
+      Redis autenticato, mentre entrambe le liveness restano locali.
 - [x] Redis standalone usa un solo backend StatefulSet con AOF/PVC e restart
       persistence verificata; porte service/metriche
       coincidenti non producono duplicati Kubernetes; Keycloak dev espone

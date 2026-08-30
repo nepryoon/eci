@@ -18,6 +18,7 @@ kafka_primary_producer_provenance_unit=PASS (consumer primary Write absent; own 
 kafka_connect_loopback_only_unit=PASS (no Service; exec probes; dedicated Kafka/PostgreSQL policies)
 kafka_connect_single_replica_and_data_plane_guard_unit=PASS
 kafka_worker_readiness_unit=PASS (same transport; topic metadata + group coordinator/offset authorization; closed 503)
+semantic_cache_redis_readiness_unit=PASS (authenticated PING; closed 503; startup/readiness HTTP and local liveness)
 postgres_cdc_role_unit=PASS (separate Secret; REPLICATION without admin attributes; no owner credential in Connect)
 postgres_cdc_migration_integration=PASS (fixed publication + SELECT grant + down migration)
 processed_events_consumer_scope_integration=PASS (migration 0006 composite key; same-event fan-out; same-consumer dedup; fail-closed rollback)

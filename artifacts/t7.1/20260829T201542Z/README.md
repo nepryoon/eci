@@ -38,6 +38,9 @@ Results:
 - embedding-worker mTLS identity consumed its retry topic and accessed its exact
   consumer-group offsets; shared worker readiness rejects TLS/topic/group
   failures with 503 and leaks no broker detail: PASS;
+- Semantic Cache authenticated Redis readiness returns closed 503 without
+  backend detail on a failed PING, and startup/readiness use that endpoint:
+  PASS (deterministic unit/render evidence; first-party image not deployed);
 - dedicated CNPG-managed `eci_cdc` role, fixed outbox publication, SELECT-only
   table grant, logical slot and live Debezium connector/task: PASS;
 - migration 0006 consumer-scoped `processed_events` key applied live; a
