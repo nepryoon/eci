@@ -107,7 +107,11 @@ pub fn persist_ingestion_command(
    l'offset il worker verifica epoch e ownership topic/partition, scartando i
    record revocati dal buffer senza nuovo effetto o commit. Se la revoca avviene
    durante una transazione gia' iniziata, la receipt rende l'eventuale replay
-   del nuovo owner idempotente e il vecchio owner non committa l'offset.
+   del nuovo owner idempotente e il vecchio owner non committa l'offset. Le
+   nuove assignment osservate durante il retry sono immediatamente pausate; il
+   buffer applicativo e' limitato a 64 record, oltre il quale
+   il worker continua a pollare solo timer/shutdown lasciando agire il limite
+   della coda librdkafka.
 6. **Provenance completa.** Given un comando applicato, When si leggono
    CodeNode/CodeRelation/CodeChunk e relativi eventi, Then provenance contiene
    scope trusted, `repo`, `commit_sha`, `path`, un solo `ingested_at` DB e non
@@ -136,7 +140,8 @@ pub fn persist_ingestion_command(
 | GET object 404/digest/size/UTF-8 mismatch | permanent failure/DLQ; nessun write |
 | MinIO header/body timeout o 5xx, Kafka transport, PostgreSQL unavailable | transient; no commit, readiness 503, retry bounded |
 | endpoint MinIO HTTP, CA PostgreSQL/MinIO assente o non valida | startup fail-closed; HTTPS/TLS con hostname e CA verificati obbligatori |
-| rebalance durante fetch/retry/persist | record invalidato dall'epoch; nessun offset commit se topic/partition non sono ancora assegnati |
+| rebalance durante fetch/retry/persist/DLQ publish | record invalidato dall'epoch; ownership riverificata dopo ogni await e prima dell'offset commit |
+| nuova assignment durante backoff | assignment pausata; buffer applicativo massimo 64 record; poi nessun drain ulteriore |
 | PostgreSQL auth/connect/query/lock/commit stall | connect 5s, statement/TCP 10s e lock 5s; transient senza offset commit |
 | parse panic per input ostile | catturato al command boundary, permanent `parse_failed`; il processo resta vivo |
 | receipt esistente con fingerprint uguale | `Duplicate` prima di MinIO/parser, zero nuove righe outbox |
@@ -233,7 +238,8 @@ separato emerso dall'audit di completezza.
       sono classificati prima di qualunque object fetch.
 - [x] Offset originale solo dopo DB commit o DLQ publish confermata; fault
       transienti conservano backlog e readiness 503; rebalance invalida i
-      record revocati prima di una nuova elaborazione e del commit offset.
+      record revocati prima di una nuova elaborazione e del commit offset,
+      incluso il confine successivo alla publish DLQ.
 - [x] Provenance soddisfa `repo/commit_sha/path/ingested_at` senza alterare i
       contratti golden/eval storici.
 - [x] `/live`, `/ready`, `/metrics` e shutdown sono reali e testati.

@@ -49,6 +49,7 @@ use crate::{
 const INPUT_TOPIC: &str = "eci.ingestion.file.v1";
 const DLQ_TOPIC: &str = "eci.ingestion.file.v1.DLQ";
 const CONSUMER_GROUP: &str = "ingestion";
+const MAX_RETRY_BUFFERED_MESSAGES: usize = 64;
 
 #[derive(Clone)]
 struct Config {
@@ -412,26 +413,34 @@ pub async fn run() -> Result<(), RuntimeError> {
                     }
                 }
                 ProcessAction::Dlq { reason } => {
-                    if publish_dlq(&producer, &message, reason).await
-                        && commit_message_offset(&consumer, &message).is_ok()
-                    {
+                    if publish_dlq(&producer, &message, reason).await {
                         health
                             .metrics
                             .dlq
                             .with_label_values(&[reason, "published"])
                             .inc();
-                        health
-                            .metrics
-                            .commands
-                            .with_label_values(&["failed", reason])
-                            .inc();
-                        health
-                            .metrics
-                            .duration
-                            .with_label_values(&["failed"])
-                            .observe(started.elapsed().as_secs_f64());
-                        backoff = Duration::from_millis(250);
-                        true
+                        if !record_is_owned(&consumer, &message, message_epoch) {
+                            retain_owned_records(&consumer, &mut buffered);
+                            resume_if_buffer_empty(&consumer, &buffered, &health);
+                            break;
+                        }
+                        if commit_message_offset(&consumer, &message).is_ok() {
+                            health
+                                .metrics
+                                .commands
+                                .with_label_values(&["failed", reason])
+                                .inc();
+                            health
+                                .metrics
+                                .duration
+                                .with_label_values(&["failed"])
+                                .observe(started.elapsed().as_secs_f64());
+                            backoff = Duration::from_millis(250);
+                            true
+                        } else {
+                            health.set_dependency("kafka", false);
+                            false
+                        }
                     } else {
                         health
                             .metrics
@@ -456,7 +465,8 @@ pub async fn run() -> Result<(), RuntimeError> {
                 .with_label_values(&["retry"])
                 .observe(started.elapsed().as_secs_f64());
             if matches!(
-                poll_during_backoff(&consumer, backoff, &mut shutdown_rx, &mut buffered).await,
+                poll_during_backoff(&consumer, backoff, &mut shutdown_rx, &mut buffered, &health,)
+                    .await,
                 BackoffOutcome::Shutdown
             ) {
                 health.metrics.inflight.set(0);
@@ -534,6 +544,10 @@ fn retain_owned_records(consumer: &IngestionConsumer, buffered: &mut VecDeque<Bu
     buffered.retain(|record| record_is_owned(consumer, &record.message, record.assignment_epoch));
 }
 
+fn retry_buffer_has_capacity(buffered_records: usize) -> bool {
+    buffered_records < MAX_RETRY_BUFFERED_MESSAGES
+}
+
 fn resume_if_buffer_empty(
     consumer: &IngestionConsumer,
     buffered: &VecDeque<BufferedMessage>,
@@ -559,10 +573,22 @@ async fn poll_during_backoff(
     duration: Duration,
     shutdown: &mut watch::Receiver<bool>,
     buffered: &mut VecDeque<BufferedMessage>,
+    health: &HealthState,
 ) -> BackoffOutcome {
     let delay = tokio::time::sleep(duration);
     tokio::pin!(delay);
     loop {
+        if !retry_buffer_has_capacity(buffered.len()) {
+            tokio::select! {
+                _ = &mut delay => return BackoffOutcome::Elapsed,
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return BackoffOutcome::Shutdown;
+                    }
+                }
+            }
+            continue;
+        }
         tokio::select! {
             _ = &mut delay => return BackoffOutcome::Elapsed,
             changed = shutdown.changed() => {
@@ -572,6 +598,13 @@ async fn poll_during_backoff(
             }
             message = consumer.recv() => {
                 if let Ok(message) = message {
+                    if consumer
+                        .assignment()
+                        .and_then(|assignment| consumer.pause(&assignment))
+                        .is_err()
+                    {
+                        health.set_dependency("kafka", false);
+                    }
                     buffered.push_back(BufferedMessage {
                         message: message.detach(),
                         assignment_epoch: consumer.context().epoch(),
@@ -1096,6 +1129,13 @@ mod tests {
         let detached_epoch = context.epoch();
         context.invalidate_assignment();
         assert_ne!(detached_epoch, context.epoch());
+    }
+
+    #[test]
+    fn retry_buffer_has_a_hard_application_limit() {
+        assert!(retry_buffer_has_capacity(MAX_RETRY_BUFFERED_MESSAGES - 1));
+        assert!(!retry_buffer_has_capacity(MAX_RETRY_BUFFERED_MESSAGES));
+        assert!(!retry_buffer_has_capacity(MAX_RETRY_BUFFERED_MESSAGES + 1));
     }
 
     #[test]
