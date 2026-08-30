@@ -6,7 +6,7 @@
 use ingestion::runtime::postgres_runtime_schema_ready;
 use ingestion::worker::{
     command_message_key, command_message_key_matches, parse_authenticated_command,
-    source_object_key, CommandErrorKind,
+    source_object_key, CommandErrorKind, FileOperation,
 };
 use ingestion::{
     inspect_ingestion_command_receipt, parse_file_full, persist_ingestion_command, CommandOutcome,
@@ -49,6 +49,49 @@ fn payload_with_command_id(command_id: &str) -> Vec<u8> {
         serde_json::from_slice(&valid_payload()).expect("valid test payload");
     payload["command_id"] = serde_json::Value::String(command_id.to_owned());
     serde_json::to_vec(&payload).expect("serialize command ID test payload")
+}
+
+fn valid_delete_payload() -> Vec<u8> {
+    br#"{
+        "schema_version":"1",
+        "operation":"DELETE",
+        "command_id":"018f0806-3d73-7a8f-b5a5-c4b25f9d4702",
+        "commit_sha":"42cd8e17643358a7a4307c92dfb3a025d59045f4",
+        "path":"src/order service.go"
+    }"#
+    .to_vec()
+}
+
+#[test]
+fn legacy_upsert_and_delete_are_closed_distinct_commands() {
+    let (_, upsert) =
+        parse_authenticated_command(&valid_payload(), &valid_headers(), 16 * 1024 * 1024)
+            .expect("legacy upsert");
+    assert_eq!(upsert.operation(), FileOperation::Upsert);
+    assert!(upsert.source_sha256().is_some());
+
+    let (scope, delete) = parse_authenticated_command(
+        &valid_delete_payload(),
+        &valid_headers(),
+        16 * 1024 * 1024,
+    )
+    .expect("authenticated delete");
+    assert_eq!(delete.operation(), FileOperation::Delete);
+    assert_eq!(delete.source_sha256(), None);
+    assert_eq!(command_message_key(&scope, &delete), command_message_key(&scope, &upsert));
+
+    let delete_with_source = String::from_utf8(valid_delete_payload())
+        .unwrap()
+        .replace(
+            "\n    }",
+            ",\n        \"source_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n        \"source_size_bytes\":0\n    }",
+        );
+    assert!(parse_authenticated_command(
+        delete_with_source.as_bytes(),
+        &valid_headers(),
+        16 * 1024 * 1024
+    )
+    .is_err());
 }
 
 #[test]
