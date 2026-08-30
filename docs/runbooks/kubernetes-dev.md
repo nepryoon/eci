@@ -32,6 +32,14 @@ uses atomic Helm upgrades. Source-built ECI applications are disabled by
 default because no published image is assumed; infrastructure readiness is
 never represented by sleep/placeholder containers.
 
+An existing `eci-dev` cluster is reusable only when every kind node resolves
+through Docker to the exact pinned `kindest/node` repository digest and the
+live API server reports Kubernetes `v1.34.0`. A tag match is not sufficient.
+Any missing metadata, different digest, or version mismatch fails before
+changing context, namespace, Secret, operator, or Helm release. Recreate the
+disposable cluster explicitly with `task k8s:dev:down` followed by
+`task k8s:dev:up`; the bootstrap never deletes a mismatched cluster itself.
+
 For a fresh cluster, `ECI_DEV_PASSWORD` may provide the initial disposable
 credential; otherwise the script generates one. For an existing cluster,
 `eci-runtime` is authoritative. Supplying a different override fails before

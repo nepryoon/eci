@@ -221,6 +221,7 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
 |---|---|
 | Helm/kubectl/kind assente | preflight fallisce con versione richiesta e link/script, nessuna mutazione |
 | Docker indisponibile | `k8s:validate` resta CPU-only; `k8s:dev:up` fallisce prima di creare cluster |
+| cluster `eci-dev` esistente con node digest o server Kubernetes diverso | bootstrap rifiuta il riuso prima di ogni mutazione; non elimina automaticamente il cluster |
 | secret runtime assente | pod fail-closed/non schedulato; bootstrap stampa solo nomi chiave, mai valori |
 | override password diverso su cluster dev esistente | bootstrap termina prima di riscrivere Secret; la rotazione credenziali deve aggiornare esplicitamente ruolo e consumer |
 | Secret di un sibling riusato o chiave non enumerata | non referenziato dal Pod; review/policy test non-zero |
@@ -308,7 +309,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
   ACL senza wildcard, identità distinte, TLS reader/writer e smoke allow/deny.
 - Vendor runtime: post-render Qdrant richiede esattamente l'immagine attesa e
   rifiuta qualsiasi container non pin-nato per digest.
-- Integration locale: kind pinned, install operatori/chart pinned, apply
+- Integration locale: kind pinned e riuso ammesso soltanto dopo verifica di
+  ogni node image digest più versione API server; install operatori/chart pinned, apply
   atomic, `kubectl wait`, probe DNS/TCP/HTTP e raccolta eventi in errore.
 - Regression: `task build`, `task lint`, `task test`, `task guard`; nessuna GPU
   e nessun servizio SaaS nel gate CI.
@@ -474,6 +476,13 @@ cluster MinIO distribuito a quattro PVC. Non
 emerge una decisione architetturale nuova: l'uso di Helm ufficiale per Neo4j e
 Qdrant è esplicitamente una delle alternative già ammesse dall'ADD; quindi non
 serve ADR.
+
+Il passaggio di review sul riuso del cluster ha inoltre rifiutato l'assunzione
+che il solo nome `eci-dev` provi la toolchain. Il bootstrap risolve per ogni
+container kind l'image ID Docker e richiede che i `RepoDigests` contengano
+l'esatto pin SPEC-062; interroga inoltre il server sul context esplicito e
+richiede `v1.34.0`. Il test comportamentale copre success, digest differente e
+versione differente; il gate è eseguito anche subito dopo una nuova creazione.
 
 Il pass security successivo ha individuato due confused-deputy boundary e ha
 prodotto ADR-0019. Le ACL ora rendono Kafka Connect l'unico writer dei topic

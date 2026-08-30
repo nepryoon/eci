@@ -3,18 +3,23 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT_DIR/deploy/k8s/lib/dev-password.sh"
+source "$ROOT_DIR/deploy/k8s/lib/kind-cluster.sh"
 HELM_BIN="${HELM_BIN:-helm}"
 KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
 KIND_BIN="${KIND_BIN:-kind}"
+DOCKER_BIN="${DOCKER_BIN:-docker}"
+ECI_KIND_NODE_IMAGE="kindest/node@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a"
+ECI_KIND_KUBERNETES_VERSION="1.34.0"
 
-for executable in docker "$HELM_BIN" "$KUBECTL_BIN" "$KIND_BIN" openssl base64; do
+for executable in "$DOCKER_BIN" "$HELM_BIN" "$KUBECTL_BIN" "$KIND_BIN" openssl base64; do
   command -v "$executable" >/dev/null || { echo "required executable not found: $executable" >&2; exit 1; }
 done
-docker info >/dev/null
+"$DOCKER_BIN" info >/dev/null
 
 if ! "$KIND_BIN" get clusters | grep -qx eci-dev; then
-  "$KIND_BIN" create cluster --name eci-dev --config "$ROOT_DIR/deploy/k8s/kind-config.yaml" --image kindest/node@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a
+  "$KIND_BIN" create cluster --name eci-dev --config "$ROOT_DIR/deploy/k8s/kind-config.yaml" --image "$ECI_KIND_NODE_IMAGE"
 fi
+eci_verify_existing_kind_cluster "$ECI_KIND_NODE_IMAGE" "$ECI_KIND_KUBERNETES_VERSION"
 "$KUBECTL_BIN" config use-context kind-eci-dev >/dev/null
 
 "$HELM_BIN" template eci "$ROOT_DIR/deploy/k8s/eci-platform" --show-only templates/namespaces.yaml | "$KUBECTL_BIN" apply -f -
@@ -92,7 +97,7 @@ unset ECI_CDC_PASSWORD
 # the supplied security configuration. Generate the bcrypt hash at install
 # time so the repository never contains a default or literal dev password.
 ECI_OPENSEARCH_HASH="$(printf '%s\n' "$ECI_DEV_PASSWORD" | \
-  docker run --rm -i docker.io/opensearchproject/opensearch@sha256:23297b8d8545e129dd58c254ed08d786dc552410ba772983ad2af31048d2f04b /bin/bash -c \
+  "$DOCKER_BIN" run --rm -i docker.io/opensearchproject/opensearch@sha256:23297b8d8545e129dd58c254ed08d786dc552410ba772983ad2af31048d2f04b /bin/bash -c \
   'IFS= read -r password; exec /usr/share/opensearch/plugins/opensearch-security/tools/hash.sh -p "$password"' | \
   tail -n 1)"
 test -n "$ECI_OPENSEARCH_HASH"

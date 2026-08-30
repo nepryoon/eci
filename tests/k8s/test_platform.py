@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 
 import yaml
@@ -737,6 +738,84 @@ class PlatformChartTests(unittest.TestCase):
         first_runtime_secret_write = "create secret generic eci-runtime"
         self.assertIn(resolution, up)
         self.assertLess(up.index(resolution), up.index(first_runtime_secret_write))
+
+    def test_review_existing_kind_cluster_must_match_pinned_image_and_version(self) -> None:
+        policy = ROOT / "deploy/k8s/lib/kind-cluster.sh"
+        expected_image = (
+            "kindest/node@sha256:"
+            "7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a"
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            fake_bin = Path(directory)
+            commands = {
+                "kind": """#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "get nodes --name eci-dev" ]]
+printf '%s\\n' eci-dev-control-plane
+""",
+                "docker": """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == inspect ]]; then
+  printf '%s\\n' sha256:local-node-image
+elif [[ "$1 $2" == "image inspect" ]]; then
+  printf '%s\\n' "$FAKE_REPO_DIGEST"
+else
+  exit 2
+fi
+""",
+                "kubectl": """#!/usr/bin/env bash
+set -euo pipefail
+cat <<JSON
+{"clientVersion":{"gitVersion":"v1.34.0"},"serverVersion":{"gitVersion":"${FAKE_SERVER_VERSION}"}}
+JSON
+""",
+            }
+            for name, body in commands.items():
+                command = fake_bin / name
+                command.write_text(body)
+                command.chmod(0o755)
+
+            def verify(digest: str, version: str) -> subprocess.CompletedProcess[str]:
+                environment = os.environ.copy()
+                environment.update(
+                    FAKE_REPO_DIGEST=digest,
+                    FAKE_SERVER_VERSION=version,
+                )
+                return subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        (
+                            'source "$1"; KIND_BIN="$2" DOCKER_BIN="$3" KUBECTL_BIN="$4" '
+                            'eci_verify_existing_kind_cluster "$5" "$6"'
+                        ),
+                        "_",
+                        str(policy),
+                        str(fake_bin / "kind"),
+                        str(fake_bin / "docker"),
+                        str(fake_bin / "kubectl"),
+                        expected_image,
+                        "1.34.0",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+
+            matched = verify(expected_image, "v1.34.0")
+            self.assertEqual((matched.returncode, matched.stderr), (0, ""))
+
+            wrong_image = verify(
+                "kindest/node@sha256:" + "0" * 64,
+                "v1.34.0",
+            )
+            self.assertNotEqual(wrong_image.returncode, 0)
+            self.assertIn("does not use the pinned image digest", wrong_image.stderr)
+
+            wrong_version = verify(expected_image, "v1.33.7")
+            self.assertNotEqual(wrong_version.returncode, 0)
+            self.assertIn("Kubernetes server version", wrong_version.stderr)
 
     def test_scenario_6_versions_and_api_groups_are_pinned(self) -> None:
         versions = yaml.safe_load((ROOT / "deploy/k8s/operator-versions.yaml").read_text())

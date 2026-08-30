@@ -14,6 +14,8 @@ Neo4j Enterprise licensing/RBAC, GPU capacity, disaster recovery, or D9 SLOs.
 Results:
 
 - clean kind bootstrap: PASS;
+- exact kind node repository digest and Kubernetes server version reuse gate:
+  PASS (deterministic mismatch tests plus live match on `eci-dev`);
 - all pinned operator/chart releases deployed: PASS;
 - PostgreSQL, Kafka, Neo4j 5.26.30, Qdrant, OpenSearch, Redis, MinIO, OPA and
   Keycloak readiness: PASS;
