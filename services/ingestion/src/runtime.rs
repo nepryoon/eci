@@ -32,7 +32,7 @@ use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{
     BaseConsumer, CommitMode, Consumer, ConsumerContext, Rebalance, StreamConsumer,
 };
-use rdkafka::message::{Headers, Message, OwnedMessage};
+use rdkafka::message::{BorrowedMessage, Headers, Message, OwnedMessage};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{Offset, TopicPartitionList};
 use sha2::{Digest, Sha256};
@@ -384,9 +384,52 @@ pub async fn run() -> Result<(), RuntimeError> {
             if let Some(link) = trace_link(&message) {
                 span.add_link(link);
             }
-            let action = process_message(&config, &minio, &message, &health.metrics)
-                .instrument(span)
-                .await;
+            let processing_config = config.clone();
+            let processing_minio = minio.clone();
+            let processing_message = message.clone();
+            let processing_metrics = health.metrics.clone();
+            let mut processing = tokio::spawn(
+                async move {
+                    process_message(
+                        &processing_config,
+                        &processing_minio,
+                        &processing_message,
+                        &processing_metrics,
+                    )
+                    .await
+                }
+                .instrument(span),
+            );
+            let action = loop {
+                tokio::select! {
+                    result = &mut processing => match result {
+                        Ok(action) => break action,
+                        Err(_) => break 'consume,
+                    },
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            match processing.await {
+                                Ok(action) => break action,
+                                Err(_) => break 'consume,
+                            }
+                        }
+                    }
+                    received = consumer.recv() => match received {
+                        Ok(received) => {
+                            if !buffer_or_rewind_polled_message(
+                                &consumer,
+                                &received,
+                                &mut buffered,
+                                &health,
+                            ) {
+                                processing.abort();
+                                break 'consume;
+                            }
+                        }
+                        Err(_) => health.set_dependency("kafka", false),
+                    }
+                }
+            };
             if !record_is_owned(&consumer, &message, message_epoch) {
                 retain_owned_records(&consumer, &mut buffered);
                 resume_if_buffer_empty(&consumer, &buffered, &health);
@@ -554,6 +597,41 @@ fn retry_buffer_has_capacity(buffered_records: usize) -> bool {
     buffered_records < MAX_RETRY_BUFFERED_MESSAGES
 }
 
+fn buffer_or_rewind_polled_message(
+    consumer: &IngestionConsumer,
+    message: &BorrowedMessage<'_>,
+    buffered: &mut VecDeque<BufferedMessage>,
+    health: &HealthState,
+) -> bool {
+    if consumer
+        .assignment()
+        .and_then(|assignment| consumer.pause(&assignment))
+        .is_err()
+    {
+        health.set_dependency("kafka", false);
+    }
+    if retry_buffer_has_capacity(buffered.len()) {
+        buffered.push_back(BufferedMessage {
+            message: message.detach(),
+            assignment_epoch: consumer.context().epoch(),
+        });
+        true
+    } else if consumer
+        .seek(
+            message.topic(),
+            message.partition(),
+            Offset::Offset(message.offset()),
+            Duration::from_millis(100),
+        )
+        .is_ok()
+    {
+        true
+    } else {
+        health.set_dependency("kafka", false);
+        false
+    }
+}
+
 fn jittered_backoff(cap: Duration) -> Duration {
     let cap_ms = u64::try_from(cap.as_millis()).unwrap_or(u64::MAX);
     let floor_ms = cap_ms / 2;
@@ -606,16 +684,12 @@ async fn poll_during_backoff(
                             // pause. Polling remains mandatory for group liveness.
                             // Rewind the one record we had to drain so the bounded
                             // application buffer never drops or acknowledges it.
-                            if consumer
-                                .seek(
-                                    message.topic(),
-                                    message.partition(),
-                                    Offset::Offset(message.offset()),
-                                    Duration::from_millis(100),
-                                )
-                                .is_err()
-                            {
-                                health.set_dependency("kafka", false);
+                            if !buffer_or_rewind_polled_message(
+                                consumer,
+                                &message,
+                                buffered,
+                                health,
+                            ) {
                                 return BackoffOutcome::Shutdown;
                             }
                         }
@@ -634,17 +708,9 @@ async fn poll_during_backoff(
             }
             message = consumer.recv() => {
                 if let Ok(message) = message {
-                    if consumer
-                        .assignment()
-                        .and_then(|assignment| consumer.pause(&assignment))
-                        .is_err()
-                    {
-                        health.set_dependency("kafka", false);
+                    if !buffer_or_rewind_polled_message(consumer, &message, buffered, health) {
+                        return BackoffOutcome::Shutdown;
                     }
-                    buffered.push_back(BufferedMessage {
-                        message: message.detach(),
-                        assignment_epoch: consumer.context().epoch(),
-                    });
                 }
             }
         }

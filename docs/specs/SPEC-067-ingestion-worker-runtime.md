@@ -113,6 +113,9 @@ pub fn persist_ingestion_command(
    continua a servire `StreamConsumer::recv()` per mantenere viva la membership:
    qualunque record prefetched esposto dopo il pause viene riavvolto allo stesso
    offset, mai aggiunto oltre il limite, scartato o acknowledged.
+   Lo stesso poll concorrente resta attivo durante fetch, parse e persistenza
+   di un comando valido, quindi un input grande non puo' far scadere
+   `max.poll.interval.ms` soltanto per il tempo di elaborazione.
 6. **Provenance completa.** Given un comando applicato, When si leggono
    CodeNode/CodeRelation/CodeChunk e relativi eventi, Then provenance contiene
    scope trusted, `repo`, `commit_sha`, `path`, un solo `ingested_at` DB e non
@@ -144,6 +147,7 @@ pub fn persist_ingestion_command(
 | MinIO header/body timeout o 5xx, Kafka transport, PostgreSQL unavailable | transient; no commit, readiness 503, retry bounded |
 | endpoint MinIO HTTP, CA PostgreSQL/MinIO assente o non valida | startup fail-closed; HTTPS/TLS con hostname e CA verificati obbligatori |
 | rebalance durante fetch/retry/persist/DLQ publish | record invalidato dall'epoch; ownership riverificata dopo ogni await e prima dell'offset commit |
+| parse/persist di un comando valido supera un ciclo di poll | elaborazione isolata in task; il consume-loop continua a pollare, pausa e bufferizza/riavvolge deterministicamente |
 | nuova assignment durante backoff | assignment pausata; buffer applicativo massimo 64 record; a cap piena il poll continua e ogni record prefetched viene riavvolto allo stesso offset |
 | migration receipt/tabella canonica assente o ruolo senza un privilegio runtime | readiness PostgreSQL 503 anche se la connessione e `SELECT 1` funzionano |
 | PostgreSQL auth/connect/query/lock/commit stall | connect 5s, statement/TCP 10s e lock 5s; transient senza offset commit |
@@ -289,3 +293,6 @@ revoca di `SELECT` sulla receipt.
 Lo startup probe usa `/live`, separato dal dependency gate `/ready`, così un
 outage iniziale prolungato non genera restart loop; il backoff esponenziale usa
 equal jitter tra meta' e intero cap per desincronizzare le repliche.
+Fetch, parse e persistenza sono eseguiti in un task separato mentre il loop
+continua a pollare Kafka; il controllo epoch/ownership dopo il join resta il
+gate prima di qualunque offset commit.
