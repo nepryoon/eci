@@ -265,10 +265,11 @@ Legenda delega: 🟢 = delega ~90% (review leggera) · 🟡 = delega con review 
 |---|---|---|---|
 | T7.1 | Manifests/Helm + operatori (Strimzi, CloudNativePG, Neo4j, Qdrant, OpenSearch) su cluster dev | T6.6 | 🟡 |
 | T7.1a | Ingestion worker runtime long-running: ingresso commit autenticato/durabile, readiness e backpressure reali | T7.1 | 🔴 |
+| T7.1b | Orchestrator runtime long-running: API autenticata, streaming, readiness e shutdown reali sopra il grafo T5.1 | T7.1 | 🔴 |
 | T7.2 | Autoscaling: HPA CPU parsing, KEDA Kafka lag sui sink, KEDA num_requests_waiting su vLLM | T7.1a | 🟡 |
-| T7.3 | OTel end-to-end (span links Kafka, gen_ai.*) + dashboard Grafana + alert | T7.1 | 🟢 |
+| T7.3 | OTel end-to-end (span links Kafka, gen_ai.*) + dashboard Grafana + alert | T7.1b | 🟢 |
 | T7.4 | Pipeline eval: Ragas campionata + tassi deterministici come metriche Prometheus + eval CI sul golden | T5.6 | 🟡 |
-| T7.5 | Load test k6 contro le latenze target della matrice D9 | T7.2 | 🟡 |
+| T7.5 | Load test k6 contro le latenze target della matrice D9 | T7.2, T7.3 | 🟡 |
 
 ---
 

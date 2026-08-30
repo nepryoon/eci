@@ -61,6 +61,7 @@ fi
   --set 'manager.securityContext.capabilities.drop[0]=ALL' \
   --set 'manager.extraEnv[0].name=SKIP_INIT_CONTAINER' \
   --set-string 'manager.extraEnv[0].value=true' \
+  --post-renderer "$ROOT_DIR/deploy/k8s/opensearch-operator-post-renderer.sh" \
   --wait --atomic --timeout 5m
 
 if [[ "${ECI_K8S_PROFILE:-production-like}" == dev ]]; then

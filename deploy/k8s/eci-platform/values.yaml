@@ -4,7 +4,6 @@ global:
   # applications only with registry-issued OCI digests from its release job.
   imageReferences:
     api-gateway: ""
-    orchestrator: ""
     retrieval-engine: ""
     verification: ""
     llm-gateway: ""
@@ -38,7 +37,6 @@ applications:
       secretEnv:
         - {name: ECI_OIDC_ISSUER, key: ECI_OIDC_ISSUER}
         - {name: ECI_OIDC_AUDIENCE, key: ECI_OIDC_AUDIENCE}
-    - {name: orchestrator, namespace: query-plane, port: 8080, metricsPort: 9090, replicas: 3, profile: io}
     - name: retrieval-engine
       namespace: query-plane
       port: 50053

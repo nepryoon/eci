@@ -41,6 +41,10 @@ The current Rust ingestion executable is truthfully packaged as the suspended
 requires an external read-only source PVC and a scope-only per-workload Secret.
 ADR-0016 records this temporary boundary; T7.1a owns the durable authenticated
 worker runtime required before CPU HPA can be claimed.
+The Python orchestrator is likewise CLI-only today, so this chart does not
+render an orchestrator Deployment or fictional listener. ADR-0017 records that
+truth boundary; T7.1b owns the authenticated long-running API, streaming,
+readiness and shutdown lifecycle required before T7.1 can be verified.
 Kafka uses a TLS-authenticated listener with simple authorization. Kafka
 Connect and every consumer have a distinct Strimzi `KafkaUser`; consumers
 mount the broker public `ca.crt` plus only their own `user.crt` and `user.key`, and literal ACLs

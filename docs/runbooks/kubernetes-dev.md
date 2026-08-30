@@ -94,6 +94,12 @@ Do not unsuspend the schedule or run two scopes through the same prepared
 Secret/PVC. ADR-0016 records the boundary; T7.1a replaces it with the
 authenticated durable worker pool required by D8 and T7.2 HPA.
 
+The current orchestrator image must not be added to `applications.workloads`:
+it contains only the `eci ask` and `eci eval-golden` CLI entrypoints and opens
+no service port. ADR-0017/T7.1b owns the authenticated long-running API,
+streaming protocol and real health probes. Until then, orchestration remains a
+deliberate deployment gap and T7.1 remains `implemented`, not `verified`.
+
 Application enablement is a two-phase operation because the Strimzi and
 OpenSearch operators create identities/CAs only after the infrastructure CRs
 exist. After the infrastructure release is Ready, the Strimzi User Operator

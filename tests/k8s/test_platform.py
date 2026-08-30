@@ -18,7 +18,7 @@ HELM = os.environ.get("HELM_BIN", "helm")
 
 
 APPLICATION_IMAGES = (
-    "api-gateway", "orchestrator", "retrieval-engine", "verification",
+    "api-gateway", "retrieval-engine", "verification",
     "llm-gateway", "summarization", "semantic-cache", "ingestion",
     "embedding-worker", "sink-graph", "sink-vector", "sink-search", "gds-impact",
 )
@@ -72,7 +72,6 @@ class PlatformChartTests(unittest.TestCase):
         expected = {
             ("ingress", "envoy"),
             ("ingress", "api-gateway"),
-            ("query-plane", "orchestrator"),
             ("query-plane", "retrieval-engine"),
             ("query-plane", "verification"),
             ("query-plane", "llm-gateway"),
@@ -88,6 +87,7 @@ class PlatformChartTests(unittest.TestCase):
             ("data-plane", "kafka-connect"),
         }
         self.assertTrue(expected.issubset(deployments), expected - deployments)
+        self.assertNotIn(("query-plane", "orchestrator"), deployments)
         cronjobs = {obj["metadata"]["name"] for obj in self.standard if obj.get("kind") == "CronJob"}
         self.assertEqual(cronjobs, {"gds-impact", "ingestion-template"})
         ingestion = self.by_key[("CronJob", "ingestion-plane", "ingestion-template")]
@@ -404,6 +404,44 @@ class PlatformChartTests(unittest.TestCase):
             for container in self._containers(obj):
                 image = container.get("image", "")
                 self.assertRegex(image, r"@sha256:[0-9a-f]{64}$")
+
+    def test_review_opensearch_operator_images_are_post_rendered_to_digests(self) -> None:
+        renderer = ROOT / "deploy/k8s/opensearch-operator-post-renderer.sh"
+        source = """apiVersion: apps/v1
+kind: Deployment
+image:
+  repository: schema-field-not-a-pod-image
+spec:
+  template:
+    spec:
+      containers:
+        - image: \"opensearchproject/opensearch-operator:2.8.0\"
+        - image: \"registry.k8s.io/kubebuilder/kube-rbac-proxy:v0.15.0\"
+"""
+        completed = subprocess.run(
+            [str(renderer)], input=source, check=True, capture_output=True, text=True
+        )
+        images = [
+            line.strip().removeprefix("- image: ").strip('"')
+            for line in completed.stdout.splitlines()
+            if "- image:" in line
+        ]
+        self.assertEqual(
+            images,
+            [
+                "opensearchproject/opensearch-operator@sha256:ad86464ea5b1661ea25294058e78b3697286cc6b742df7a543fd96d2de0bc61a",
+                "registry.k8s.io/kubebuilder/kube-rbac-proxy@sha256:d8cc6ffb98190e8dd403bfe67ddcb454e6127d32b87acc237b3e5240f70a20fb",
+            ],
+        )
+        mutable = subprocess.run(
+            [str(renderer)],
+            input=source + '        - image: "example.invalid/extra:latest"\n',
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(mutable.returncode, 0)
+        install = (ROOT / "deploy/k8s/install-operators.sh").read_text()
+        self.assertIn('--post-renderer "$ROOT_DIR/deploy/k8s/opensearch-operator-post-renderer.sh"', install)
 
     def test_review_runtime_routes_and_envoy_are_fail_closed(self) -> None:
         routing = self.by_key[("ConfigMap", "query-plane", "eci-runtime-routing")]["data"]

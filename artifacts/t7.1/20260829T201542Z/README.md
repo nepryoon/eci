@@ -30,6 +30,8 @@ Results:
   to its own DLQ allowed and publish to sink-vector's DLQ denied: PASS;
 - Qdrant live pod spec and imageID match the registry-resolved immutable
   runtime digest: PASS;
+- OpenSearch operator manager and kube-rbac-proxy live pod spec/imageID match
+  their registry-resolved multi-architecture digests: PASS;
 - registry-resolved SHA-256 pins for every rendered third-party container:
   PASS; no non-existent ECI image is a default;
 - CloudNativePG webhook ingress on the operator-only selector/TCP 9443: PASS;
@@ -59,7 +61,7 @@ The later supply-chain/routing review fixes were verified at revision 6. The
 final least-privilege/supply-chain review fixes were then applied at ECI
 revision 8 after all five operator chart archives passed their checked-in
 SHA-256 gates and upgraded the real cluster releases to revision 6. The
-catalog of 205 application objects was exercised only with an explicit
+catalog of 191 application objects was exercised only with an explicit
 `registry.example.invalid` unit fixture; this proves template completeness and
 digest enforcement, not image publication or application readiness. Released
 applications remain opt-in and require real registry digests plus external
@@ -74,3 +76,10 @@ producer smoke passed. Qdrant is post-rendered to the verified multi-arch
 digest before Helm apply. The opt-in GPU manifests now require canonical model
 paths from a read-only external PVC; no GPU workload or model download was
 claimed as runtime evidence.
+The final review also proved that the Python orchestrator is CLI-only. Its
+fictional Deployment and unused allow-list flows were removed; ADR-0017/T7.1b
+track the authenticated long-running runtime required before T7.1 verification.
+OpenSearch Operator revision 9 was then applied through a fail-closed
+post-renderer: both the manager and kube-rbac-proxy references, plus their live
+image IDs, matched the recorded multi-arch digests and the full connectivity
+smoke remained green.

@@ -72,7 +72,7 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    `applications.enabled=true`, When il chart produce YAML, Then esistono i
    namespace `ingress`, `query-plane`,
    `gpu-plane`, `ingestion-plane`, `data-plane`, `observability`; Deployment,
-   Service, account e PDB coprono Envoy/API helper, orchestrator, retrieval,
+   Service, account e PDB coprono Envoy/API gateway, retrieval,
    verification, LLM gateway, summarization, semantic cache, tre sink,
    ingestion CPU, embedding/reranker/vLLM; GDS è un workload batch esplicito.
    Senza tali riferimenti il profilo infrastrutturale resta applicazioni-off e
@@ -140,6 +140,9 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    template CronJob sospeso, con PVC sorgente read-only e scope Secret
    enumerato, non come Deployment/listener inesistente. ADR-0016 e T7.1a
    rendono esplicito che il worker pool D8 resta da implementare.
+   Anche l'orchestrator corrente espone soltanto il CLI `eci ask`/`eval-golden`:
+   non viene renderizzato come Deployment con listener inventato. ADR-0017 e
+   T7.1b rendono esplicito il runtime API/streaming ancora da implementare.
    I server GPU richiedono un PVC modelli esterno read-only e ricevono path e
    model/served ID canonici; nessun download di pesi o modello alternativo è
    un fallback implicito.
@@ -151,7 +154,9 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    attende readiness con timeout bounded. Il chart Qdrant, che richiede un tag
    semver nei values, passa sempre da un post-renderer che sostituisce
    l'immagine runtime con il digest multi-arch verificato e rifiuta ogni
-   immagine mutabile residua.
+   immagine mutabile residua. Anche il chart OpenSearch Operator passa da un
+   post-renderer fail-closed che fissa per digest sia manager sia
+   `kube-rbac-proxy`.
 7. **Connettività reale.** Given il cluster dev pronto, When
    `task k8s:dev:verify` gira, Then un probe in-cluster risolve e raggiunge
    PostgreSQL, Kafka bootstrap, Kafka Connect con plugin PostgreSQL Debezium,
@@ -212,7 +217,8 @@ NetworkPolicy default-deny e allow-list, SA dedicati senza automount, identità
 mTLS Kafka per workload con ACL literal, pod security, secret references, pin
 di release/immagini, script con target fisso e fail-closed.
 
-Non-goals: worker ingestion long-running (T7.1a), autoscaling HPA/KEDA (T7.2), collector/dashboard/alert completi
+Non-goals: worker ingestion long-running (T7.1a), orchestrator server/API
+long-running (T7.1b), autoscaling HPA/KEDA (T7.2), collector/dashboard/alert completi
 (T7.3), pipeline eval (T7.4), load test/SLO (T7.5), produzione cloud,
 provisioning DNS/certificati/GPU, accettazione licenza Neo4j per conto di un
 operatore, backup/restore production e modifica ADD/contratti. Il dev smoke non
@@ -300,6 +306,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       probe bounded; nessun download di pesi è implicito.
 - [x] Ingestion CLI è modellato come template Job sospeso con input/scope
       espliciti, mai come server fittizio; deviazione D8 tracciata in ADR-0016.
+- [x] Orchestrator CLI non è modellato come Deployment/listener fittizio;
+      deviazione runtime tracciata in ADR-0017/T7.1b.
 - [x] Kubeconform valida built-in e CRD contro schemi pinned.
 - [x] Cluster dev realmente creato; operatori/store Ready e connettività
       in-cluster verificata, oppure eventuale limite esterno/risorse è riportato
@@ -308,6 +316,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       teardown scoped e raccolta diagnostica.
 - [ ] T7.1a sostituisce il Job transitorio con worker Deployment 4–40 e
       readiness/backpressure reali; solo allora lo stato può diventare verified.
+- [ ] T7.1b fornisce il server orchestrator autenticato/streaming e probe reali;
+      solo allora l'inventario applicativo T7.1 può diventare verified.
 - [ ] `task build`, `task lint`, `task test`, `task guard`, `task k8s:validate`
       e CI verdi; SPEC `verified` solo dopo evidenza e review.
 
