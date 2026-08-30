@@ -406,7 +406,7 @@ pub async fn run() -> Result<(), RuntimeError> {
                     result = &mut processing => match result {
                         Ok(action) => break action,
                         Err(_) => {
-                            span.record("ingestion.outcome", "failed");
+                            span.record("ingestion.outcome", "retry");
                             break 'consume;
                         }
                     },
@@ -415,7 +415,7 @@ pub async fn run() -> Result<(), RuntimeError> {
                             match processing.await {
                                 Ok(action) => break action,
                                 Err(_) => {
-                                    span.record("ingestion.outcome", "failed");
+                                    span.record("ingestion.outcome", "retry");
                                     break 'consume;
                                 }
                             }
