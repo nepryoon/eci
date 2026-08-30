@@ -33,6 +33,45 @@ fn valid_headers() -> Vec<(String, Vec<u8>)> {
 }
 
 #[test]
+fn checked_in_command_contract_is_closed_and_matches_runtime_limits() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/jsonschema/ingestion-file-command.json"
+    );
+    let schema: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).expect("read command contract"))
+            .expect("parse command contract");
+    assert_eq!(schema["additionalProperties"], false);
+    assert_eq!(schema["properties"]["schema_version"]["const"], "1");
+    assert_eq!(schema["properties"]["path"]["maxLength"], 1024);
+    assert_eq!(
+        schema["properties"]["source_size_bytes"]["maximum"],
+        16 * 1024 * 1024
+    );
+    assert_eq!(
+        schema["required"],
+        serde_json::json!([
+            "schema_version",
+            "command_id",
+            "commit_sha",
+            "path",
+            "source_sha256",
+            "source_size_bytes"
+        ])
+    );
+    for forbidden in [
+        "tenant_id",
+        "repository",
+        "acl_group",
+        "url",
+        "bucket",
+        "key",
+    ] {
+        assert!(schema["properties"].get(forbidden).is_none());
+    }
+}
+
+#[test]
 fn authenticated_headers_are_the_only_scope_authority() {
     let (scope, command) =
         parse_authenticated_command(&valid_payload(), &valid_headers(), 16 * 1024 * 1024)
