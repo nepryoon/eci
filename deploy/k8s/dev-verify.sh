@@ -29,7 +29,7 @@ test -n "$connect_pod_ip"
 "$KUBECTL_BIN" -n data-plane exec "$connect_pod" -c kafka-connect -- \
   /bin/bash -ec 'if curl -fsS --connect-timeout 2 "http://${1}:8083/connectors" >/dev/null 2>&1; then echo "Kafka Connect REST listens on pod IP" >&2; exit 1; fi' _ "$connect_pod_ip"
 echo 'Debezium PostgreSQL connector plugin through loopback-only REST: PASS'
-"$KUBECTL_BIN" -n data-plane wait --for=condition=Available deployment/redis --timeout=10m
+"$KUBECTL_BIN" -n data-plane rollout status statefulset/redis --timeout=10m
 "$KUBECTL_BIN" -n data-plane rollout status statefulset/minio --timeout=10m
 "$KUBECTL_BIN" -n query-plane wait --for=condition=Available deployment/opa --timeout=10m
 "$KUBECTL_BIN" -n ingress wait --for=condition=Available deployment/keycloak --timeout=10m

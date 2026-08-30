@@ -36,6 +36,7 @@ resources:
     limits: {cpu: "1", memory: 1536Mi}
 
 dataPlane:
+  redis: {storage: 1Gi}
   postgres: {instances: 1, storage: 1Gi}
   kafka: {replicas: 1, storage: 1Gi, topicPartitions: 1}
   openSearch:

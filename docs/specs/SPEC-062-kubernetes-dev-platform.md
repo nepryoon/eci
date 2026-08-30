@@ -132,8 +132,9 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    privata viene copiata fra namespace.
    Redis resta intenzionalmente a replica singola finché non esiste un
    topology replicato approvato: il Service non bilancia mai cache standalone
-   indipendenti. Una perdita cache è degradazione ricostruibile, non perdita di
-   una vista autorevole. Quando porta applicativa e porta metriche coincidono,
+   indipendenti. Lo StatefulSet usa AOF `everysec` e PVC (20 GiB standard,
+   1 GiB dev); una perdita cache oltre quel confine è degradazione
+   ricostruibile, non perdita di una vista autorevole. Quando porta applicativa e porta metriche coincidono,
    il Service/Pod dichiara una sola porta nominata, evitando chiavi duplicate.
    Ogni applicazione riceve solo un Secret per-workload con chiavi enumerate;
    nessun pod applicativo importa il Secret bootstrap condiviso. Le allow-list
@@ -322,7 +323,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       per topic/group; Connect è il solo writer primario, retry per-consumer e
       REST Connect loopback-only sono verificati; OpenSearch usa HTTPS+CA+Basic Auth;
       Redis `requirepass` è propagato esplicitamente, con unit test fail-closed.
-- [x] Redis standalone usa un solo backend coerente; porte service/metriche
+- [x] Redis standalone usa un solo backend StatefulSet con AOF/PVC e restart
+      persistence verificata; porte service/metriche
       coincidenti non producono duplicati Kubernetes; Keycloak dev espone
       discovery OIDC HTTPS 8443 con certificato hostname-bound non versionato.
 - [x] Secret applicativi e NetworkPolicy sono per-workload/per-destinazione;

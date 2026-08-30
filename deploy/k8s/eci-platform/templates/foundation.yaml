@@ -11,7 +11,6 @@ data:
 ---
 {{- $items := list
   (dict "name" "opa" "namespace" "query-plane" "image" "openpolicyagent/opa@sha256:39daf255ae7f25d81103f03a0c18308a50b7b5bb67907bed6166f70e24a970ff" "port" 8181 "replicas" (ternary 2 1 .Values.global.highAvailability) "args" (list "run" "--server" "--addr=0.0.0.0:8181" "/policies/eci_authz.rego"))
-  (dict "name" "redis" "namespace" "data-plane" "image" "redis@sha256:987c376c727652f99625c7d205a1cba3cb2c53b92b0b62aade2bd48ee1593232" "port" 6379 "replicas" 1 "args" (list "redis-server" "--requirepass" "$(REDIS_PASSWORD)"))
 }}
 {{- if eq .Values.global.profile "dev" }}
 {{- $items = append $items (dict "name" "keycloak" "namespace" "ingress" "image" "quay.io/keycloak/keycloak@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067" "port" 8443 "replicas" 1 "args" (list "start-dev" "--health-enabled=true" "--http-enabled=false" "--https-port=8443" "--https-certificate-file=/etc/eci/keycloak/tls/tls.crt" "--https-certificate-key-file=/etc/eci/keycloak/tls/tls.key" "--hostname=https://keycloak.ingress.svc:8443")) }}
@@ -92,10 +91,7 @@ spec:
           ports:
             - {name: service, containerPort: {{ $item.port }}}
           env:
-            {{- if eq $item.name "redis" }}
-            - name: REDIS_PASSWORD
-              valueFrom: {secretKeyRef: {name: {{ $.Values.global.existingSecret }}, key: redis-password}}
-            {{- else if eq $item.name "keycloak" }}
+            {{- if eq $item.name "keycloak" }}
             - name: KC_BOOTSTRAP_ADMIN_USERNAME
               valueFrom: {secretKeyRef: {name: {{ $.Values.global.existingSecret }}, key: keycloak-user}}
             - name: KC_BOOTSTRAP_ADMIN_PASSWORD

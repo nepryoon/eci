@@ -142,8 +142,15 @@ revision 13 and ECI to revision 18; Strimzi observed Kafka generation 4 with
 all four runtime container specs on their expected digests, then the complete
 readiness, connectivity, OPA and Kafka allowed/denied smoke passed.
 The final runtime-routing review pass deduplicated equal service/metrics ports,
-kept standalone Redis behind exactly one Service backend, and moved the bundled
+kept standalone Redis behind exactly one AOF/PVC-backed StatefulSet backend, and moved the bundled
 dev issuer path to HTTPS 8443. ECI revision 20 passed hostname verification,
 trusted OIDC discovery, readiness, connectivity, OPA and Kafka ACL smoke; all
 vendor releases remained Ready at revision 14. The generated certificate and
 private key are intentionally absent from this sanitized evidence directory.
+The first Redis migration attempt tried to change the existing ClusterIP to a
+headless Service; Kubernetes rejected that immutable-field mutation and Helm's
+rollback also reported failure after the new StatefulSet was created. No source
+or authoritative datastore was affected. Revision 23 retained the existing
+ClusterIP, selected only the new `redis-stateful` pod, removed the old Deployment
+and passed the complete smoke. A bounded key survived an explicit Redis pod
+restart through its 1 GiB PVC and was then deleted.

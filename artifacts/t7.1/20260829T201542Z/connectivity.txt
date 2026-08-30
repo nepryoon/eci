@@ -19,6 +19,7 @@ qdrant.data-plane.svc:6334=PASS
 qdrant-untrusted-data-plane-pod=DENIED (PASS; unauthenticated API ingress is component-scoped)
 eci-opensearch.data-plane.svc:9200=PASS
 redis.data-plane.svc:6379=PASS
+redis-aof-pvc-restart-persistence=PASS (bounded probe key removed after verification)
 minio.data-plane.svc:9000=PASS
 opa.query-plane.svc:8181=PASS
 opa-valid-scope-allow=PASS

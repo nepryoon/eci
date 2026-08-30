@@ -529,8 +529,29 @@ class PlatformChartTests(unittest.TestCase):
 
         # A ClusterIP must never load-balance one logical cache across
         # independent standalone Redis processes.
-        redis = self.by_key[("Deployment", "data-plane", "redis")]
+        redis = self.by_key[("StatefulSet", "data-plane", "redis")]
         self.assertEqual(redis["spec"]["replicas"], 1)
+        self.assertEqual(redis["spec"]["serviceName"], "redis")
+        self.assertEqual(
+            self.by_key[("Service", "data-plane", "redis")]["spec"]["selector"]
+            ["app.kubernetes.io/component"],
+            "redis-stateful",
+        )
+        self.assertNotEqual(
+            self.by_key[("Service", "data-plane", "redis")]["spec"].get("clusterIP"),
+            "None",
+        )
+        self.assertEqual(
+            redis["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"],
+            "20Gi",
+        )
+        redis_container = redis["spec"]["template"]["spec"]["containers"][0]
+        self.assertIn({"name": "data", "mountPath": "/data"}, redis_container["volumeMounts"])
+        dev_redis = keyed(self.dev)[("StatefulSet", "data-plane", "redis")]
+        self.assertEqual(
+            dev_redis["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"],
+            "1Gi",
+        )
 
         # The bundled issuer is dev-only, but it still uses HTTPS. The gateway
         # receives only the public certificate as a trust root, never its key.
@@ -592,6 +613,8 @@ class PlatformChartTests(unittest.TestCase):
         self.assertNotIn("--from-file=tls.key", up)
         self.assertIn("https://keycloak.ingress.svc:8443", verify)
         self.assertIn("--cacert /etc/eci/keycloak/ca.crt", verify)
+        self.assertIn("rollout status statefulset/redis", verify)
+        self.assertNotIn("deployment/redis", verify)
 
     def test_dev_probe_image_is_immutable(self) -> None:
         verifier = (ROOT / "deploy/k8s/dev-verify.sh").read_text()
@@ -940,7 +963,7 @@ spec:
             rendered,
         )
 
-    def test_review_data_plane_disablement_omits_minio(self) -> None:
+    def test_review_data_plane_disablement_omits_managed_storage(self) -> None:
         command = [
             HELM,
             "template",
@@ -958,6 +981,10 @@ spec:
         self.assertFalse(
             any(obj.get("metadata", {}).get("name") == "minio-headless" for obj in objects),
             "dataPlane.enabled=false must omit the MinIO headless Service",
+        )
+        self.assertFalse(
+            any(obj.get("metadata", {}).get("name") == "redis" for obj in objects),
+            "dataPlane.enabled=false must omit every Redis resource",
         )
 
     def test_review_application_enablement_requires_real_release_digests(self) -> None:

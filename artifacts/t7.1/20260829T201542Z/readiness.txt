@@ -1,5 +1,6 @@
 clean_install=PASS
-eci_release_revision=20
+eci_release_revision=23
+redis_stateful_upgrade_revision_21_22=FAILED_THEN_ROLLBACK_FAILED (discarded headless-Service attempt violated immutable clusterIP; existing Service/data remained available; corrected revision 23 retained ClusterIP)
 atomic_upgrade_revision_4=ROLLED_BACK (immutable legacy Job detected; no partial release)
 qdrant_bootstrap_hook_upgrade_revision_6=PASS
 operator_chart_sha256_upgrade_revision_8=PASS (5/5 canonical archives verified before Helm)
@@ -25,7 +26,7 @@ qdrant=Ready (1/1 dev; v1.19.0; runtime imageID sha256:a0e04fe623cb064502cd869ce
 opensearch=green (1/1 dev; version 3.2.0; Security initialized; runtime spec/imageID sha256:23297b8d8545e129dd58c254ed08d786dc552410ba772983ad2af31048d2f04b)
 opensearch_operator=Ready (revision 14; manager sha256:ad86464ea5b1661ea25294058e78b3697286cc6b742df7a543fd96d2de0bc61a; kube-rbac-proxy sha256:d8cc6ffb98190e8dd403bfe67ddcb454e6127d32b87acc237b3e5240f70a20fb)
 cloudnative_pg_operator=Ready (revision 14; sha256:a2701eb97cdd2a34b1fdb2cb51987f544b706e40bec72ae7146cd8580efefebb)
-redis=Ready (1/1 dev)
+redis=Ready (StatefulSet 1/1 dev; AOF everysec; PVC 1Gi Bound; restart persistence verified)
 minio=Ready (StatefulSet 1/1 dev; PVC 1Gi Bound)
 opa=Ready (1/1 dev; canonical policy loaded; allow and fail-closed decisions verified)
 keycloak=Ready (1/1 dev; HTTPS 8443; hostname-bound certificate verified)

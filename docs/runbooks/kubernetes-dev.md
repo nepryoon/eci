@@ -169,9 +169,14 @@ literal `KafkaUser` ACLs deny sibling topics/groups. HTTPS OpenSearch requires C
 username and password. Redis is deployed with `requirepass`, so Semantic Cache
 also requires the explicit `redis-password` mapping. Each client fails before
 serving/consuming if its trust or credential input is absent.
-Redis deliberately has one standalone replica: a ClusterIP never balances one
-logical cache across independent stores. Cache loss remains a reconstructible
-degradation; a replicated Redis topology is not claimed by T7.1.
+Redis deliberately has one standalone StatefulSet replica: a ClusterIP never
+balances one logical cache across independent stores. AOF `everysec` persists
+to a 20 GiB standard PVC (1 GiB dev), and restart persistence is part of the
+kind smoke evidence. Cache loss beyond that boundary remains a reconstructible
+degradation; a replicated Redis topology is not claimed by T7.1. During an
+upgrade from the former Deployment, the Service selector moves directly to
+the `redis-stateful` component so old and new independent stores are never
+simultaneous backends.
 
 The default-deny boundary is complemented by per-workload NetworkPolicy pairs:
 the egress side selects the calling pod and the ingress side selects the exact
