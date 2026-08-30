@@ -76,6 +76,13 @@ OpenSearch identities, and each sink has a distinct Secret. Workloads without
 credentials receive no Secret. Missing values are deployment errors; do not
 restore localhost defaults or reuse a sibling Secret.
 
+The production-like Neo4j route bootstraps the routing driver at
+`neo4j-core-1.data-plane.svc.cluster.local`; the dedicated GDS batch job uses
+`neo4j-gds.data-plane.svc.cluster.local` directly. The dev overlay overrides
+both with the single `neo4j.data-plane.svc.cluster.local` community release.
+Do not copy the dev hostname into production-like values or route GDS work to
+an arbitrary primary.
+
 Provision a read-only `eci-gpu-models` PVC before enabling GPU workloads. It
 must contain these preloaded paths: `/models/qwen3-coder-30b-a3b-instruct-fp8`,
 `/models/jina-code-embeddings-1.5b` and `/models/bge-reranker-v2-m3`. The chart
@@ -277,6 +284,8 @@ not recoverable; no external cluster is targeted.
 The standard profile runs four MinIO members in distributed mode, each with a
 100 GiB `ReadWriteOnce` PVC; the storage class is platform-supplied. The dev
 overlay deliberately reduces this to one member with a 1 GiB local-path PVC.
+Setting `dataPlane.enabled=false` omits MinIO together with the operator-backed
+data stores; it does not provision hidden object-storage PVCs.
 It verifies persistence-backed readiness but is not HA evidence. Failed PVC
 provisioning is fail-closed: do not replace the claim with `emptyDir`. Back up
 source, summary and artifact buckets before any StatefulSet/storage migration;

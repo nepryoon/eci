@@ -121,6 +121,8 @@ spec:
               envFrom:
                 - configMapRef: {name: eci-runtime-routing}
               env:
+                - name: NEO4J_URI
+                  value: {{ $.Values.routing.neo4jGDSURI | quote }}
                 {{- range $secret := $job.secretEnv }}
                 - name: {{ $secret.name }}
                   valueFrom:

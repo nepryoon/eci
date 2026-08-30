@@ -11,6 +11,12 @@ applications:
   # remains honest and never substitutes placeholders.
   enabled: false
 
+routing:
+  # The dev installer intentionally uses one community release named neo4j;
+  # there is no distinct GDS secondary in this profile.
+  neo4jURI: bolt://neo4j.data-plane.svc.cluster.local:7687
+  neo4jGDSURI: bolt://neo4j.data-plane.svc.cluster.local:7687
+
 cdc:
   replicas: 1
   heapOptions: "-Xms256M -Xmx768M"

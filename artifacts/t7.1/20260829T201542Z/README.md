@@ -82,7 +82,7 @@ The later supply-chain/routing review fixes were verified at revision 6. The
 final least-privilege/supply-chain review fixes were then applied at ECI
 revision 8 after all five operator chart archives passed their checked-in
 SHA-256 gates and upgraded the real cluster releases to revision 6. The
-catalog of 190 application objects was exercised only with an explicit
+catalog of 193 application objects was exercised only with an explicit
 `registry.example.invalid` unit fixture; this proves template completeness and
 digest enforcement, not image publication or application readiness. Released
 applications remain opt-in and require real registry digests plus external
@@ -119,3 +119,9 @@ revision 12 remained Ready after the final upgrade. ADR-0020 then separated
 the CDC database identity from the owner: ECI revision 15 reconciled the
 least-privilege replication role, migration 0005 and a live connector/slot
 successfully, without exposing the generated password.
+The final routing review corrected the production-like Neo4j bootstrap DNS to
+the installed `neo4j-core-1` release and gives GDS its distinct `neo4j-gds`
+endpoint; the dev overlay remains on its real single `neo4j` release. A
+regression also proves that `dataPlane.enabled=false` renders no MinIO service,
+StatefulSet, PDB or PVC template. These corrections are deterministic render
+evidence; they do not claim a licensed Enterprise cluster runtime exercise.

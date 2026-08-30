@@ -143,7 +143,11 @@ edge:
 routing:
   opaURL: http://opa.query-plane.svc.cluster.local:8181
   retrievalAddress: retrieval-engine.query-plane.svc.cluster.local:50053
-  neo4jURI: bolt://neo4j.data-plane.svc.cluster.local:7687
+  # The production-like Neo4j chart installs one server per release. The
+  # routing driver bootstraps from one primary and discovers the remaining
+  # cluster members. GDS batch work is pinned to the dedicated secondary.
+  neo4jURI: neo4j://neo4j-core-1.data-plane.svc.cluster.local:7687
+  neo4jGDSURI: bolt://neo4j-gds.data-plane.svc.cluster.local:7687
   qdrantHost: qdrant.data-plane.svc.cluster.local
   qdrantGRPCPort: "6334"
   embeddingServiceURL: http://embedder.gpu-plane.svc.cluster.local:80

@@ -117,7 +117,7 @@ class PlatformChartTests(unittest.TestCase):
         self.assertEqual(
             {item["name"] for item in gds_container["env"]},
             {
-                "NEO4J_USER", "NEO4J_PASSWORD", "ECI_GDS_ENTRY_NODE_ID",
+                "NEO4J_URI", "NEO4J_USER", "NEO4J_PASSWORD", "ECI_GDS_ENTRY_NODE_ID",
                 "ECI_GDS_TENANT_ID", "ECI_GDS_REPOSITORY", "ECI_GDS_ACL_GROUP",
             },
         )
@@ -559,7 +559,23 @@ spec:
             "http://vllm.gpu-plane.svc.cluster.local:8000|eci-qwen3-coder-30b-a3b-fp8",
         )
         self.assertIn("eci-qwen3-coder-30b-a3b-fp8=", routing["LLM_GATEWAY_ROUTES"])
-        self.assertEqual(routing["NEO4J_URI"], "bolt://neo4j.data-plane.svc.cluster.local:7687")
+        self.assertEqual(
+            routing["NEO4J_URI"],
+            "neo4j://neo4j-core-1.data-plane.svc.cluster.local:7687",
+        )
+        gds = self.by_key[("CronJob", "ingestion-plane", "gds-impact")]
+        gds_env = gds["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["env"]
+        self.assertIn(
+            {
+                "name": "NEO4J_URI",
+                "value": "bolt://neo4j-gds.data-plane.svc.cluster.local:7687",
+            },
+            gds_env,
+        )
+        dev_routing = keyed(render("values-dev.yaml", application_catalog=True))[
+            ("ConfigMap", "query-plane", "eci-runtime-routing")
+        ]["data"]
+        self.assertEqual(dev_routing["NEO4J_URI"], "bolt://neo4j.data-plane.svc.cluster.local:7687")
         self.assertEqual(routing["QDRANT_HOST"], "qdrant.data-plane.svc.cluster.local")
         self.assertEqual(routing["OPENSEARCH_URL"], "https://eci-opensearch.data-plane.svc.cluster.local:9200")
         self.assertEqual(routing["KAFKA_TLS_ENABLED"], "true")
@@ -570,6 +586,26 @@ spec:
         self.assertEqual(routing["OPENSEARCH_CA_FILE"], "/etc/eci/opensearch/ca.crt")
         self.assertEqual(routing["REDIS_REQUIRE_AUTH"], "true")
         self.assertNotIn("localhost", "\n".join(routing.values()))
+
+    def test_review_data_plane_disablement_omits_minio(self) -> None:
+        command = [
+            HELM,
+            "template",
+            "eci",
+            str(CHART),
+            "--set",
+            "dataPlane.enabled=false",
+        ]
+        output = subprocess.run(command, check=True, capture_output=True, text=True).stdout
+        objects = [doc for doc in yaml.safe_load_all(output) if isinstance(doc, dict)]
+        self.assertFalse(
+            any(obj.get("metadata", {}).get("name") == "minio" for obj in objects),
+            "dataPlane.enabled=false must omit every MinIO resource",
+        )
+        self.assertFalse(
+            any(obj.get("metadata", {}).get("name") == "minio-headless" for obj in objects),
+            "dataPlane.enabled=false must omit the MinIO headless Service",
+        )
 
         llm = self.by_key[("Deployment", "query-plane", "llm-gateway")]
         llm_template = llm["spec"]["template"]

@@ -1,3 +1,4 @@
+{{- if .Values.dataPlane.enabled }}
 {{- if and .Values.global.highAvailability (lt (int .Values.dataPlane.minio.replicas) 4) }}
 {{- fail "production-like MinIO requires at least four distributed replicas" }}
 {{- end }}
@@ -157,3 +158,4 @@ spec:
   selector:
     matchLabels:
       {{- include "eci.selectorLabels" (dict "name" "minio") | nindent 6 }}
+{{- end }}
