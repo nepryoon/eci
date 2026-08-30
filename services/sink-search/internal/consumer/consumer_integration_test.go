@@ -83,6 +83,12 @@ func TestSinkSearchConsumer(t *testing.T) {
 	t.Run("Review_FailedOpenSearchWriteDoesNotMarkProcessed", func(t *testing.T) {
 		reviewFailedOpenSearchWriteDoesNotMarkProcessed(t, ctx, st)
 	})
+	t.Run("SPEC076_DeleteDocumentScopeSafeAndIdempotent", func(t *testing.T) {
+		spec076DeleteDocumentScopeSafeAndIdempotent(t, ctx, st)
+	})
+	t.Run("SPEC076_FailedDeleteDoesNotMarkProcessed", func(t *testing.T) {
+		spec076FailedDeleteDoesNotMarkProcessed(t, ctx, st)
+	})
 }
 
 func reviewFailedOpenSearchWriteDoesNotMarkProcessed(t *testing.T, ctx context.Context, st *stack) {
@@ -100,7 +106,7 @@ func reviewFailedOpenSearchWriteDoesNotMarkProcessed(t *testing.T, ctx context.C
 		consumer.Deps{DB: st.db, OpenSearch: unreachable, Logf: t.Logf},
 		consumer.TopicCodeChunk,
 		codeChunkPayload(uuid.NewString(), "failed-write", 0, "failed write", nil),
-		[]kafka.Header{{Key: "event_id", Value: []byte(eventID)}},
+		eventHeaders(eventID, "UPSERT"),
 	)
 	if err == nil {
 		t.Fatal("expected unreachable OpenSearch write to fail")
@@ -114,6 +120,112 @@ func reviewFailedOpenSearchWriteDoesNotMarkProcessed(t *testing.T, ctx context.C
 	}
 	if count != 0 {
 		t.Fatalf("processed marker count after failed OpenSearch write = %d, want 0", count)
+	}
+}
+
+func spec076DeleteDocumentScopeSafeAndIdempotent(t *testing.T, ctx context.Context, st *stack) {
+	deps := newDeps(st)
+	chunkID := uuid.NewString()
+	entityID := "entity-delete"
+	upsertEventID := uuid.NewString()
+	upsertPayload := codeChunkPayload(chunkID, entityID, 0, "func DeleteMe() {}", map[string]any{"path": "delete.go"})
+	outcome, err := consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeChunk, upsertPayload,
+		eventHeaders(upsertEventID, "UPSERT"),
+	)
+	if err != nil || outcome != consumer.OutcomeStored {
+		t.Fatalf("seed index outcome=%v err=%v", outcome, err)
+	}
+	if !documentExists(t, ctx, st.opensearch, chunkID) {
+		t.Fatal("seed document not found")
+	}
+
+	wrongScopeEventID := uuid.NewString()
+	wrongScope := codeChunkTombstone(chunkID, entityID, "admins", "delete.go")
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeChunk, wrongScope,
+		eventHeaders(wrongScopeEventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("cross-scope delete outcome=%v err=%v", outcome, err)
+	}
+	if !documentExists(t, ctx, st.opensearch, chunkID) {
+		t.Fatal("cross-scope delete removed document")
+	}
+	assertProcessedEvent(t, ctx, st.db, wrongScopeEventID, consumer.ConsumerName)
+
+	deleteEventID := uuid.NewString()
+	deletePayload := codeChunkTombstone(chunkID, entityID, "developers", "delete.go")
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeChunk, deletePayload,
+		eventHeaders(deleteEventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("delete outcome=%v err=%v", outcome, err)
+	}
+	if documentExists(t, ctx, st.opensearch, chunkID) {
+		t.Fatal("document remains after delete")
+	}
+	assertProcessedEvent(t, ctx, st.db, deleteEventID, consumer.ConsumerName)
+
+	// Recreate the effect-before-marker crash window: the document is already
+	// absent, but completion must still be safely retryable.
+	if _, err := st.db.ExecContext(ctx,
+		"DELETE FROM processed_events WHERE event_id = $1 AND consumer_name = $2",
+		deleteEventID, consumer.ConsumerName,
+	); err != nil {
+		t.Fatalf("remove marker for failure-window replay: %v", err)
+	}
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeChunk, deletePayload,
+		eventHeaders(deleteEventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("absent-document replay outcome=%v err=%v", outcome, err)
+	}
+	if documentExists(t, ctx, st.opensearch, chunkID) {
+		t.Fatal("replay recreated deleted document")
+	}
+	assertProcessedEvent(t, ctx, st.db, deleteEventID, consumer.ConsumerName)
+
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeChunk, deletePayload,
+		eventHeaders(deleteEventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDuplicate {
+		t.Fatalf("marked replay outcome=%v err=%v", outcome, err)
+	}
+}
+
+func spec076FailedDeleteDoesNotMarkProcessed(t *testing.T, ctx context.Context, st *stack) {
+	unreachable, err := opensearchapi.NewClient(opensearchapi.Config{
+		Client: opensearch.Config{Addresses: []string{"http://127.0.0.1:1"}},
+	})
+	if err != nil {
+		t.Fatalf("opensearchapi NewClient: %v", err)
+	}
+	eventID := uuid.NewString()
+	deleteCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_, err = consumer.ProcessMessage(
+		deleteCtx,
+		consumer.Deps{DB: st.db, OpenSearch: unreachable, Logf: t.Logf},
+		consumer.TopicCodeChunk,
+		codeChunkTombstone(uuid.NewString(), "entity-delete-failure", "developers", "delete.go"),
+		eventHeaders(eventID, "DELETE"),
+	)
+	if err == nil {
+		t.Fatal("expected unreachable OpenSearch delete to fail")
+	}
+	var count int
+	if err := st.db.QueryRowContext(ctx,
+		"SELECT count(*) FROM processed_events WHERE event_id = $1 AND consumer_name = $2",
+		eventID, consumer.ConsumerName,
+	).Scan(&count); err != nil {
+		t.Fatalf("query processed marker: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("processed marker count after failed OpenSearch delete=%d want=0", count)
 	}
 }
 
@@ -550,7 +662,7 @@ func newDeps(st *stack) consumer.Deps {
 
 func produce(t *testing.T, ctx context.Context, brokers []string, topic, key string, value []byte, eventID string) {
 	t.Helper()
-	headers := []kafka.Header{{Key: "event_id", Value: []byte(eventID)}}
+	headers := eventHeaders(eventID, "UPSERT")
 	w := &kafka.Writer{
 		Addr:                   kafka.TCP(brokers...),
 		Topic:                  topic,
@@ -559,6 +671,13 @@ func produce(t *testing.T, ctx context.Context, brokers []string, topic, key str
 	defer w.Close()
 	if err := w.WriteMessages(ctx, kafka.Message{Key: []byte(key), Value: value, Headers: headers}); err != nil {
 		t.Fatalf("produzione messaggio sintetico su %s: %v", topic, err)
+	}
+}
+
+func eventHeaders(eventID, operation string) []kafka.Header {
+	return []kafka.Header{
+		{Key: "event_id", Value: []byte(eventID)},
+		{Key: "event_type", Value: []byte(operation)},
 	}
 }
 
@@ -619,6 +738,20 @@ func codeChunkPayload(id, entityID string, chunkIndex int, text string, provenan
 		m["provenance"] = provenance
 	}
 	out, _ := json.Marshal(m)
+	return out
+}
+
+func codeChunkTombstone(id, entityID, aclGroup, path string) []byte {
+	out, _ := json.Marshal(map[string]any{
+		"id":        id,
+		"entity_id": entityID,
+		"provenance": map[string]any{
+			"tenant_id": "tenant-test",
+			"repo":      "sample-repo",
+			"acl_group": aclGroup,
+			"path":      path,
+		},
+	})
 	return out
 }
 
