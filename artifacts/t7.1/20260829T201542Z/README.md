@@ -174,3 +174,5 @@ Real Postgres-backed failure-path regressions prove that unreachable Neo4j,
 Qdrant and OpenSearch writes leave no processed marker and therefore remain
 retryable. These are CPU/Docker integration and deterministic render evidence;
 they do not rewrite the earlier live-cluster observations.
+The CDC-disable regression additionally proves that a fresh CNPG cluster has
+no `eci_cdc` managed-role or CDC Secret dependency when Connect is disabled.

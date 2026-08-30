@@ -16,6 +16,7 @@ spec:
       database: eci
       owner: eci
       secret: {name: {{ .Values.global.existingSecret }}}
+  {{- if .Values.cdc.enabled }}
   managed:
     roles:
       - name: eci_cdc
@@ -27,6 +28,7 @@ spec:
         createrole: false
         bypassrls: false
         passwordSecret: {name: {{ .Values.cdc.postgresSecret }}}
+  {{- end }}
   storage:
     size: {{ .Values.dataPlane.postgres.storage }}
     {{- if .Values.global.storageClass }}

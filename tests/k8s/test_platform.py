@@ -1044,6 +1044,12 @@ spec:
         )
         self.assertNotIn(("Deployment", "data-plane", "kafka-connect"), rendered)
         self.assertNotIn(("ConfigMap", "data-plane", "eci-debezium-connector"), rendered)
+        postgres = rendered[("Cluster", "data-plane", "eci-postgres")]
+        self.assertNotIn(
+            "managed",
+            postgres["spec"],
+            "cdc.enabled=false must not require the CDC-only PostgreSQL Secret",
+        )
         self.assertFalse(
             any(
                 obj.get("kind") == "NetworkPolicy"

@@ -343,7 +343,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       REST Connect loopback-only sono verificati; OpenSearch usa HTTPS+CA+Basic Auth;
       Redis `requirepass` è propagato esplicitamente, con unit test fail-closed.
 - [x] Kafka Connect loopback-only è vincolato a una replica ed è omesso con il
-      data plane; i quattro worker sono Ready solo dopo topic+group access via
+      data plane; quando CDC è disabilitato anche il ruolo CNPG `eci_cdc` e il
+      relativo Secret reference sono omessi; i quattro worker sono Ready solo dopo topic+group access via
       il transport Kafka autenticato; Semantic Cache è Ready solo dopo PING
       Redis autenticato; Retrieval Engine richiede tutti i cinque backend
       reali, mentre le liveness restano locali.

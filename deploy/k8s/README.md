@@ -109,7 +109,9 @@ The loopback REST boundary also fixes Kafka Connect at exactly one replica:
 distributed workers require a mutually reachable advertised REST address, so
 Helm rejects any larger `cdc.replicas` value instead of rendering a broken
 cluster. Setting `dataPlane.enabled=false` omits Connect, its connector config
-and its dedicated policies together.
+and its dedicated policies together. Setting `cdc.enabled=false` also omits
+the CNPG-managed `eci_cdc` role, so PostgreSQL does not depend on the CDC-only
+Secret when that component is disabled.
 Its PostgreSQL identity is the CNPG-managed `eci_cdc` role, sourced from the
 separate `eci-postgres-cdc` Secret. Migration 0005 pre-creates the fixed outbox
 publication and grants only SELECT on `public.outbox`; Connect never receives

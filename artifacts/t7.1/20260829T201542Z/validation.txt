@@ -18,6 +18,7 @@ kafka_topic_inventory_unit=PASS (4 primary + 5 per-consumer retry + 4 DLQ + 3 Co
 kafka_primary_producer_provenance_unit=PASS (consumer primary Write absent; own retry Write present)
 kafka_connect_loopback_only_unit=PASS (no Service; exec probes; dedicated Kafka/PostgreSQL policies)
 kafka_connect_single_replica_and_data_plane_guard_unit=PASS
+cdc_disabled_omits_managed_postgres_role_secret_reference=PASS
 kafka_worker_readiness_unit=PASS (same transport; topic metadata + group coordinator/offset authorization; closed 503)
 semantic_cache_redis_readiness_unit=PASS (authenticated PING; closed 503; startup/readiness HTTP and local liveness)
 retrieval_backend_readiness_unit=PASS (Neo4j auth; Qdrant collection; OpenSearch index; native TEI health; concurrent bounded closed 503)
