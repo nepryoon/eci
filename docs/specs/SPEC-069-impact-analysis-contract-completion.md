@@ -1,5 +1,5 @@
 # SPEC-069 — Completamento del contratto ImpactAnalysis
-Stato: approved
+Stato: implemented
 Task-tree: T4.2 · Servizio: services/retrieval-engine · ADD: Modulo 2 §1.2–§1.5, D7
 Contratti: contracts/proto/eci/retrieval/v1/retrieval.proto
 
@@ -118,13 +118,19 @@ tenant, source text, query Cypher, ACL o path a log/attributi.
 
 ## 9. Criteri di accettazione
 
-- [ ] I test nuovi falliscono contro l'implementazione precedente per i motivi attesi.
-- [ ] `go test ./internal/impactanalysis ./internal/server ./internal/hybridsearch`
+- [x] I test nuovi falliscono contro l'implementazione precedente per i motivi attesi.
+- [x] `go test ./internal/impactanalysis ./internal/server ./internal/hybridsearch`
 - [ ] `go test -tags=integration ./internal/impactanalysis ./internal/server ./internal/hybridsearch`
-- [ ] `task proto:lint && task proto:breaking && task proto:gen`
-- [ ] `git diff --exit-code -- libs/go libs/py`
-- [ ] `task build && task lint && task test && task guard`
-- [ ] Review avversariale di auth, enum injection, bounds, cancellation e PII completata.
+- [x] `task proto:lint && task proto:breaking && task proto:gen`
+- [x] `git diff --exit-code -- libs/go libs/py`
+- [x] `task build && task lint && task test && task guard`
+- [x] Review avversariale di auth, enum injection, bounds, cancellation e PII completata.
+
+Il test integration e' compilato con `-tags=integration` ma non eseguito:
+`task test:integration` termina prima delle suite perche' il socket Docker
+Desktop configurato non esiste. Lo stato resta quindi `implemented`, non
+`verified`; nessuna evidenza Neo4j/OpenSearch runtime viene dedotta dai test
+unitari.
 
 ## 10. Review avversariale pre-implementazione
 
@@ -135,3 +141,16 @@ database prima che un super-nodo materializzi risultati illimitati; il probe
 di profondita' riusa gli stessi filtri. L'idratazione e' successiva alla
 selezione ACL-safe e applica nuovamente lo scope. Bounds massimi e context
 impediscono abuso numerico o lavoro superstite alla disconnessione.
+
+## 11. Review avversariale post-implementazione
+
+La seconda passata ha verificato che tipo e direzione interpolati arrivino
+soltanto da mappe enum chiuse; un test tenta esplicitamente una relationship
+injection. Tenant/repository/ACL sono applicati sia al nodo frontiera sia a
+ogni vicino prima dell'espansione e di nuovo durante l'idratazione. Una
+intersezione repository vuota produce uno stream vuoto senza trasformarsi nel
+significato "nessun filtro". Score non finiti e bounds protobuf eccessivi sono
+rifiutati. Cancellazione/deadline preservano i codici gRPC; gli altri errori
+dependency sono `Unavailable` sanitizzati. La query OpenSearch rifiuta timeout,
+errori e risultati parziali invece di restituire source incompleto. Non sono
+stati aggiunti log o attributi con scope, ID, path o sorgente.
