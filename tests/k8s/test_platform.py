@@ -587,26 +587,6 @@ spec:
         self.assertEqual(routing["REDIS_REQUIRE_AUTH"], "true")
         self.assertNotIn("localhost", "\n".join(routing.values()))
 
-    def test_review_data_plane_disablement_omits_minio(self) -> None:
-        command = [
-            HELM,
-            "template",
-            "eci",
-            str(CHART),
-            "--set",
-            "dataPlane.enabled=false",
-        ]
-        output = subprocess.run(command, check=True, capture_output=True, text=True).stdout
-        objects = [doc for doc in yaml.safe_load_all(output) if isinstance(doc, dict)]
-        self.assertFalse(
-            any(obj.get("metadata", {}).get("name") == "minio" for obj in objects),
-            "dataPlane.enabled=false must omit every MinIO resource",
-        )
-        self.assertFalse(
-            any(obj.get("metadata", {}).get("name") == "minio-headless" for obj in objects),
-            "dataPlane.enabled=false must omit the MinIO headless Service",
-        )
-
         llm = self.by_key[("Deployment", "query-plane", "llm-gateway")]
         llm_template = llm["spec"]["template"]
         self.assertNotIn("prometheus.io/scrape", llm_template["metadata"].get("annotations", {}))
@@ -809,6 +789,26 @@ spec:
             "docker.io/qdrant/qdrant:v1.19.0-unprivileged@sha256:"
             "a0e04fe623cb064502cd869cefc1dc7ce359d8edd481063b5bd351c0a0a2c91e",
             rendered,
+        )
+
+    def test_review_data_plane_disablement_omits_minio(self) -> None:
+        command = [
+            HELM,
+            "template",
+            "eci",
+            str(CHART),
+            "--set",
+            "dataPlane.enabled=false",
+        ]
+        output = subprocess.run(command, check=True, capture_output=True, text=True).stdout
+        objects = [doc for doc in yaml.safe_load_all(output) if isinstance(doc, dict)]
+        self.assertFalse(
+            any(obj.get("metadata", {}).get("name") == "minio" for obj in objects),
+            "dataPlane.enabled=false must omit every MinIO resource",
+        )
+        self.assertFalse(
+            any(obj.get("metadata", {}).get("name") == "minio-headless" for obj in objects),
+            "dataPlane.enabled=false must omit the MinIO headless Service",
         )
 
     def test_review_application_enablement_requires_real_release_digests(self) -> None:
