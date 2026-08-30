@@ -1,5 +1,6 @@
 //! Long-running Kafka/MinIO/PostgreSQL runtime for SPEC-067.
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,15 +27,16 @@ use prometheus::{
 };
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
-use rdkafka::message::{Headers, Message};
+use rdkafka::message::{Headers, Message, OwnedMessage};
 use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::{Offset, TopicPartitionList};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::worker::{command_message_key_matches, parse_authenticated_command, source_object_key};
-use crate::{parse_file_full, persist_ingestion_command};
+use crate::{parse_file_full_private, persist_ingestion_command};
 
 const INPUT_TOPIC: &str = "eci.ingestion.file.v1";
 const DLQ_TOPIC: &str = "eci.ingestion.file.v1.DLQ";
@@ -242,7 +244,12 @@ pub async fn run() -> Result<(), RuntimeError> {
         .create()
         .map_err(|_| RuntimeError::Startup("Kafka producer creation failed"))?;
 
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let signal_tx = shutdown_tx.clone();
+    let signal = tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = signal_tx.send(true);
+    });
     let listener = tokio::net::TcpListener::bind(config.metrics_address)
         .await
         .map_err(|_| RuntimeError::Startup("metrics listener bind failed"))?;
@@ -256,7 +263,7 @@ pub async fn run() -> Result<(), RuntimeError> {
             .with_state(server_health);
         let _ = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
-                let _ = server_shutdown.changed().await;
+                let _ = server_shutdown.wait_for(|shutdown| *shutdown).await;
             })
             .await;
     });
@@ -265,106 +272,147 @@ pub async fn run() -> Result<(), RuntimeError> {
         minio.clone(),
         consumer.clone(),
         health.clone(),
-        shutdown_rx,
+        shutdown_rx.clone(),
     ));
 
     let mut backoff = Duration::from_millis(250);
+    let mut buffered = VecDeque::<OwnedMessage>::new();
     'consume: loop {
-        tokio::select! {
-            _ = shutdown_signal() => break,
-            message = consumer.recv() => {
-                let message = match message {
-                    Ok(message) => message,
+        if *shutdown_rx.borrow() {
+            break;
+        }
+        let message = if let Some(message) = buffered.pop_front() {
+            message
+        } else {
+            tokio::select! {
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break 'consume;
+                    }
+                    continue;
+                }
+                received = consumer.recv() => match received {
+                    Ok(message) => message.detach(),
                     Err(_) => {
                         health.set_dependency("kafka", false);
                         tokio::select! {
                             _ = tokio::time::sleep(backoff) => {},
-                            _ = shutdown_signal() => break 'consume,
+                            _ = shutdown_rx.changed() => break 'consume,
                         }
                         backoff = (backoff * 2).min(Duration::from_secs(30));
                         continue;
                     }
-                };
-                if consumer
-                    .assignment()
-                    .and_then(|assignment| consumer.pause(&assignment))
-                    .is_err()
+                },
+            }
+        };
+        if consumer
+            .assignment()
+            .and_then(|assignment| consumer.pause(&assignment))
+            .is_err()
+        {
+            health.set_dependency("kafka", false);
+        }
+        health.metrics.inflight.set(1);
+        loop {
+            let started = Instant::now();
+            let span = tracing::info_span!(
+                "ingestion.command.consume",
+                messaging.system = "kafka",
+                messaging.destination.name = INPUT_TOPIC,
+                messaging.kafka.partition = message.partition(),
+            );
+            if let Some(link) = trace_link(&message) {
+                span.add_link(link);
+            }
+            let action = process_message(&config, &minio, &message, &health.metrics)
+                .instrument(span)
+                .await;
+            let completed = match action {
+                ProcessAction::Commit { outcome, reason } => {
+                    if commit_message_offset(&consumer, &message).is_ok() {
+                        health
+                            .metrics
+                            .commands
+                            .with_label_values(&[outcome, reason])
+                            .inc();
+                        health
+                            .metrics
+                            .duration
+                            .with_label_values(&[outcome])
+                            .observe(started.elapsed().as_secs_f64());
+                        backoff = Duration::from_millis(250);
+                        true
+                    } else {
+                        health.set_dependency("kafka", false);
+                        false
+                    }
+                }
+                ProcessAction::Dlq { reason } => {
+                    if publish_dlq(&producer, &message, reason).await
+                        && commit_message_offset(&consumer, &message).is_ok()
+                    {
+                        health
+                            .metrics
+                            .dlq
+                            .with_label_values(&[reason, "published"])
+                            .inc();
+                        health
+                            .metrics
+                            .commands
+                            .with_label_values(&["failed", reason])
+                            .inc();
+                        health
+                            .metrics
+                            .duration
+                            .with_label_values(&["failed"])
+                            .observe(started.elapsed().as_secs_f64());
+                        backoff = Duration::from_millis(250);
+                        true
+                    } else {
+                        health
+                            .metrics
+                            .dlq
+                            .with_label_values(&[reason, "failed"])
+                            .inc();
+                        false
+                    }
+                }
+                ProcessAction::Retry { dependency } => {
+                    health.set_dependency(dependency, false);
+                    false
+                }
+            };
+            if completed {
+                if buffered.is_empty()
+                    && consumer
+                        .assignment()
+                        .and_then(|assignment| consumer.resume(&assignment))
+                        .is_err()
                 {
                     health.set_dependency("kafka", false);
                 }
-                health.metrics.inflight.set(1);
-                loop {
-                    let started = Instant::now();
-                    let span = tracing::info_span!(
-                        "ingestion.command.consume",
-                        messaging.system = "kafka",
-                        messaging.destination.name = INPUT_TOPIC,
-                        messaging.kafka.partition = message.partition(),
-                    );
-                    if let Some(link) = trace_link(&message) {
-                        span.add_link(link);
-                    }
-                    let action = process_message(&config, &minio, &message, &health.metrics)
-                        .instrument(span)
-                        .await;
-                    let completed = match action {
-                        ProcessAction::Commit { outcome, reason } => {
-                            if consumer.commit_message(&message, CommitMode::Sync).is_ok() {
-                                health.metrics.commands.with_label_values(&[outcome, reason]).inc();
-                                health.metrics.duration.with_label_values(&[outcome]).observe(started.elapsed().as_secs_f64());
-                                backoff = Duration::from_millis(250);
-                                true
-                            } else {
-                                health.set_dependency("kafka", false);
-                                false
-                            }
-                        }
-                        ProcessAction::Dlq { reason } => {
-                            if publish_dlq(&producer, &message, reason).await
-                                && consumer.commit_message(&message, CommitMode::Sync).is_ok()
-                            {
-                                health.metrics.dlq.with_label_values(&[reason, "published"]).inc();
-                                health.metrics.commands.with_label_values(&["failed", reason]).inc();
-                                health.metrics.duration.with_label_values(&["failed"]).observe(started.elapsed().as_secs_f64());
-                                backoff = Duration::from_millis(250);
-                                true
-                            } else {
-                                health.metrics.dlq.with_label_values(&[reason, "failed"]).inc();
-                                false
-                            }
-                        }
-                        ProcessAction::Retry { dependency } => {
-                            health.set_dependency(dependency, false);
-                            false
-                        }
-                    };
-                    if completed {
-                        if consumer
-                            .assignment()
-                            .and_then(|assignment| consumer.resume(&assignment))
-                            .is_err()
-                        {
-                            health.set_dependency("kafka", false);
-                        }
-                        break;
-                    }
-                    health.metrics.duration.with_label_values(&["retry"]).observe(started.elapsed().as_secs_f64());
-                    tokio::select! {
-                        _ = tokio::time::sleep(backoff) => {},
-                        _ = shutdown_signal() => {
-                            health.metrics.inflight.set(0);
-                            break 'consume;
-                        },
-                    }
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
-                }
-                health.metrics.inflight.set(0);
+                break;
             }
+            health
+                .metrics
+                .duration
+                .with_label_values(&["retry"])
+                .observe(started.elapsed().as_secs_f64());
+            if matches!(
+                poll_during_backoff(&consumer, backoff, &mut shutdown_rx, &mut buffered).await,
+                BackoffOutcome::Shutdown
+            ) {
+                health.metrics.inflight.set(0);
+                break 'consume;
+            }
+            backoff = (backoff * 2).min(Duration::from_secs(30));
         }
+        health.metrics.inflight.set(0);
     }
 
     health.live.store(false, Ordering::Relaxed);
     let _ = shutdown_tx.send(true);
+    signal.abort();
     probe.abort();
     let _ = server.await;
     Ok(())
@@ -383,8 +431,60 @@ fn kafka_client_config(config: &Config) -> ClientConfig {
         .set("enable.auto.offset.store", "false")
         .set("auto.offset.reset", "earliest")
         .set("max.poll.interval.ms", "300000")
+        .set("queued.min.messages", "1")
+        .set("queued.max.messages.kbytes", "256")
         .set("message.timeout.ms", "5000");
     client
+}
+
+fn commit_message_offset<M: Message>(
+    consumer: &StreamConsumer,
+    message: &M,
+) -> rdkafka::error::KafkaResult<()> {
+    let mut offsets = TopicPartitionList::new();
+    let next_offset =
+        message
+            .offset()
+            .checked_add(1)
+            .ok_or(rdkafka::error::KafkaError::OffsetFetch(
+                rdkafka::types::RDKafkaErrorCode::InvalidArgument,
+            ))?;
+    offsets.add_partition_offset(
+        message.topic(),
+        message.partition(),
+        Offset::Offset(next_offset),
+    )?;
+    consumer.commit(&offsets, CommitMode::Sync)
+}
+
+enum BackoffOutcome {
+    Elapsed,
+    Shutdown,
+}
+
+async fn poll_during_backoff(
+    consumer: &StreamConsumer,
+    duration: Duration,
+    shutdown: &mut watch::Receiver<bool>,
+    buffered: &mut VecDeque<OwnedMessage>,
+) -> BackoffOutcome {
+    let delay = tokio::time::sleep(duration);
+    tokio::pin!(delay);
+    loop {
+        tokio::select! {
+            _ = &mut delay => return BackoffOutcome::Elapsed,
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return BackoffOutcome::Shutdown;
+                }
+            }
+            message = consumer.recv() => {
+                if let Ok(message) = message {
+                    buffered.push_back(message.detach());
+                }
+            }
+        }
+    }
 }
 
 fn postgres_config_with_deadlines(dsn: &str) -> Result<postgres::Config, postgres::Error> {
@@ -420,10 +520,10 @@ enum ProcessAction {
     },
 }
 
-async fn process_message(
+async fn process_message<M: Message>(
     config: &Config,
     minio: &MinioClient,
-    message: &rdkafka::message::BorrowedMessage<'_>,
+    message: &M,
     metrics: &Metrics,
 ) -> ProcessAction {
     let payload = match message.payload() {
@@ -487,7 +587,7 @@ async fn process_message(
         }
     };
     let parsed = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        parse_file_full(command.path(), source_text)
+        parse_file_full_private(command.path(), source_text)
     }));
     let (nodes, relations, chunks) = match parsed {
         Ok(value) => value,
@@ -534,9 +634,7 @@ impl Extractor for TraceparentExtractor<'_> {
     }
 }
 
-fn trace_link(
-    message: &rdkafka::message::BorrowedMessage<'_>,
-) -> Option<opentelemetry::trace::SpanContext> {
+fn trace_link<M: Message>(message: &M) -> Option<opentelemetry::trace::SpanContext> {
     let headers = message.headers()?;
     let mut value = None;
     for header in headers.iter() {
@@ -609,9 +707,9 @@ fn object_not_found(error: &MinioError) -> bool {
     )
 }
 
-async fn publish_dlq(
+async fn publish_dlq<M: Message>(
     producer: &FutureProducer,
-    message: &rdkafka::message::BorrowedMessage<'_>,
+    message: &M,
     reason: &'static str,
 ) -> bool {
     let payload = sanitized_dlq_payload(message.partition(), message.offset(), reason);

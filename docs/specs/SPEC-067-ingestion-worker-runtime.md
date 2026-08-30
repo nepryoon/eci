@@ -98,8 +98,9 @@ pub fn persist_ingestion_command(
    contenuto, scope o path.
 5. **Errore transitorio/backpressure.** Given Kafka, PostgreSQL o MinIO
    indisponibile, When un comando e' in-flight, Then nessun offset viene
-   committato, la partizione non avanza, il retry usa backoff bounded con jitter
-   e `/ready` resta 503 fino al recupero.
+   committato, la partizione non avanza, il consumer continua a pollare mentre
+   l'assignment è in pausa per conservare membership, il retry usa backoff
+   bounded con jitter e `/ready` resta 503 fino al recupero.
 6. **Provenance completa.** Given un comando applicato, When si leggono
    CodeNode/CodeRelation/CodeChunk e relativi eventi, Then provenance contiene
    scope trusted, `repo`, `commit_sha`, `path`, un solo `ingested_at` DB e non
@@ -133,7 +134,7 @@ pub fn persist_ingestion_command(
 | receipt esistente con fingerprint diverso | `command_id_conflict`, zero write canonici |
 | DLQ publish fallisce | original offset non committato |
 | TLS/CA/cert/key/Secret assente | startup fail-closed; nessun PLAINTEXT/default credential |
-| shutdown SIGTERM durante comando | stop polling, deadline grace; offset solo se commit completato |
+| shutdown SIGTERM durante comando | stato shutdown durevole; termina dopo l'I/O bounded corrente, offset solo se commit completato |
 
 ## 5. Threat model e non-goals
 
@@ -195,6 +196,8 @@ separato emerso dall'audit di completezza.
   nessun bucket/key/path/scope.
 - Span esistente `parse_file` e `persist_parsed_file`; aggiungere
   `ingestion.command.persist` con `ingestion.outcome=applied|duplicate|failed`.
+  Il percorso worker usa lo span parser senza attributo `file_path`; la API
+  one-shot storica conserva il contratto telemetry di SPEC-013.
 - Counter `eci_ingestion_commands_total{outcome,reason}` con enum bounded;
   `eci_ingestion_source_bytes_total{outcome}`;
   `eci_ingestion_dlq_total{reason,outcome}`.
