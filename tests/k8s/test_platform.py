@@ -101,10 +101,18 @@ class PlatformChartTests(unittest.TestCase):
             {
                 "POSTGRES_DSN", "KAFKA_TOPIC", "KAFKA_GROUP_ID",
                 "MINIO_ENDPOINT", "MINIO_BUCKET", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY",
-                "ECI_INGESTION_MAX_SOURCE_BYTES", "ECI_METRICS_ADDRESS",
+                "MINIO_CA_FILE", "POSTGRES_CA_FILE", "ECI_INGESTION_MAX_SOURCE_BYTES",
+                "ECI_METRICS_ADDRESS",
             },
         )
         container = ingestion_pod["containers"][0]
+        ingestion_env = {item["name"]: item for item in container["env"]}
+        self.assertEqual(
+            ingestion_env["MINIO_ENDPOINT"]["value"],
+            "https://minio.data-plane.svc.cluster.local:9000",
+        )
+        self.assertEqual(ingestion_env["MINIO_CA_FILE"]["value"], "/etc/eci/minio/ca.crt")
+        self.assertEqual(ingestion_env["POSTGRES_CA_FILE"]["value"], "/etc/eci/postgres/ca.crt")
         self.assertEqual(container["envFrom"], [{"configMapRef": {"name": "eci-runtime-routing"}}])
         self.assertEqual(container["ports"], [{"name": "service", "containerPort": 9100}])
         self.assertEqual(container["readinessProbe"]["httpGet"], {"path": "/ready", "port": "service", "scheme": "HTTP"})
@@ -112,8 +120,11 @@ class PlatformChartTests(unittest.TestCase):
         self.assertEqual(ingestion["metadata"]["annotations"], {"eci.io/max-replicas": "40"})
         self.assertEqual(
             {volume["name"] for volume in ingestion_pod["volumes"]},
-            {"tmp", "kafka-ca"},
+            {"tmp", "kafka-ca", "minio-ca", "postgres-ca"},
         )
+        volume_by_name = {volume["name"]: volume for volume in ingestion_pod["volumes"]}
+        self.assertEqual(volume_by_name["minio-ca"]["secret"]["secretName"], "eci-minio-ca")
+        self.assertEqual(volume_by_name["postgres-ca"]["secret"]["secretName"], "eci-postgres-ca")
         self.assertNotIn(("CronJob", "ingestion-plane", "ingestion-template"), self.by_key)
         gds = self.by_key[("CronJob", "ingestion-plane", "gds-impact")]
         self.assertTrue(gds["spec"]["suspend"])
@@ -588,7 +599,17 @@ class PlatformChartTests(unittest.TestCase):
         self.assertEqual(minio["spec"]["podManagementPolicy"], "Parallel")
         self.assertEqual(minio["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"], "100Gi")
         minio_args = minio["spec"]["template"]["spec"]["containers"][0]["args"]
-        self.assertTrue(any("minio-{0...3}" in value for value in minio_args))
+        self.assertIn("--certs-dir", minio_args)
+        self.assertTrue(any("https://minio-{0...3}" in value for value in minio_args))
+        minio_container = minio["spec"]["template"]["spec"]["containers"][0]
+        for probe in ("startupProbe", "readinessProbe", "livenessProbe"):
+            self.assertEqual(minio_container[probe]["httpGet"]["scheme"], "HTTPS")
+        tls_volume = next(
+            volume for volume in minio["spec"]["template"]["spec"]["volumes"]
+            if volume["name"] == "tls"
+        )
+        self.assertEqual(tls_volume["secret"]["secretName"], "eci-minio-tls")
+        self.assertEqual(tls_volume["secret"]["defaultMode"], 0o440)
         dev_minio = keyed(self.dev)[("StatefulSet", "data-plane", "minio")]
         self.assertEqual(dev_minio["spec"]["replicas"], 1)
 
@@ -758,7 +779,12 @@ class PlatformChartTests(unittest.TestCase):
         self.assertIn("create secret tls eci-keycloak-tls", up)
         self.assertIn("subjectAltName=DNS:keycloak.ingress.svc", up)
         self.assertIn("create configmap eci-keycloak-ca", up)
-        self.assertNotIn("--from-file=tls.key", up)
+        keycloak_ca_copy = up.split("create configmap eci-keycloak-ca", 1)[1].split("printf", 1)[0]
+        self.assertNotIn("tls.key", keycloak_ca_copy)
+        self.assertIn("create secret generic eci-minio-tls", up)
+        self.assertIn("create secret generic eci-minio-ca", up)
+        self.assertIn("create secret generic eci-postgres-ca", up)
+        self.assertIn("--from-file=tls.key", up)
         self.assertIn("https://keycloak.ingress.svc:8443", verify)
         self.assertIn("--cacert /etc/eci/keycloak/ca.crt", verify)
         self.assertIn("rollout status statefulset/redis", verify)

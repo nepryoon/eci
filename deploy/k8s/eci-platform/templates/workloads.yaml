@@ -155,6 +155,10 @@ spec:
             {{- if or (eq $workload.name "retrieval-engine") (eq $workload.name "sink-search") }}
             - {name: opensearch-ca, mountPath: /etc/eci/opensearch, readOnly: true}
             {{- end }}
+            {{- if eq $workload.name "ingestion" }}
+            - {name: minio-ca, mountPath: /etc/eci/minio, readOnly: true}
+            - {name: postgres-ca, mountPath: /etc/eci/postgres, readOnly: true}
+            {{- end }}
             {{- if and (eq $.Values.global.profile "dev") (eq $workload.name "api-gateway") }}
             - {name: oidc-ca, mountPath: /etc/eci/oidc, readOnly: true}
             {{- end }}
@@ -177,6 +181,16 @@ spec:
         - name: opensearch-ca
           secret:
             secretName: {{ $.Values.routing.openSearchTLSSecret }}
+            items: [{key: ca.crt, path: ca.crt}]
+        {{- end }}
+        {{- if eq $workload.name "ingestion" }}
+        - name: minio-ca
+          secret:
+            secretName: {{ required "routing.minioTLSSecret is required for ingestion" $.Values.routing.minioTLSSecret }}
+            items: [{key: ca.crt, path: ca.crt}]
+        - name: postgres-ca
+          secret:
+            secretName: {{ required "routing.postgresTLSSecret is required for ingestion" $.Values.routing.postgresTLSSecret }}
             items: [{key: ca.crt, path: ca.crt}]
         {{- end }}
         {{- if and (eq $.Values.global.profile "dev") (eq $workload.name "api-gateway") }}

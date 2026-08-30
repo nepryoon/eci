@@ -100,7 +100,12 @@ pub fn persist_ingestion_command(
    indisponibile, When un comando e' in-flight, Then nessun offset viene
    committato, la partizione non avanza, il consumer continua a pollare mentre
    l'assignment è in pausa per conservare membership, il retry usa backoff
-   bounded con jitter e `/ready` resta 503 fino al recupero.
+   bounded con jitter e `/ready` resta 503 fino al recupero. Ogni callback di
+   rebalance invalida l'epoch locale: prima di elaborare e prima di committare
+   l'offset il worker verifica epoch e ownership topic/partition, scartando i
+   record revocati dal buffer senza nuovo effetto o commit. Se la revoca avviene
+   durante una transazione gia' iniziata, la receipt rende l'eventuale replay
+   del nuovo owner idempotente e il vecchio owner non committa l'offset.
 6. **Provenance completa.** Given un comando applicato, When si leggono
    CodeNode/CodeRelation/CodeChunk e relativi eventi, Then provenance contiene
    scope trusted, `repo`, `commit_sha`, `path`, un solo `ingested_at` DB e non
@@ -128,6 +133,8 @@ pub fn persist_ingestion_command(
 | object key configurabile dal messaggio o endpoint non trusted | impossibile per tipo/schema; key derivata e endpoint solo env |
 | GET object 404/digest/size/UTF-8 mismatch | permanent failure/DLQ; nessun write |
 | MinIO header/body timeout o 5xx, Kafka transport, PostgreSQL unavailable | transient; no commit, readiness 503, retry bounded |
+| endpoint MinIO HTTP, CA PostgreSQL/MinIO assente o non valida | startup fail-closed; HTTPS/TLS con hostname e CA verificati obbligatori |
+| rebalance durante fetch/retry/persist | record invalidato dall'epoch; nessun offset commit se topic/partition non sono ancora assegnati |
 | PostgreSQL auth/connect/query/lock/commit stall | connect 5s, statement/TCP 10s e lock 5s; transient senza offset commit |
 | parse panic per input ostile | catturato al command boundary, permanent `parse_failed`; il processo resta vivo |
 | receipt esistente con fingerprint uguale | `Duplicate`, zero nuove righe outbox |
@@ -144,10 +151,13 @@ operatore con Secret errato. **Asset:** scope tenant/repo/ACL, codice sorgente,
 PostgreSQL/outbox, credenziali Kafka/MinIO, disponibilita' del worker. **Confini:**
 la mTLS Kafka + ACL autentica il producer; i tre header costituiscono commit
 context system-to-system; body e sorgente sono dati non fidati; endpoint,
-bucket, limiti e credenziali sono config server-side. **Attacchi:** confused
+bucket, CA pubbliche, limiti e credenziali sono config server-side. PostgreSQL
+e MinIO sono TLS-only con hostname e CA verificati; al worker sono montate solo
+le CA pubbliche, mai chiavi CA o chiavi server. **Attacchi:** confused
 deputy, forged body scope, SSRF/object-key traversal, decompression/size bomb,
-poison pill, replay, command-id collision, offset-before-commit, secret leak in
-metric/log/DLQ. **Mitigazioni:** topic/identity literal, schema chiuso, scope
+poison pill, replay, command-id collision, rebalance/offset-after-revocation,
+MITM verso datastore, offset-before-commit, secret leak in metric/log/DLQ.
+**Mitigazioni:** topic/identity literal, schema chiuso, scope
 header-only, key derivata, GET bounded+digest, receipt atomica, DLQ sanitizzata,
 offset manuale, metriche low-cardinality e fail-closed.
 
@@ -173,7 +183,8 @@ separato emerso dall'audit di completezza.
 ## 7. Test plan
 
 - Unit Rust: schema/header/path/key/fingerprint; scope body rifiutato; ordering
-  stabile; DLQ reason allow-list; payload/failure non compaiono in log/metric.
+  stabile; DLQ reason allow-list; payload/failure non compaiono in log/metric;
+  endpoint MinIO plaintext e CA PostgreSQL invalida sono rifiutati.
 - Unit runtime con fake Kafka/object fetch/persistence: offset success,
   transient no-commit, DLQ-before-commit, shutdown e readiness transitions.
 - Integration PostgreSQL testcontainers + migration reale: first apply,
@@ -218,12 +229,15 @@ separato emerso dall'audit di completezza.
 - [x] Entita', outbox e receipt sono una transazione; replay identico produce
       zero nuovi effetti e conflitto produce zero write.
 - [x] Offset originale solo dopo DB commit o DLQ publish confermata; fault
-      transienti conservano backlog e readiness 503.
+      transienti conservano backlog e readiness 503; rebalance invalida i
+      record revocati prima di una nuova elaborazione e del commit offset.
 - [x] Provenance soddisfa `repo/commit_sha/path/ingested_at` senza alterare i
       contratti golden/eval storici.
 - [x] `/live`, `/ready`, `/metrics` e shutdown sono reali e testati.
 - [x] Helm rende Deployment ingestion standard=4, max dichiarato=40, identity,
       ACL, Secret e NetworkPolicy least-privilege; nessun CronJob ingestion.
+- [x] PostgreSQL e MinIO sono TLS-only con CA/hostname verificati; il chart
+      monta al worker esclusivamente certificati CA pubblici.
 - [x] Nessun secret, scope o sorgente in log, metriche, span o DLQ.
 - [ ] `task build`, `task lint`, `task test`, `task test:integration`,
       `task guard`, `task k8s:validate` verdi; CI verde.
@@ -245,4 +259,8 @@ atomico. `task test:integration` ha inoltre completato l'intera suite Docker del
 repository. Il bucket `eci-sources`, il blob e le credenziali per-workload sono
 prerequisiti provisionati dall'operatore/produttore e non valori o Secret
 versionati; l'assenza del bucket mantiene readiness 503. Il passaggio a
-`verified` resta subordinato a CI e review della PR.
+`verified` resta subordinato a CI e review della PR. Le review successive hanno
+aggiunto deadline I/O complete, polling durante retry, shutdown durevole,
+privacy degli span parser, invalidazione per epoch/assignment al rebalance e
+TLS con CA verificata per PostgreSQL e MinIO; nessuna correzione modifica il
+contratto di scope o la semantica at-least-once.

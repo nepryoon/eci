@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,15 +18,20 @@ use minio::s3::http::BaseUrl;
 use minio::s3::types::minio_error_response::MinioErrorCode;
 use minio::s3::types::S3Api;
 use minio::s3::MinioClient;
+use native_tls::{Certificate, Protocol, TlsConnector};
 use opentelemetry::propagation::{Extractor, TextMapPropagator};
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
+use postgres_native_tls::MakeTlsConnector;
 use prometheus::{
     Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
     TextEncoder,
 };
+use rdkafka::client::ClientContext;
 use rdkafka::config::ClientConfig;
-use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
+use rdkafka::consumer::{
+    BaseConsumer, CommitMode, Consumer, ConsumerContext, Rebalance, StreamConsumer,
+};
 use rdkafka::message::{Headers, Message, OwnedMessage};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{Offset, TopicPartitionList};
@@ -45,6 +50,7 @@ const CONSUMER_GROUP: &str = "ingestion";
 #[derive(Clone)]
 struct Config {
     postgres_dsn: String,
+    postgres_ca_pem: Vec<u8>,
     kafka_brokers: String,
     kafka_ca: String,
     kafka_cert: String,
@@ -72,20 +78,29 @@ impl Config {
         let metrics_address = required("ECI_METRICS_ADDRESS")?
             .parse()
             .map_err(|_| RuntimeError::Config("invalid metrics address"))?;
-        let endpoint: BaseUrl = required("MINIO_ENDPOINT")?
-            .parse()
-            .map_err(|_| RuntimeError::Config("invalid MinIO endpoint"))?;
+        let endpoint = minio_https_endpoint(&required("MINIO_ENDPOINT")?)?;
         let postgres_dsn = required("POSTGRES_DSN")?;
         postgres_config_with_deadlines(&postgres_dsn)
             .map_err(|_| RuntimeError::Config("invalid PostgreSQL configuration"))?;
+        let postgres_ca_pem = std::fs::read(required("POSTGRES_CA_FILE")?)
+            .map_err(|_| RuntimeError::Config("PostgreSQL CA is unreadable"))?;
+        postgres_tls_connector(&postgres_ca_pem)
+            .map_err(|_| RuntimeError::Config("PostgreSQL CA is invalid"))?;
         let access_key = required("MINIO_ACCESS_KEY")?;
         let secret_key = required("MINIO_SECRET_KEY")?;
+        let minio_ca_file = required("MINIO_CA_FILE")?;
         let credentials = StaticProvider::new(&access_key, &secret_key, None);
-        let minio = MinioClient::new(endpoint, Some(credentials), None, None)
-            .map_err(|_| RuntimeError::Config("invalid MinIO client configuration"))?;
+        let minio = MinioClient::new(
+            endpoint,
+            Some(credentials),
+            Some(std::path::Path::new(&minio_ca_file)),
+            Some(false),
+        )
+        .map_err(|_| RuntimeError::Config("invalid MinIO client configuration"))?;
         Ok((
             Self {
                 postgres_dsn,
+                postgres_ca_pem,
                 kafka_brokers: required("KAFKA_BROKERS")?,
                 kafka_ca: required("KAFKA_TLS_CA_FILE")?,
                 kafka_cert: required("KAFKA_TLS_CERT_FILE")?,
@@ -228,13 +243,44 @@ impl Metrics {
     }
 }
 
+#[derive(Clone, Default)]
+struct IngestionConsumerContext {
+    assignment_epoch: Arc<AtomicU64>,
+}
+
+impl IngestionConsumerContext {
+    fn epoch(&self) -> u64 {
+        self.assignment_epoch.load(Ordering::Acquire)
+    }
+
+    fn invalidate_assignment(&self) {
+        self.assignment_epoch.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+impl ClientContext for IngestionConsumerContext {}
+
+impl ConsumerContext for IngestionConsumerContext {
+    fn pre_rebalance<'a>(&self, _base_consumer: &BaseConsumer<Self>, _rebalance: &Rebalance<'a>) {
+        self.invalidate_assignment();
+    }
+}
+
+type IngestionConsumer = StreamConsumer<IngestionConsumerContext>;
+
+struct BufferedMessage {
+    message: OwnedMessage,
+    assignment_epoch: u64,
+}
+
 pub async fn run() -> Result<(), RuntimeError> {
     let (config, minio) = Config::from_env()?;
     let metrics = Metrics::new()?;
     let health = HealthState::new(metrics.clone());
-    let consumer: Arc<StreamConsumer> = Arc::new(
+    let consumer_context = IngestionConsumerContext::default();
+    let consumer: Arc<IngestionConsumer> = Arc::new(
         kafka_client_config(&config)
-            .create()
+            .create_with_context(consumer_context)
             .map_err(|_| RuntimeError::Startup("Kafka consumer creation failed"))?,
     );
     consumer
@@ -276,12 +322,12 @@ pub async fn run() -> Result<(), RuntimeError> {
     ));
 
     let mut backoff = Duration::from_millis(250);
-    let mut buffered = VecDeque::<OwnedMessage>::new();
+    let mut buffered = VecDeque::<BufferedMessage>::new();
     'consume: loop {
         if *shutdown_rx.borrow() {
             break;
         }
-        let message = if let Some(message) = buffered.pop_front() {
+        let buffered_message = if let Some(message) = buffered.pop_front() {
             message
         } else {
             tokio::select! {
@@ -292,7 +338,10 @@ pub async fn run() -> Result<(), RuntimeError> {
                     continue;
                 }
                 received = consumer.recv() => match received {
-                    Ok(message) => message.detach(),
+                    Ok(message) => BufferedMessage {
+                        message: message.detach(),
+                        assignment_epoch: consumer.context().epoch(),
+                    },
                     Err(_) => {
                         health.set_dependency("kafka", false);
                         tokio::select! {
@@ -305,6 +354,8 @@ pub async fn run() -> Result<(), RuntimeError> {
                 },
             }
         };
+        let message = buffered_message.message;
+        let message_epoch = buffered_message.assignment_epoch;
         if consumer
             .assignment()
             .and_then(|assignment| consumer.pause(&assignment))
@@ -314,6 +365,11 @@ pub async fn run() -> Result<(), RuntimeError> {
         }
         health.metrics.inflight.set(1);
         loop {
+            if !record_is_owned(&consumer, &message, message_epoch) {
+                retain_owned_records(&consumer, &mut buffered);
+                resume_if_buffer_empty(&consumer, &buffered, &health);
+                break;
+            }
             let started = Instant::now();
             let span = tracing::info_span!(
                 "ingestion.command.consume",
@@ -327,6 +383,11 @@ pub async fn run() -> Result<(), RuntimeError> {
             let action = process_message(&config, &minio, &message, &health.metrics)
                 .instrument(span)
                 .await;
+            if !record_is_owned(&consumer, &message, message_epoch) {
+                retain_owned_records(&consumer, &mut buffered);
+                resume_if_buffer_empty(&consumer, &buffered, &health);
+                break;
+            }
             let completed = match action {
                 ProcessAction::Commit { outcome, reason } => {
                     if commit_message_offset(&consumer, &message).is_ok() {
@@ -383,14 +444,7 @@ pub async fn run() -> Result<(), RuntimeError> {
                 }
             };
             if completed {
-                if buffered.is_empty()
-                    && consumer
-                        .assignment()
-                        .and_then(|assignment| consumer.resume(&assignment))
-                        .is_err()
-                {
-                    health.set_dependency("kafka", false);
-                }
+                resume_if_buffer_empty(&consumer, &buffered, &health);
                 break;
             }
             health
@@ -438,7 +492,7 @@ fn kafka_client_config(config: &Config) -> ClientConfig {
 }
 
 fn commit_message_offset<M: Message>(
-    consumer: &StreamConsumer,
+    consumer: &IngestionConsumer,
     message: &M,
 ) -> rdkafka::error::KafkaResult<()> {
     let mut offsets = TopicPartitionList::new();
@@ -457,16 +511,51 @@ fn commit_message_offset<M: Message>(
     consumer.commit(&offsets, CommitMode::Sync)
 }
 
+fn record_is_owned<M: Message>(
+    consumer: &IngestionConsumer,
+    message: &M,
+    assignment_epoch: u64,
+) -> bool {
+    assignment_epoch == consumer.context().epoch()
+        && consumer
+            .assignment()
+            .map(|assignment| {
+                assignment.elements().iter().any(|element| {
+                    element.topic() == message.topic() && element.partition() == message.partition()
+                })
+            })
+            .unwrap_or(false)
+}
+
+fn retain_owned_records(consumer: &IngestionConsumer, buffered: &mut VecDeque<BufferedMessage>) {
+    buffered.retain(|record| record_is_owned(consumer, &record.message, record.assignment_epoch));
+}
+
+fn resume_if_buffer_empty(
+    consumer: &IngestionConsumer,
+    buffered: &VecDeque<BufferedMessage>,
+    health: &HealthState,
+) {
+    if buffered.is_empty()
+        && consumer
+            .assignment()
+            .and_then(|assignment| consumer.resume(&assignment))
+            .is_err()
+    {
+        health.set_dependency("kafka", false);
+    }
+}
+
 enum BackoffOutcome {
     Elapsed,
     Shutdown,
 }
 
 async fn poll_during_backoff(
-    consumer: &StreamConsumer,
+    consumer: &IngestionConsumer,
     duration: Duration,
     shutdown: &mut watch::Receiver<bool>,
-    buffered: &mut VecDeque<OwnedMessage>,
+    buffered: &mut VecDeque<BufferedMessage>,
 ) -> BackoffOutcome {
     let delay = tokio::time::sleep(duration);
     tokio::pin!(delay);
@@ -480,7 +569,10 @@ async fn poll_during_backoff(
             }
             message = consumer.recv() => {
                 if let Ok(message) = message {
-                    buffered.push_back(message.detach());
+                    buffered.push_back(BufferedMessage {
+                        message: message.detach(),
+                        assignment_epoch: consumer.context().epoch(),
+                    });
                 }
             }
         }
@@ -490,6 +582,7 @@ async fn poll_during_backoff(
 fn postgres_config_with_deadlines(dsn: &str) -> Result<postgres::Config, postgres::Error> {
     let mut config: postgres::Config = dsn.parse()?;
     config
+        .ssl_mode(postgres::config::SslMode::Require)
         .connect_timeout(Duration::from_secs(5))
         .tcp_user_timeout(Duration::from_secs(10))
         .keepalives(true)
@@ -503,8 +596,34 @@ fn postgres_config_with_deadlines(dsn: &str) -> Result<postgres::Config, postgre
     Ok(config)
 }
 
-fn connect_postgres_with_deadlines(dsn: &str) -> Result<postgres::Client, postgres::Error> {
-    postgres_config_with_deadlines(dsn)?.connect(postgres::NoTls)
+fn minio_https_endpoint(value: &str) -> Result<BaseUrl, RuntimeError> {
+    let endpoint: BaseUrl = value
+        .parse()
+        .map_err(|_| RuntimeError::Config("invalid MinIO endpoint"))?;
+    if !endpoint.https {
+        return Err(RuntimeError::Config("MinIO HTTPS is required"));
+    }
+    Ok(endpoint)
+}
+
+fn postgres_tls_connector(ca_pem: &[u8]) -> Result<MakeTlsConnector, native_tls::Error> {
+    let ca = Certificate::from_pem(ca_pem)?;
+    let mut builder = TlsConnector::builder();
+    builder
+        .add_root_certificate(ca)
+        .min_protocol_version(Some(Protocol::Tlsv12));
+    Ok(MakeTlsConnector::new(builder.build()?))
+}
+
+fn connect_postgres_with_deadlines(dsn: &str, ca_pem: &[u8]) -> Result<postgres::Client, ()> {
+    let config = postgres_config_with_deadlines(dsn).map_err(|_| ())?;
+    let tls = postgres_tls_connector(ca_pem).map_err(|_| ())?;
+    config.connect(tls).map_err(|_| ())
+}
+
+enum CommandPersistenceError {
+    Conflict,
+    Transient,
 }
 
 enum ProcessAction {
@@ -598,10 +717,20 @@ async fn process_message<M: Message>(
         }
     };
     let dsn = config.postgres_dsn.clone();
-    let persisted = tokio::task::block_in_place(|| {
-        let mut client = connect_postgres_with_deadlines(&dsn)?;
-        persist_ingestion_command(&mut client, &scope, &command, nodes, relations, &chunks)
-    });
+    let ca_pem = config.postgres_ca_pem.clone();
+    let persisted: Result<crate::CommandOutcome, CommandPersistenceError> =
+        tokio::task::block_in_place(|| {
+            let mut client = connect_postgres_with_deadlines(&dsn, &ca_pem)
+                .map_err(|_| CommandPersistenceError::Transient)?;
+            persist_ingestion_command(&mut client, &scope, &command, nodes, relations, &chunks)
+                .map_err(|error| {
+                    if error.is_command_id_conflict() {
+                        CommandPersistenceError::Conflict
+                    } else {
+                        CommandPersistenceError::Transient
+                    }
+                })
+        });
     match persisted {
         Ok(crate::CommandOutcome::Applied(_)) => ProcessAction::Commit {
             outcome: "applied",
@@ -611,10 +740,10 @@ async fn process_message<M: Message>(
             outcome: "duplicate",
             reason: "none",
         },
-        Err(error) if error.is_command_id_conflict() => ProcessAction::Dlq {
+        Err(CommandPersistenceError::Conflict) => ProcessAction::Dlq {
             reason: "command_id_conflict",
         },
-        Err(_) => ProcessAction::Retry {
+        Err(CommandPersistenceError::Transient) => ProcessAction::Retry {
             dependency: "postgres",
         },
     }
@@ -737,7 +866,7 @@ fn sanitized_dlq_payload(partition: i32, offset: i64, reason: &'static str) -> S
 async fn probe_dependencies(
     config: Config,
     minio: MinioClient,
-    consumer: Arc<StreamConsumer>,
+    consumer: Arc<IngestionConsumer>,
     health: HealthState,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -751,11 +880,12 @@ async fn probe_dependencies(
                 .unwrap_or(false);
         health.set_dependency("kafka", kafka_ready);
         let dsn = config.postgres_dsn.clone();
-        let postgres_ready = tokio::task::block_in_place(|| {
-            connect_postgres_with_deadlines(&dsn)
-                .and_then(|mut client| client.simple_query("SELECT 1"))
-                .is_ok()
-        });
+        let ca_pem = config.postgres_ca_pem.clone();
+        let postgres_ready =
+            tokio::task::block_in_place(|| match connect_postgres_with_deadlines(&dsn, &ca_pem) {
+                Ok(mut client) => client.simple_query("SELECT 1").is_ok(),
+                Err(()) => false,
+            });
         health.set_dependency("postgres", postgres_ready);
         let minio_ready = tokio::time::timeout(Duration::from_secs(3), async {
             minio
@@ -877,6 +1007,7 @@ mod tests {
     fn kafka_client_is_literal_manual_offset_and_tls_only() {
         let config = Config {
             postgres_dsn: "postgresql://ignored".into(),
+            postgres_ca_pem: Vec::new(),
             kafka_brokers: "broker:9093".into(),
             kafka_ca: "/tls/ca.crt".into(),
             kafka_cert: "/tls/user.crt".into(),
@@ -903,6 +1034,7 @@ mod tests {
         let config =
             postgres_config_with_deadlines("postgresql://eci:secret@postgres.data-plane.svc/eci")
                 .unwrap();
+        assert_eq!(config.get_ssl_mode(), postgres::config::SslMode::Require);
         assert_eq!(config.get_connect_timeout(), Some(&Duration::from_secs(5)));
         assert_eq!(
             config.get_tcp_user_timeout(),
@@ -918,6 +1050,24 @@ mod tests {
         assert!(options.contains("statement_timeout=10000"));
         assert!(options.contains("lock_timeout=5000"));
         assert!(options.contains("idle_in_transaction_session_timeout=10000"));
+    }
+
+    #[test]
+    fn datastore_transport_rejects_plaintext_and_invalid_trust() {
+        assert!(matches!(
+            minio_https_endpoint("http://minio.data-plane.svc.cluster.local:9000"),
+            Err(RuntimeError::Config("MinIO HTTPS is required"))
+        ));
+        assert!(minio_https_endpoint("https://minio.data-plane.svc.cluster.local:9000").is_ok());
+        assert!(postgres_tls_connector(b"not a PEM certificate").is_err());
+    }
+
+    #[test]
+    fn rebalance_context_invalidates_detached_record_epoch() {
+        let context = IngestionConsumerContext::default();
+        let detached_epoch = context.epoch();
+        context.invalidate_assignment();
+        assert_ne!(detached_epoch, context.epoch());
     }
 
     #[test]

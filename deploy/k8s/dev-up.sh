@@ -54,6 +54,36 @@ for namespace in data-plane query-plane ingestion-plane ingress; do
     --dry-run=client -o yaml | "$KUBECTL_BIN" apply -f - >/dev/null
 done
 
+# MinIO is TLS-only in both profiles. Reuse a valid hostname-bound certificate
+# for the disposable cluster, or generate it locally; only the public CA is
+# copied to the ingestion namespace.
+ECI_MINIO_TLS_ROTATED=false
+if "$KUBECTL_BIN" -n data-plane get secret eci-minio-tls >/dev/null 2>&1; then
+  "$KUBECTL_BIN" -n data-plane get secret eci-minio-tls \
+    -o 'jsonpath={.data.tls\.crt}' | base64 --decode >"$ECI_DEV_TMP_DIR/minio.crt"
+  if ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio.crt" -checkend 86400 -noout >/dev/null 2>&1 || \
+     ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio.crt" -checkhost minio.data-plane.svc -noout >/dev/null 2>&1; then
+    ECI_MINIO_TLS_ROTATED=true
+  fi
+else
+  ECI_MINIO_TLS_ROTATED=true
+fi
+if [[ "$ECI_MINIO_TLS_ROTATED" == true ]]; then
+  openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 365 \
+    -subj '/CN=minio.data-plane.svc' \
+    -addext 'subjectAltName=DNS:minio,DNS:minio.data-plane.svc,DNS:minio.data-plane.svc.cluster.local,DNS:*.minio-headless.data-plane.svc.cluster.local' \
+    -addext 'basicConstraints=critical,CA:TRUE' \
+    -keyout "$ECI_DEV_TMP_DIR/minio.key" -out "$ECI_DEV_TMP_DIR/minio.crt" >/dev/null 2>&1
+  chmod 0600 "$ECI_DEV_TMP_DIR/minio.key" "$ECI_DEV_TMP_DIR/minio.crt"
+  "$KUBECTL_BIN" -n data-plane create secret generic eci-minio-tls \
+    --from-file=tls.crt="$ECI_DEV_TMP_DIR/minio.crt" \
+    --from-file=tls.key="$ECI_DEV_TMP_DIR/minio.key" \
+    --dry-run=client -o yaml | "$KUBECTL_BIN" apply -f - >/dev/null
+fi
+"$KUBECTL_BIN" -n ingestion-plane create secret generic eci-minio-ca \
+  --from-file=ca.crt="$ECI_DEV_TMP_DIR/minio.crt" \
+  --dry-run=client -o yaml | "$KUBECTL_BIN" apply -f - >/dev/null
+
 # The in-cluster development issuer is HTTPS-only. Reuse a still-valid
 # hostname-bound certificate so repeated installs do not rotate trust
 # unexpectedly; generate it locally when the disposable cluster needs one.
@@ -126,6 +156,17 @@ ECI_K8S_PROFILE=dev HELM_BIN="$HELM_BIN" KUBECTL_BIN="$KUBECTL_BIN" "$ROOT_DIR/d
 "$HELM_BIN" upgrade --install eci "$ROOT_DIR/deploy/k8s/eci-platform" \
   --namespace query-plane --values "$ROOT_DIR/deploy/k8s/eci-platform/values-dev.yaml" \
   --wait --atomic --timeout 20m
+
+# CloudNativePG owns the PostgreSQL server CA. Copy only ca.crt to the worker
+# namespace after the Cluster has reconciled; never copy ca.key.
+"$KUBECTL_BIN" -n data-plane wait --for=condition=Ready cluster/eci-postgres --timeout=10m
+"$KUBECTL_BIN" -n data-plane get secret eci-postgres-ca \
+  -o 'jsonpath={.data.ca\.crt}' | base64 --decode >"$ECI_DEV_TMP_DIR/postgres-ca.crt"
+test -s "$ECI_DEV_TMP_DIR/postgres-ca.crt"
+chmod 0600 "$ECI_DEV_TMP_DIR/postgres-ca.crt"
+"$KUBECTL_BIN" -n ingestion-plane create secret generic eci-postgres-ca \
+  --from-file=ca.crt="$ECI_DEV_TMP_DIR/postgres-ca.crt" \
+  --dry-run=client -o yaml | "$KUBECTL_BIN" apply -f - >/dev/null
 if [[ "$ECI_KEYCLOAK_TLS_ROTATED" == true ]]; then
   "$KUBECTL_BIN" -n ingress rollout restart deployment/keycloak >/dev/null
   "$KUBECTL_BIN" -n ingress rollout status deployment/keycloak --timeout=10m

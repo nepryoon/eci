@@ -72,8 +72,10 @@ applications:
       fixedEnv:
         - {name: KAFKA_TOPIC, value: eci.ingestion.file.v1}
         - {name: KAFKA_GROUP_ID, value: ingestion}
-        - {name: MINIO_ENDPOINT, value: http://minio.data-plane.svc.cluster.local:9000}
+        - {name: MINIO_ENDPOINT, value: https://minio.data-plane.svc.cluster.local:9000}
         - {name: MINIO_BUCKET, value: eci-sources}
+        - {name: MINIO_CA_FILE, value: /etc/eci/minio/ca.crt}
+        - {name: POSTGRES_CA_FILE, value: /etc/eci/postgres/ca.crt}
         - {name: ECI_INGESTION_MAX_SOURCE_BYTES, value: "16777216"}
         - {name: ECI_METRICS_ADDRESS, value: "0.0.0.0:9100"}
       secretEnv:
@@ -180,6 +182,8 @@ routing:
   redisAddress: redis.data-plane.svc.cluster.local:6379
   kafkaBrokers: eci-kafka-kafka-bootstrap.data-plane.svc.cluster.local:9093
   kafkaTLSSecretPrefix: eci-kafka
+  minioTLSSecret: eci-minio-ca
+  postgresTLSSecret: eci-postgres-ca
   openSearchTLSSecret: eci-opensearch-client-ca
   vllmURL: http://vllm.gpu-plane.svc.cluster.local:8000/v1
   # Resolve the trusted external issuer or an egress proxy to explicit CIDRs.
@@ -256,6 +260,7 @@ dataPlane:
       limits: {cpu: "8", memory: 32Gi}
   minio:
     image: minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    tlsSecret: eci-minio-tls
     replicas: 4
     storage: 100Gi
   qdrant:

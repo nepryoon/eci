@@ -105,6 +105,9 @@ spec:
             --data '{"input":{"action":"/eci.retrieval.v1.RetrievalEngine/GetNode","subject":{"user_id":"smoke-user","allowed_repos":["smoke-repo"],"acl_groups":["smoke-acl"]}}}' \
             http://opa.query-plane.svc:8181/v1/data/eci/authz/decision | grep -q '"reason":"missing_tenant"'
           echo 'OPA allow and fail-closed decisions: PASS'
+          curl -fsS --cacert /etc/eci/minio/ca.crt \
+            https://minio.data-plane.svc:9000/minio/health/ready
+          echo 'MinIO HTTPS health with hostname-bound trust: PASS'
           curl -fsS --cacert /etc/eci/keycloak/ca.crt \
             https://keycloak.ingress.svc:8443/realms/master/.well-known/openid-configuration | \
             grep -q '"issuer":"https://keycloak.ingress.svc:8443/realms/master"'
@@ -114,9 +117,14 @@ spec:
         limits: {cpu: 100m, memory: 128Mi}
       volumeMounts:
         - {name: keycloak-ca, mountPath: /etc/eci/keycloak, readOnly: true}
+        - {name: minio-ca, mountPath: /etc/eci/minio, readOnly: true}
   volumes:
     - name: keycloak-ca
       configMap: {name: eci-keycloak-ca}
+    - name: minio-ca
+      secret:
+        secretName: eci-minio-tls
+        items: [{key: tls.crt, path: ca.crt}]
 EOF
 "$KUBECTL_BIN" -n data-plane wait --for=jsonpath='{.status.phase}'=Succeeded pod/eci-connectivity --timeout=3m
 "$KUBECTL_BIN" -n data-plane logs eci-connectivity

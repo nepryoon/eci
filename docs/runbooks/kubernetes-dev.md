@@ -116,8 +116,12 @@ Ingestion is the authenticated durable worker pool from ADR-0023/SPEC-067.
 Before enabling applications, provision bucket `eci-sources`, immutable source
 objects at the derived `sources/v1/...` keys, and `eci-runtime-ingestion` with
 only `POSTGRES_DSN`, `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`. The workload
-also mounts only the Strimzi-created identity `eci-kafka-ingestion`; do not copy
-the producer identity into its namespace. A trusted commit producer must use
+also mounts only the Strimzi-created identity `eci-kafka-ingestion`, the public
+MinIO CA from `eci-minio-ca` and the CloudNativePG public CA from
+`eci-postgres-ca`; do not copy the producer identity, `ca.key`, or the MinIO
+server key into its namespace. `POSTGRES_DSN` must name the certificate-bound
+cluster Service and MinIO must remain HTTPS; plaintext endpoints fail startup.
+A trusted commit producer must use
 `eci-kafka-ingestion-commit-producer`, publish the closed
 `contracts/jsonschema/ingestion-file-command.json` value and set exactly one
 each of `eci-tenant-id`, `eci-repository` and `eci-acl-group`. Scope in the JSON
