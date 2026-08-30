@@ -1,5 +1,5 @@
 # SPEC-074 — Acknowledgement delete nel worker embedding
-Stato: approved
+Stato: implemented
 Task-tree: T7.1a · Servizio: services/embedding-worker · ADD: Modulo 1 §2.2.3–§2.2.4
 Contratti: contracts/jsonschema/outbox-event.json, ADR-0025
 
@@ -68,13 +68,17 @@ contengono ID, provenance, testo, vettore, header o payload.
 
 ## 9. Criteri di accettazione
 
-- [ ] Test nuovi osservati rossi contro worker UPSERT-only.
-- [ ] `go test ./internal/consumer/...`
-- [ ] `go vet ./...`
+- [x] Test nuovi osservati rossi contro worker UPSERT-only.
+- [x] `go test ./internal/consumer/...`
+- [x] `go vet ./...`
 - [ ] integration Docker verde e ripetuta due volte.
-- [ ] `task build && task lint && task test && task test:security`
+- [x] `task build && task lint && task test && task test:security`
 - [ ] `task test:integration`
-- [ ] Review no-recreate/replay/privacy/offset completata.
+- [x] Review no-recreate/replay/privacy/offset completata.
+
+L'integration test usa intenzionalmente un endpoint embedder irraggiungibile e
+verifica zero nuove embedding/outbox, acknowledgement e replay. Il binario con
+tag integration compila; l'esecuzione resta bloccata dal daemon Docker assente.
 
 ## 10. Review avversariale pre-implementazione
 
