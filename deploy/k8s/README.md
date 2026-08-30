@@ -117,7 +117,11 @@ post-migration registration boundary.
 The loopback REST boundary also fixes Kafka Connect at exactly one replica:
 distributed workers require a mutually reachable advertised REST address, so
 Helm rejects any larger `cdc.replicas` value instead of rendering a broken
-cluster. Setting `dataPlane.enabled=false` omits Connect, its connector config
+cluster. Its Deployment uses `Recreate`, preventing a rolling-update surge
+from violating that singleton boundary. PostgreSQL 17 logical-slot failover is
+enabled end to end: Debezium sets `slot.failover=true`, while CNPG synchronizes
+logical decoding slots with `hot_standby_feedback` and
+`sync_replication_slots`. Setting `dataPlane.enabled=false` omits Connect, its connector config
 and its dedicated policies together. Setting `cdc.enabled=false` asks CNPG to
 remove the managed `eci_cdc` login role with `ensure: absent` and omits the
 CDC-only Secret reference. The

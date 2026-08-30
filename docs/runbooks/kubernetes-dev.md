@@ -310,7 +310,8 @@ only `127.0.0.1:8083`, has no Kubernetes Service and is excluded from the
 general data-plane policy; only its Kafka and PostgreSQL data paths are
 allowed. This loopback design is intentionally single-replica: Helm rejects
 `cdc.replicas != 1`, because followers could not reach the leader's advertised
-REST endpoint. `dataPlane.enabled=false` omits Connect, its connector ConfigMap
+REST endpoint. The Deployment uses `Recreate`, so an update cannot temporarily
+surge a second unreachable worker. `dataPlane.enabled=false` omits Connect, its connector ConfigMap
 and its dedicated policies. Kafka Connect is Ready before application migrations by design, but the
 `eci-outbox-connector` is not registered automatically against an empty
 database. After the checked-in SQL migrations have created `public.outbox`, a
@@ -335,6 +336,9 @@ SELECT to that carrier. With CDC enabled, CNPG manages `eci_cdc` as its member
 with LOGIN+REPLICATION but without superuser, createdb, createrole or bypassrls.
 This ordering also supports enabling CDC after migration 0005 was applied while
 the connector was disabled; no migration is replayed.
+For PostgreSQL 17 failover, Debezium creates `eci_outbox_slot` with
+`slot.failover=true`; CNPG synchronizes logical decoding slots and enables
+`hot_standby_feedback` plus `sync_replication_slots`.
 Disabling CDC after it was enabled keeps `eci_cdc` in the CNPG managed-role
 list with `ensure: absent`: omission alone does not revoke an existing role.
 The CDC Secret reference and Connect resources are omitted in that state.

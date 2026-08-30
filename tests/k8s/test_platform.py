@@ -164,6 +164,18 @@ class PlatformChartTests(unittest.TestCase):
         )
         self.assertEqual(postgres["spec"]["postgresql"]["parameters"]["wal_level"], "logical")
         self.assertEqual(
+            postgres["spec"]["replicationSlots"]["highAvailability"],
+            {"enabled": True, "synchronizeLogicalDecoding": True},
+        )
+        self.assertEqual(
+            postgres["spec"]["postgresql"]["parameters"],
+            {
+                "wal_level": "logical", "max_replication_slots": "10",
+                "max_wal_senders": "10", "hot_standby_feedback": "on",
+                "sync_replication_slots": "on",
+            },
+        )
+        self.assertEqual(
             postgres["spec"]["managed"]["roles"],
             [
                 {
@@ -199,6 +211,7 @@ class PlatformChartTests(unittest.TestCase):
 
         connect = self.by_key[("Deployment", "data-plane", "kafka-connect")]
         self.assertEqual(connect["spec"]["replicas"], 1)
+        self.assertEqual(connect["spec"]["strategy"], {"type": "Recreate"})
         connect_container = connect["spec"]["template"]["spec"]["containers"][0]
         env = {item["name"]: item for item in connect_container["env"]}
         self.assertEqual(env["CONNECT_SECURITY_PROTOCOL"]["value"], "SSL")
@@ -211,6 +224,7 @@ class PlatformChartTests(unittest.TestCase):
         connector = json.loads(self.by_key[("ConfigMap", "data-plane", "eci-debezium-connector")]["data"]["connector.json"])
         self.assertEqual(connector["database.user"], "eci_cdc")
         self.assertEqual(connector["publication.autocreate.mode"], "disabled")
+        self.assertEqual(connector["slot.failover"], "true")
         self.assertEqual(connect_container["securityContext"]["readOnlyRootFilesystem"], True)
         self.assertEqual(env["BOOTSTRAP_SERVERS"]["value"], "eci-kafka-kafka-bootstrap.data-plane.svc:9093")
         self.assertEqual(env["CONNECT_SSL_KEYSTORE_TYPE"]["value"], "PKCS12")
@@ -372,8 +386,11 @@ class PlatformChartTests(unittest.TestCase):
         for deployment in deployments:
             name = deployment["metadata"]["name"]
             with self.subTest(name=name):
-                strategy = deployment["spec"]["strategy"]["rollingUpdate"]
-                self.assertEqual(strategy, {"maxSurge": 1, "maxUnavailable": 0})
+                if name == "kafka-connect":
+                    self.assertEqual(deployment["spec"]["strategy"], {"type": "Recreate"})
+                else:
+                    strategy = deployment["spec"]["strategy"]["rollingUpdate"]
+                    self.assertEqual(strategy, {"maxSurge": 1, "maxUnavailable": 0})
                 pod_spec = deployment["spec"]["template"]["spec"]
                 topology = {item["topologyKey"] for item in pod_spec["topologySpreadConstraints"]}
                 self.assertEqual(topology, {"topology.kubernetes.io/zone", "kubernetes.io/hostname"})

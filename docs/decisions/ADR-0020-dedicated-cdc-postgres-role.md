@@ -48,6 +48,10 @@ role storico invece di lasciarne LOGIN, REPLICATION e grant ereditati.
 Debezium usa
 `publication.autocreate.mode=disabled`, quindi non deve possedere tabelle né
 creare publication.
+Poiché il profilo standard ha failover automatico su PostgreSQL 17, Debezium
+crea lo slot con `slot.failover=true` e CNPG abilita la sincronizzazione dei
+logical decoding slot insieme a `hot_standby_feedback` e
+`sync_replication_slots`; una sola metà della configurazione non è accettata.
 
 Il profilo dev genera una password casuale separata e la conserva nel Secret;
 un upgrade riusa lo stesso valore. Produzione deve pre-provisionare il Secret

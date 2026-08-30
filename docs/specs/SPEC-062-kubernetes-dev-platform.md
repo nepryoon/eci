@@ -93,7 +93,8 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    ispeziona il Pod template, Then rollout è `maxSurge=1/maxUnavailable=0`, PDB
    ha `minAvailable>=1`, esistono topology spread per zona e hostname,
    anti-affinity, requests/limits e probe coerenti con protocolli realmente
-   esposti. I consumer privi di readiness applicativa usano startup/readiness
+   esposti. Kafka Connect è l'eccezione documentata: usa `Recreate` per non
+   violare il singleton REST loopback durante un update. I consumer privi di readiness applicativa usano startup/readiness
    `tcpSocket` sulla porta metriche, mai un endpoint inventato.
 4. **Least privilege e segreti.** Given ogni oggetto renderizzato, When passa
    la policy statica, Then pod/container sono non-root, seccomp RuntimeDefault,
@@ -123,6 +124,8 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    dal database owner. La publication outbox è creata dalla migration 0005 e
    Connect non può auto-crearla. Il percorso installazione senza CDC → upgrade
    con CDC conserva quindi deterministicamente il grant già applicato.
+   Con PostgreSQL 17 il connector usa uno slot failover e CNPG sincronizza i
+   logical decoding slot sulle repliche con i parametri standby richiesti.
    Kafka espone soltanto il listener applicativo mTLS 9093 con simple
    authorization deny-by-default. Connect e ogni consumer hanno un
    `KafkaUser` distinto; topic e consumer group sono ACL literal senza
@@ -368,7 +371,9 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       data plane; quando CDC è disabilitato CNPG riceve `eci_cdc` con
       `ensure: absent` per revocare anche un ruolo già riconciliato, il relativo
       Secret reference è omesso e resta presente il carrier NOLOGIN senza
-      password necessario al grant upgrade-safe; i quattro worker sono Ready solo dopo topic Read+group access via
+      password necessario al grant upgrade-safe; `Recreate` impedisce surge
+      temporanei e slot failover Debezium/CNPG preservano la posizione CDC dopo
+      promozione PostgreSQL 17; i quattro worker sono Ready solo dopo topic Read+group access via
       il transport Kafka autenticato e embedding-worker entra nel consume-loop
       solo dopo `/health` TEI e mantiene tale dipendenza nella readiness;
       Semantic Cache è Ready solo dopo PING

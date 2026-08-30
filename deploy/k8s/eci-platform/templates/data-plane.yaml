@@ -56,11 +56,17 @@ spec:
   monitoring:
     # T7.3 owns PodMonitor lifecycle; exporter remains available now.
     enablePodMonitor: false
+  replicationSlots:
+    highAvailability:
+      enabled: true
+      synchronizeLogicalDecoding: true
   postgresql:
     parameters:
       wal_level: logical
       max_replication_slots: "10"
       max_wal_senders: "10"
+      hot_standby_feedback: "on"
+      sync_replication_slots: "on"
 ---
 apiVersion: kafka.strimzi.io/v1
 kind: KafkaNodePool

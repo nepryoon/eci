@@ -214,6 +214,10 @@ migration.
 The explicit absent-role transition is deterministic render evidence added
 after review; it was not exercised against or attributed to that historical
 live cluster.
+The same applies to the later deterministic failover hardening: Connect now
+uses a singleton-preserving `Recreate` strategy, and the render pairs Debezium
+`slot.failover=true` with CNPG PostgreSQL 17 logical-slot synchronization. No
+historical failover smoke is claimed.
 The closing render review rejects `applications.enabled=true` together with
 `dataPlane.enabled=false`: the current chart has no external-backend identity,
 trust, or egress contract and therefore cannot claim that topology. This is a

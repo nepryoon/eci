@@ -22,6 +22,7 @@ data:
       "table.include.list": "public.outbox",
       "plugin.name": "pgoutput",
       "slot.name": "eci_outbox_slot",
+      "slot.failover": "true",
       "publication.name": "eci_outbox_publication",
       "publication.autocreate.mode": "disabled",
       "transforms": "outbox",
@@ -56,8 +57,10 @@ metadata:
 spec:
   replicas: {{ .Values.cdc.replicas }}
   strategy:
-    type: RollingUpdate
-    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+    # REST is intentionally loopback-only. Recreate preserves the singleton
+    # worker invariant during updates; a surge worker could not reach the
+    # leader advertised at 127.0.0.1.
+    type: Recreate
   selector:
     matchLabels:
       {{- include "eci.selectorLabels" (dict "name" "kafka-connect") | nindent 6 }}

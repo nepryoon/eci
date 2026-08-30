@@ -46,6 +46,8 @@ probe `exec` su loopback. È escluso dalla policy data-plane interna generale e
 riceve soltanto DNS, Kafka mTLS 9093 e PostgreSQL 5432. La registrazione
 post-migration avviene con accesso Kubernetes amministrativo tramite
 `kubectl exec` e `curl` su loopback.
+Il Deployment usa strategia `Recreate`: con REST advertised su loopback anche
+un surge temporaneo creerebbe due worker incapaci di raggiungere il leader.
 
 ## Conseguenze
 

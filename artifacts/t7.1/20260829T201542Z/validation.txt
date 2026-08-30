@@ -23,6 +23,8 @@ kafka_topic_inventory_unit=PASS (4 primary + 5 per-consumer retry + 4 DLQ + 3 Co
 kafka_primary_producer_provenance_unit=PASS (consumer primary Write absent; own retry Write present)
 kafka_connect_loopback_only_unit=PASS (no Service; exec probes; dedicated Kafka/PostgreSQL policies)
 kafka_connect_single_replica_and_data_plane_guard_unit=PASS
+kafka_connect_recreate_singleton_rollout_unit=PASS
+postgres17_logical_slot_failover_render_unit=PASS (Debezium failover slot + CNPG synchronization)
 cdc_disabled_preserves_carrier_revokes_login_role_and_omits_secret_reference=PASS (eci_cdc ensure=absent)
 kafka_worker_readiness_unit=PASS (same transport; topic Describe + non-consuming Fetch/Read + group coordinator/offset authorization; closed 503)
 embedding_worker_embedder_gate_unit=PASS (bounded native TEI /health before consume-loop/after uncommitted failure/readiness; transport/429/5xx stay uncommitted, reader resets before later offsets, no inference; fake contract covered)
