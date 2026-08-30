@@ -218,7 +218,10 @@ no consumer-group offset and returns no historical application record, but it
 does require the same Topic Read ACL as the consume loop. TLS, Describe, Read,
 or group authorization failures return 503 without broker details. The
 liveness probe remains a local TCP check so broker recovery is not amplified
-into pod restart churn.
+into pod restart churn. Embedding Worker additionally calls the embedder's
+native `/health` with a two-second deadline before entering its consume loop,
+then includes the same non-inference dependency in `/ready`. A cold GPU rollout
+therefore cannot consume and DLQ a valid backlog before the model is ready.
 LLM Gateway startup/readiness calls its own `/ready`, which checks each unique
 configured vLLM `/health` path through the same HTTP client within two seconds.
 This does not enqueue inference or include backend details in the response.

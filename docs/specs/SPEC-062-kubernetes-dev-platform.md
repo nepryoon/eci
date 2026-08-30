@@ -154,7 +154,10 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    coordinator, offset access del gruppo e una Fetch non-consumante al log end
    che esercita realmente la Topic Read ACL. Errori TLS/topic/group rispondono
    503 senza dettagli; liveness resta locale per evitare restart storm durante
-   un outage recuperabile del broker. Semantic Cache applica lo stesso
+   un outage recuperabile del broker. In aggiunta, `embedding-worker` verifica
+   `/health` nativo TEI con deadline prima di entrare nel consume-loop e a ogni
+   readiness: un cold start GPU non può quindi drenare backlog verso DLQ e il
+   probe non esegue inferenza. Semantic Cache applica lo stesso
    principio: `/ready` esegue PING Redis con il client autenticato e risponde
    soltanto 204/503, mentre liveness resta locale. Retrieval Engine verifica
    in parallelo e con deadline Neo4j autenticato, collection Qdrant
@@ -362,7 +365,9 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       data plane; quando CDC è disabilitato il login role CNPG `eci_cdc` e il
       relativo Secret reference sono omessi, mentre resta soltanto il carrier
       NOLOGIN senza password necessario al grant upgrade-safe; i quattro worker sono Ready solo dopo topic Read+group access via
-      il transport Kafka autenticato; Semantic Cache è Ready solo dopo PING
+      il transport Kafka autenticato e embedding-worker entra nel consume-loop
+      solo dopo `/health` TEI e mantiene tale dipendenza nella readiness;
+      Semantic Cache è Ready solo dopo PING
       Redis autenticato; Retrieval Engine richiede tutti i cinque backend
       reali e LLM Gateway richiede la health vLLM, mentre le liveness restano locali.
 - [x] Redis standalone usa un solo backend StatefulSet con AOF/PVC e restart

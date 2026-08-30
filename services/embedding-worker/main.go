@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -35,6 +36,25 @@ const sinkName = "embedding-worker"
 // SPEC-036 §2: i quattro sink condividono il namespace di rete dell'host,
 // serve una porta di default distinta per ciascuno).
 const defaultMetricsPort = "9102"
+
+const dependencyCheckTimeout = 2 * time.Second
+
+var errReadinessCheckMissing = errors.New("embedding-worker: readiness check missing")
+
+func combinedReadiness(
+	kafkaCheck func(context.Context) error,
+	embedderCheck func(context.Context) error,
+) func(context.Context) error {
+	return func(ctx context.Context) error {
+		if kafkaCheck == nil || embedderCheck == nil {
+			return errReadinessCheckMissing
+		}
+		if err := kafkaCheck(ctx); err != nil {
+			return err
+		}
+		return embedderCheck(ctx)
+	}
+}
 
 func main() {
 	ctx := context.Background()
@@ -84,9 +104,17 @@ func main() {
 		log.Fatalf("embedding-worker: configurazione readiness Kafka: %v", err)
 	}
 
+	embedder := embedclient.New(embeddingServiceURL)
+	startupCtx, cancelStartup := context.WithTimeout(ctx, dependencyCheckTimeout)
+	if err := embedder.Health(startupCtx); err != nil {
+		cancelStartup()
+		log.Fatalf("embedding-worker: embedder non pronto prima del consume-loop: %v", err)
+	}
+	cancelStartup()
+
 	deps := consumer.Deps{
 		DB:      db,
-		Embed:   embedclient.New(embeddingServiceURL),
+		Embed:   embedder,
 		ModelID: modelID,
 		Logf:    log.Printf,
 	}
@@ -111,7 +139,7 @@ func main() {
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", metrics.Handler())
-		mux.Handle("/ready", kafkaready.Handler(readiness.Check))
+		mux.Handle("/ready", kafkaready.Handler(combinedReadiness(readiness.Check, embedder.Health)))
 		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
 			log.Printf("embedding-worker: server HTTP metriche (%s) non avviato: %v (consume-loop non impattato)", metricsAddr, err)
 		}

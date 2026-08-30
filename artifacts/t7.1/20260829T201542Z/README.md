@@ -44,7 +44,9 @@ Results:
 - embedding-worker mTLS identity consumed its retry topic and accessed its exact
   consumer-group offsets; shared worker readiness now also performs a
   non-consuming log-end Fetch that requires Topic Read and rejects TLS/topic/group
-  failures with 503 and leaks no broker detail: PASS;
+  failures with 503 and leaks no broker detail; embedding-worker additionally
+  requires bounded native TEI `/health` before its consume-loop and in readiness,
+  without inference: PASS (deterministic unit evidence; first-party image not deployed);
 - Semantic Cache authenticated Redis readiness returns closed 503 without
   backend detail on a failed PING, and startup/readiness use that endpoint:
   PASS (deterministic unit/render evidence; first-party image not deployed);
