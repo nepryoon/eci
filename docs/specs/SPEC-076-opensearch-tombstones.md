@@ -1,5 +1,5 @@
 # SPEC-076 — Tombstone scope-safe nel sink OpenSearch
-Stato: approved
+Stato: implemented
 Task-tree: T7.1a · Servizio: services/sink-search · ADD: Modulo 1 §§2.2.3–2.2.4, Modulo 2 §1.4
 Contratti: contracts/jsonschema/outbox-event.json, ADR-0022, ADR-0025
 
@@ -80,13 +80,13 @@ nuovi log/error. Le metriche retry/DLQ esistenti restano il segnale operativo.
 
 ## 9. Criteri di accettazione
 
-- [ ] Test nuovi osservati rossi contro sink UPSERT-only.
-- [ ] `go test ./internal/consumer/...`
-- [ ] `go vet ./...`
+- [x] Test nuovi osservati rossi contro sink UPSERT-only.
+- [x] `go test ./internal/consumer/...`
+- [x] `go vet ./...`
 - [ ] integration Docker verde e ripetuta due volte.
-- [ ] `task build && task lint && task test && task test:security`
+- [x] `task build && task lint && task test && task test:security`
 - [ ] `task test:integration`
-- [ ] Review TOCTOU/cross-scope/replay/partial-response/cancel completata.
+- [x] Review TOCTOU/cross-scope/replay/partial-response/cancel completata.
 
 ## 10. Review avversariale pre-implementazione
 
@@ -95,3 +95,15 @@ documento tra le due chiamate. La delete-by-query combina `_id`, tenant, repo e
 ACL nello stesso effetto server-side. `wait_for_completion=true`, refresh e la
 validazione di timeout/failure/conflitti impediscono che un risultato parziale
 diventi completion marker; 0/0 rende sicuro il replay dopo crash.
+
+## 11. Evidenza di implementazione
+
+- Test red: `07e90b7`; failure-window integration: `861c966`;
+  implementazione: `66a7f83`.
+- `go test ./internal/consumer/...`, `go test -race
+  ./internal/consumer/...`, `go vet ./...` e compilazione con
+  `-tags=integration -run '^$'` verdi.
+- Gli aggregate `task build`, `task lint`, `task test` e
+  `task test:security` sono verdi. `task test:integration` fallisce
+  esplicitamente al preflight per daemon Docker non raggiungibile; lo stato
+  resta quindi `implemented`, non `verified`.
