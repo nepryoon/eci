@@ -243,10 +243,14 @@ only on HTTPS 8443. `dev-up.sh` creates or reuses a hostname-bound, short-lived
 `eci-keycloak-tls` Secret and copies only its public certificate into the
 connectivity probe ConfigMap. An opt-in dev API gateway mounts only that public
 certificate as an additional trust root; no private key crosses workloads.
-The temporary connectivity probe runs in `data-plane`, where store-to-store
-traffic is already permitted, and receives two dev-only, port-specific paths
-to OPA and Keycloak. `observability` receives no general datastore path;
-T7.3 must add only exporter/metrics ports together with its ServiceMonitors.
+The temporary connectivity probe runs in `data-plane` and receives explicit,
+port-specific ingress/egress pairs for each required datastore plus two
+cross-namespace paths to OPA and Keycloak. Namespace membership grants no
+store-to-store path: datastore peers, Strimzi/CNPG/OpenSearch operator clients
+and the dev probe each have separate selector-and-port allow-lists. The dev
+verifier also proves that a pod selected as a MinIO peer cannot reach
+PostgreSQL 5432. `observability` receives no general datastore path; T7.3 must
+add only exporter/metrics ports together with its ServiceMonitors.
 
 OpenSearch Operator 2.8.0 still defaults its metrics proxy to the removed
 `gcr.io/kubebuilder` location. The installer keeps version 0.15.0 byte lineage

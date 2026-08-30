@@ -52,30 +52,99 @@ spec:
       ports:
         - {protocol: TCP, port: 9443}
 ---
+{{- $dataPlanePeers := list
+  (dict "name" "postgres-peer" "selector" (dict "cnpg.io/cluster" "eci-postgres") "ports" (list 5432))
+  (dict "name" "kafka-peer" "selector" (dict "strimzi.io/cluster" "eci-kafka" "strimzi.io/component-type" "kafka") "ports" (list 9090 9091))
+  (dict "name" "opensearch-peer" "selector" (dict "opster.io/opensearch-cluster" "eci-opensearch") "ports" (list 9300))
+  (dict "name" "minio-peer" "selector" (dict "app.kubernetes.io/name" "minio" "app.kubernetes.io/component" "minio") "ports" (list 9000))
+  (dict "name" "neo4j-peer" "selector" (dict "app" "eci-neo4j") "ports" (list 5000 6000 7000 7688))
+}}
+{{- range $peer := $dataPlanePeers }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-data-plane-internal
+  name: allow-{{ $peer.name }}
   namespace: data-plane
   labels:
-    {{- include "eci.labels" . | nindent 4 }}
+    {{- include "eci.labels" $ | nindent 4 }}
 spec:
-  # Kafka Connect is excluded because its credential-bearing REST API is
-  # loopback-only. Qdrant is excluded because it has no application API key;
-  # its peer/bootstrap/client paths receive explicit policies below.
   podSelector:
-    matchExpressions:
-      - key: app.kubernetes.io/name
-        operator: NotIn
-        values: [kafka-connect, qdrant]
+    matchLabels:
+      {{- toYaml $peer.selector | nindent 6 }}
   policyTypes: [Ingress, Egress]
   ingress:
     - from:
-        - podSelector: {}
+        - podSelector:
+            matchLabels:
+              {{- toYaml $peer.selector | nindent 14 }}
+      ports:
+        {{- range $port := $peer.ports }}
+        - {protocol: TCP, port: {{ $port }}}
+        {{- end }}
   egress:
     - to:
-        - podSelector: {}
+        - podSelector:
+            matchLabels:
+              {{- toYaml $peer.selector | nindent 14 }}
+      ports:
+        {{- range $port := $peer.ports }}
+        - {protocol: TCP, port: {{ $port }}}
+        {{- end }}
 ---
+{{- end }}
+{{- $dataPlaneClients := list
+  (dict "name" "strimzi-operator-to-kafka" "source" (dict "name" "strimzi-cluster-operator") "destination" (dict "strimzi.io/cluster" "eci-kafka" "strimzi.io/component-type" "kafka") "ports" (list 8443 9091))
+  (dict "name" "strimzi-entity-to-kafka" "source" (dict "app.kubernetes.io/name" "entity-operator") "destination" (dict "strimzi.io/cluster" "eci-kafka" "strimzi.io/component-type" "kafka") "ports" (list 9091))
+  (dict "name" "cnpg-operator-to-postgres" "source" (dict "app.kubernetes.io/name" "cloudnative-pg") "destination" (dict "cnpg.io/cluster" "eci-postgres") "ports" (list 8000))
+  (dict "name" "opensearch-operator-to-cluster" "source" (dict "control-plane" "controller-manager") "destination" (dict "opster.io/opensearch-cluster" "eci-opensearch") "ports" (list 9200))
+  (dict "name" "opensearch-security-job-to-cluster" "source" (dict "batch.kubernetes.io/job-name" "eci-opensearch-securityconfig-update" "job-name" "eci-opensearch-securityconfig-update") "destination" (dict "opster.io/opensearch-cluster" "eci-opensearch") "ports" (list 9200))
+}}
+{{- range $flow := $dataPlaneClients }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-{{ $flow.name }}
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $flow.source | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $flow.destination | nindent 14 }}
+      ports:
+        {{- range $port := $flow.ports }}
+        - {protocol: TCP, port: {{ $port }}}
+        {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-{{ $flow.name }}-ingress
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $flow.destination | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $flow.source | nindent 14 }}
+      ports:
+        {{- range $port := $flow.ports }}
+        - {protocol: TCP, port: {{ $port }}}
+        {{- end }}
+---
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -235,6 +304,15 @@ spec:
         - {protocol: TCP, port: 6443}
 {{- end }}
 {{- if eq .Values.global.profile "dev" }}
+{{- $devDataPlaneTargets := list
+  (dict "name" "postgres" "selector" (dict "cnpg.io/cluster" "eci-postgres") "ports" (list 5432))
+  (dict "name" "kafka" "selector" (dict "strimzi.io/cluster" "eci-kafka" "strimzi.io/component-type" "kafka") "ports" (list 9093))
+  (dict "name" "neo4j" "selector" (dict "app" "eci-neo4j") "ports" (list 7687))
+  (dict "name" "qdrant" "selector" (dict "app.kubernetes.io/name" "qdrant") "ports" (list 6333 6334))
+  (dict "name" "opensearch" "selector" (dict "opster.io/opensearch-cluster" "eci-opensearch") "ports" (list 9200))
+  (dict "name" "redis" "selector" (dict "app.kubernetes.io/name" "redis") "ports" (list 6379))
+  (dict "name" "minio" "selector" (dict "app.kubernetes.io/name" "minio" "app.kubernetes.io/component" "minio") "ports" (list 9000))
+}}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -248,6 +326,16 @@ spec:
     matchLabels: {app.kubernetes.io/name: eci-connectivity}
   policyTypes: [Egress]
   egress:
+    {{- range $target := $devDataPlaneTargets }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $target.selector | nindent 14 }}
+      ports:
+        {{- range $port := $target.ports }}
+        - {protocol: TCP, port: {{ $port }}}
+        {{- end }}
+    {{- end }}
     - to:
         - namespaceSelector:
             matchLabels: {kubernetes.io/metadata.name: query-plane}
@@ -260,25 +348,29 @@ spec:
           podSelector:
             matchLabels: {app.kubernetes.io/name: keycloak}
       ports: [{protocol: TCP, port: 8443}]
+{{- range $target := $devDataPlaneTargets }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-dev-connectivity-to-qdrant
+  name: allow-dev-connectivity-to-{{ $target.name }}
   namespace: data-plane
   labels:
-    {{- include "eci.labels" . | nindent 4 }}
+    {{- include "eci.labels" $ | nindent 4 }}
 spec:
   podSelector:
-    matchLabels: {app.kubernetes.io/name: qdrant}
+    matchLabels:
+      {{- toYaml $target.selector | nindent 6 }}
   policyTypes: [Ingress]
   ingress:
     - from:
         - podSelector:
             matchLabels: {app.kubernetes.io/name: eci-connectivity}
       ports:
-        - {protocol: TCP, port: 6333}
-        - {protocol: TCP, port: 6334}
+        {{- range $port := $target.ports }}
+        - {protocol: TCP, port: {{ $port }}}
+        {{- end }}
+{{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

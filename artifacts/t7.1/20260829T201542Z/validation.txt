@@ -1,9 +1,9 @@
 helm_lint=PASS
-standard_infrastructure_policy=PASS (77 objects)
-standard_infrastructure_kubeconform=PASS (77 valid, 0 invalid, 0 errors, 0 skipped)
-dev_policy=PASS (79 objects)
-dev_kubeconform=PASS (79 valid, 0 invalid, 0 errors, 0 skipped)
-application_catalog_policy_kubeconform=PASS (193 valid, 0 invalid, 0 errors, 0 skipped; explicit .invalid fixture, not deploy evidence)
+standard_infrastructure_policy=PASS (91 objects)
+standard_infrastructure_kubeconform=PASS (91 valid, 0 invalid, 0 errors, 0 skipped)
+dev_policy=PASS (99 objects)
+dev_kubeconform=PASS (99 valid, 0 invalid, 0 errors, 0 skipped)
+application_catalog_policy_kubeconform=PASS (207 valid, 0 invalid, 0 errors, 0 skipped; explicit .invalid fixture, not deploy evidence)
 application_without_managed_data_plane_rejected=PASS (external backend identity/egress is not implemented)
 existing_dev_password_override_mismatch_rejected=PASS (unit policy plus live kind existing-cluster attempt; exit 1 before Secret mutation; no credential disclosed/rotated)
 existing_kind_cluster_reuse_gate=PASS (every node RepoDigest exact; kubeconfig derived from inspected kind cluster; API server v1.34.0 exact; mismatch fail-closed; live match)
@@ -38,6 +38,8 @@ neo4j_idempotent_generation_integration=PASS (simulated post-MERGE marker loss; 
 dev_connectivity_probe_image_digest=PASS (registry-resolved netshoot multi-arch digest)
 opensearch_data_node_image_digest=PASS (CR general.image and recreated live pod spec/imageID)
 qdrant_unauthenticated_ingress_isolation=PASS (peer/bootstrap/client allow-list; unrelated data-plane pod denied)
+data_plane_namespace_membership_isolation=PASS (broad internal policy absent; exact peer/operator/dev selectors and ports; live MinIO-selected peer denied to PostgreSQL 5432)
+opensearch_cr_health_gate=PASS (verifier requires OpenSearchCluster status.health=green after pod readiness)
 opensearch_https_ca_basic_auth_unit=PASS
 redis_requirepass_propagation_unit=PASS
 redis_standalone_stateful_single_backend_unit=PASS (AOF everysec; 20Gi standard/1Gi dev PVC)

@@ -46,6 +46,7 @@ echo 'Debezium PostgreSQL connector plugin through loopback-only REST: PASS'
 "$KUBECTL_BIN" -n data-plane wait --for=condition=Ready pod -l app.kubernetes.io/name=qdrant --timeout=10m
 "$KUBECTL_BIN" -n data-plane rollout status statefulset/neo4j --timeout=15m
 "$KUBECTL_BIN" -n data-plane wait --for=condition=Ready pod -l opster.io/opensearch-cluster=eci-opensearch --timeout=15m
+"$KUBECTL_BIN" -n data-plane wait --for=jsonpath='{.status.health}'=green opensearchcluster/eci-opensearch --timeout=15m
 postgres_primary="$("$KUBECTL_BIN" -n data-plane get pod -l cnpg.io/instanceRole=primary -o jsonpath='{.items[0].metadata.name}')"
 test -n "$postgres_primary"
 "$KUBECTL_BIN" -n data-plane exec "$postgres_primary" -- psql -U postgres -tAc 'SHOW wal_level' | grep -qx logical
@@ -119,6 +120,51 @@ spec:
 EOF
 "$KUBECTL_BIN" -n data-plane wait --for=jsonpath='{.status.phase}'=Succeeded pod/eci-connectivity --timeout=3m
 "$KUBECTL_BIN" -n data-plane logs eci-connectivity
+
+# Prove that namespace membership and a real datastore peer label do not grant
+# a path to a different datastore. Use the Service IP so the expected network
+# denial cannot be mistaken for a DNS failure.
+postgres_service_ip="$($KUBECTL_BIN -n data-plane get service eci-postgres-rw -o jsonpath='{.spec.clusterIP}')"
+test -n "$postgres_service_ip" && test "$postgres_service_ip" != None
+"$KUBECTL_BIN" -n data-plane delete pod eci-data-plane-isolation --ignore-not-found --wait=true >/dev/null
+"$KUBECTL_BIN" apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: eci-data-plane-isolation
+  namespace: data-plane
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: minio
+    app.kubernetes.io/part-of: eci
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: isolation-probe
+      image: nicolaka/netshoot@sha256:7f08c4aff13ff61a35d30e30c5c1ea8396eac6ab4ce19fd02d5a4b3b5d0d09a2
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+      command: [sh, -ec]
+      args:
+        - |
+          if nc -z -w 3 "$postgres_service_ip" 5432; then
+            echo 'cross-component data-plane connection unexpectedly succeeded' >&2
+            exit 1
+          fi
+          echo 'data-plane namespace-membership isolation: PASS'
+      resources:
+        requests: {cpu: 10m, memory: 16Mi}
+        limits: {cpu: 100m, memory: 128Mi}
+EOF
+"$KUBECTL_BIN" -n data-plane wait --for=jsonpath='{.status.phase}'=Succeeded pod/eci-data-plane-isolation --timeout=2m
+"$KUBECTL_BIN" -n data-plane logs eci-data-plane-isolation
 
 # Exercise both sides of the ACL boundary with the exact client identity used
 # by embedding-worker. The allowed topic must be describable; a topic owned by

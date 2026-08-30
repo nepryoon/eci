@@ -22,6 +22,7 @@ eci-opensearch.data-plane.svc:9200=PASS
 redis.data-plane.svc:6379=PASS
 redis-aof-pvc-restart-persistence=PASS (bounded probe key removed after verification)
 minio.data-plane.svc:9000=PASS
+minio-selected-peer-to-postgres-5432=DENIED (PASS; namespace membership grants no cross-component path)
 opa.query-plane.svc:8181=PASS
 opa-valid-scope-allow=PASS
 opa-missing-tenant-deny=PASS

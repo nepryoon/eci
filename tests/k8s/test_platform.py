@@ -437,21 +437,65 @@ class PlatformChartTests(unittest.TestCase):
                 [{"protocol": "TCP", "port": 443}, {"protocol": "TCP", "port": 6443}],
             )
 
-        data_internal = self.by_key[("NetworkPolicy", "data-plane", "allow-data-plane-internal")]
-        self.assertEqual(
-            data_internal["spec"]["podSelector"]["matchExpressions"],
-            [{"key": "app.kubernetes.io/name", "operator": "NotIn", "values": ["kafka-connect", "qdrant"]}],
-        )
-        self.assertEqual(data_internal["spec"]["ingress"][0]["from"], [{"podSelector": {}}])
-        self.assertEqual(data_internal["spec"]["egress"][0]["to"], [{"podSelector": {}}])
+        self.assertNotIn(("data-plane", "allow-data-plane-internal"), policies)
+        for obj in self.standard:
+            if obj.get("kind") != "NetworkPolicy" or obj["metadata"]["namespace"] != "data-plane":
+                continue
+            for rule in obj["spec"].get("ingress", []):
+                self.assertNotIn(
+                    {"podSelector": {}},
+                    rule.get("from", []),
+                    f"{obj['metadata']['name']} grants namespace-membership ingress",
+                )
+            for rule in obj["spec"].get("egress", []):
+                self.assertNotIn(
+                    {"podSelector": {}},
+                    rule.get("to", []),
+                    f"{obj['metadata']['name']} grants namespace-membership egress",
+                )
         self.assertNotIn(("observability", "allow-observability-probes"), policies)
         self.assertNotIn(("Service", "data-plane", "kafka-connect"), self.by_key)
         for name in {
             "allow-kafka-connect-to-kafka", "allow-kafka-connect-to-kafka-ingress",
             "allow-kafka-connect-to-postgres", "allow-kafka-connect-to-postgres-ingress",
             "allow-qdrant-peer", "allow-qdrant-bootstrap", "allow-qdrant-bootstrap-ingress",
+            "allow-postgres-peer", "allow-kafka-peer", "allow-opensearch-peer",
+            "allow-minio-peer", "allow-neo4j-peer",
+            "allow-strimzi-operator-to-kafka", "allow-strimzi-operator-to-kafka-ingress",
+            "allow-strimzi-entity-to-kafka", "allow-strimzi-entity-to-kafka-ingress",
+            "allow-cnpg-operator-to-postgres", "allow-cnpg-operator-to-postgres-ingress",
+            "allow-opensearch-operator-to-cluster", "allow-opensearch-operator-to-cluster-ingress",
+            "allow-opensearch-security-job-to-cluster",
+            "allow-opensearch-security-job-to-cluster-ingress",
         }:
             self.assertIn(("data-plane", name), policies)
+        expected_peer_ports = {
+            "allow-postgres-peer": [5432],
+            "allow-kafka-peer": [9090, 9091],
+            "allow-opensearch-peer": [9300],
+            "allow-minio-peer": [9000],
+            "allow-neo4j-peer": [5000, 6000, 7000, 7688],
+        }
+        for name, ports in expected_peer_ports.items():
+            policy = self.by_key[("NetworkPolicy", "data-plane", name)]
+            self.assertEqual(
+                policy["spec"]["ingress"][0]["ports"],
+                [{"protocol": "TCP", "port": port} for port in ports],
+            )
+            self.assertEqual(policy["spec"]["egress"][0]["ports"], policy["spec"]["ingress"][0]["ports"])
+        expected_operator_ports = {
+            "allow-strimzi-operator-to-kafka": [8443, 9091],
+            "allow-strimzi-entity-to-kafka": [9091],
+            "allow-cnpg-operator-to-postgres": [8000],
+            "allow-opensearch-operator-to-cluster": [9200],
+            "allow-opensearch-security-job-to-cluster": [9200],
+        }
+        for name, ports in expected_operator_ports.items():
+            egress = self.by_key[("NetworkPolicy", "data-plane", name)]
+            ingress = self.by_key[("NetworkPolicy", "data-plane", f"{name}-ingress")]
+            expected = [{"protocol": "TCP", "port": port} for port in ports]
+            self.assertEqual(egress["spec"]["egress"][0]["ports"], expected)
+            self.assertEqual(ingress["spec"]["ingress"][0]["ports"], expected)
         qdrant_peer = self.by_key[("NetworkPolicy", "data-plane", "allow-qdrant-peer")]
         self.assertEqual(
             qdrant_peer["spec"]["podSelector"]["matchLabels"],
@@ -472,6 +516,8 @@ class PlatformChartTests(unittest.TestCase):
         self.assertIn(("data-plane", "allow-dev-connectivity-egress"), dev_policies)
         self.assertIn(("query-plane", "allow-dev-connectivity-to-opa"), dev_policies)
         self.assertIn(("ingress", "allow-dev-connectivity-to-keycloak"), dev_policies)
+        for destination in {"postgres", "kafka", "neo4j", "qdrant", "opensearch", "redis", "minio"}:
+            self.assertIn(("data-plane", f"allow-dev-connectivity-to-{destination}"), dev_policies)
 
         webhook = self.by_key[("NetworkPolicy", "data-plane", "allow-kube-api-cloudnative-pg-webhook")]
         self.assertEqual(
@@ -699,6 +745,11 @@ class PlatformChartTests(unittest.TestCase):
         self.assertIn("qdrant.data-plane.svc:6334", verify)
         self.assertIn("namespace: data-plane", verify)
         self.assertNotIn("namespace: observability", verify)
+        self.assertIn("name: eci-data-plane-isolation", verify)
+        self.assertIn("app.kubernetes.io/name: minio", verify)
+        self.assertIn("data-plane namespace-membership isolation: PASS", verify)
+        self.assertIn("get service eci-postgres-rw", verify)
+        self.assertIn("--for=jsonpath='{.status.health}'=green opensearchcluster/eci-opensearch", verify)
         self.assertIn("SHOW wal_level", verify)
         self.assertIn("io.debezium.connector.postgresql.PostgresConnector", verify)
         self.assertIn("OPA allow and fail-closed decisions: PASS", verify)

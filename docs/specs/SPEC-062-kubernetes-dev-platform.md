@@ -370,6 +370,9 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       coincidenti non producono duplicati Kubernetes; Keycloak dev espone
       discovery OIDC HTTPS 8443 con certificato hostname-bound non versionato.
 - [x] Secret applicativi e NetworkPolicy sono per-workload/per-destinazione;
+      nessuna regola data-plane concede accesso per sola appartenenza al
+      namespace, i peer/operator/probe dev sono selector+porta esatti e uno
+      smoke negativo MinIO-selector -> PostgreSQL 5432 prova il deny live;
       ogni archivio Helm terzo è verificato SHA-256 prima dell'installazione.
 - [x] Qdrant runtime e chart-test images sono post-renderizzate/verificate per
       digest; il tag semver richiesto dal chart non arriva mai al kubelet.

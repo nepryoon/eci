@@ -75,6 +75,10 @@ Results:
   spec/imageID matches that digest: PASS;
 - Qdrant peer/bootstrap/client ingress is component- and port-scoped; a pinned
   unrelated data-plane probe could not reach its unauthenticated API: PASS;
+- the namespace-membership data-plane allow rule is absent; peer, operator and
+  dev-probe flows use exact selectors and ports, and a live pod selected as a
+  MinIO peer was denied PostgreSQL 5432 while the full positive connectivity
+  smoke remained green: PASS;
 - registry-resolved SHA-256 pins for every rendered third-party container:
   PASS; no non-existent ECI image is a default;
 - CloudNativePG webhook ingress on the operator-only selector/TCP 9443: PASS;
@@ -115,7 +119,7 @@ The later supply-chain/routing review fixes were verified at revision 6. The
 final least-privilege/supply-chain review fixes were then applied at ECI
 revision 8 after all five operator chart archives passed their checked-in
 SHA-256 gates and upgraded the real cluster releases to revision 6. The
-catalog of 193 application objects was exercised only with an explicit
+catalog of 207 application objects was exercised only with an explicit
 `registry.example.invalid` unit fixture; this proves template completeness and
 digest enforcement, not image publication or application readiness. Released
 applications remain opt-in and require real registry digests plus external
@@ -146,7 +150,7 @@ claimed as live runtime evidence.
 ADR-0019 then removed the remaining Kafka confused-deputy paths. Consumer
 retries use five explicit per-consumer topics and consumers have no primary
 Write ACL. ECI release revision 14 binds Kafka Connect REST to loopback, exposes no Service
-and is excluded from the namespace-wide data policy; real allowed/denied
+and receives only dedicated Kafka/PostgreSQL flows; real allowed/denied
 broker publishes and loopback/pod-IP REST probes passed. Vendor release
 revision 12 remained Ready after the final upgrade. ADR-0020 then separated
 the CDC database identity from the owner: ECI revision 15 reconciled the
@@ -214,3 +218,13 @@ mutation because the CloudNativePG bootstrap Secret cannot rotate the existing
 role. The deterministic unit regression and a real mismatched-override attempt
 against the existing kind cluster both exited non-zero before Secret mutation;
 neither rotated nor disclosed the live cluster credential.
+The closing NetworkPolicy review removed the remaining namespace-membership
+data-plane path. ECI revision 27 and vendor revision 17 passed the complete
+readiness/connectivity, OPA and Kafka ACL verifier with exact peer/operator/dev
+probe selectors and ports. The live negative smoke used a MinIO peer selector
+and was denied access to PostgreSQL 5432. Docker Desktop had first been
+restarted after an OOM; the documented non-HA OpenSearch dev quorum boundary
+required recreation of only the disposable OpenSearch CR/PVC, a controlled
+single-node bootstrap and complete Security config reconciliation. The final
+CR reported `green` before the clean verification. PostgreSQL, Kafka, MinIO and
+repository artifacts were preserved.
