@@ -4,7 +4,8 @@
 //! available.
 
 use ingestion::worker::{
-    command_message_key, parse_authenticated_command, source_object_key, CommandErrorKind,
+    command_message_key, command_message_key_matches, parse_authenticated_command,
+    source_object_key, CommandErrorKind,
 };
 use ingestion::{parse_file_full, persist_ingestion_command, CommandOutcome};
 use postgres::{Client, NoTls};
@@ -165,6 +166,17 @@ fn object_key_and_partition_key_are_deterministic_and_non_disclosing() {
     assert_eq!(key.len(), 64);
     assert!(key.bytes().all(|b| b.is_ascii_hexdigit()));
     assert_eq!(key, command_message_key(&scope, &command));
+    assert!(command_message_key_matches(
+        &scope,
+        &command,
+        Some(key.as_bytes())
+    ));
+    assert!(!command_message_key_matches(&scope, &command, None));
+    assert!(!command_message_key_matches(
+        &scope,
+        &command,
+        Some(b"forged-partition-key")
+    ));
 }
 
 #[test]

@@ -212,6 +212,14 @@ pub fn command_message_key(
     digest_components(&[scope.tenant_id(), scope.repository(), command.path()])
 }
 
+pub fn command_message_key_matches(
+    scope: &AuthenticatedCommitScope,
+    command: &IngestionFileCommand,
+    actual: Option<&[u8]>,
+) -> bool {
+    actual.is_some_and(|value| value == command_message_key(scope, command).as_bytes())
+}
+
 pub fn command_fingerprint(
     scope: &AuthenticatedCommitScope,
     command: &IngestionFileCommand,

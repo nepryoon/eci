@@ -33,7 +33,7 @@ use tokio::sync::watch;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::worker::{parse_authenticated_command, source_object_key};
+use crate::worker::{command_message_key_matches, parse_authenticated_command, source_object_key};
 use crate::{parse_file_full, persist_ingestion_command};
 
 const INPUT_TOPIC: &str = "eci.ingestion.file.v1";
@@ -73,6 +73,9 @@ impl Config {
         let endpoint: BaseUrl = required("MINIO_ENDPOINT")?
             .parse()
             .map_err(|_| RuntimeError::Config("invalid MinIO endpoint"))?;
+        let postgres_dsn = required("POSTGRES_DSN")?;
+        postgres_config_with_deadlines(&postgres_dsn)
+            .map_err(|_| RuntimeError::Config("invalid PostgreSQL configuration"))?;
         let access_key = required("MINIO_ACCESS_KEY")?;
         let secret_key = required("MINIO_SECRET_KEY")?;
         let credentials = StaticProvider::new(&access_key, &secret_key, None);
@@ -80,7 +83,7 @@ impl Config {
             .map_err(|_| RuntimeError::Config("invalid MinIO client configuration"))?;
         Ok((
             Self {
-                postgres_dsn: required("POSTGRES_DSN")?,
+                postgres_dsn,
                 kafka_brokers: required("KAFKA_BROKERS")?,
                 kafka_ca: required("KAFKA_TLS_CA_FILE")?,
                 kafka_cert: required("KAFKA_TLS_CERT_FILE")?,
@@ -384,6 +387,26 @@ fn kafka_client_config(config: &Config) -> ClientConfig {
     client
 }
 
+fn postgres_config_with_deadlines(dsn: &str) -> Result<postgres::Config, postgres::Error> {
+    let mut config: postgres::Config = dsn.parse()?;
+    config
+        .connect_timeout(Duration::from_secs(5))
+        .tcp_user_timeout(Duration::from_secs(10))
+        .keepalives(true)
+        .keepalives_idle(Duration::from_secs(5))
+        .keepalives_interval(Duration::from_secs(2))
+        .keepalives_retries(3)
+        .options(
+            "-c statement_timeout=10000 -c lock_timeout=5000 \
+             -c idle_in_transaction_session_timeout=10000",
+        );
+    Ok(config)
+}
+
+fn connect_postgres_with_deadlines(dsn: &str) -> Result<postgres::Client, postgres::Error> {
+    postgres_config_with_deadlines(dsn)?.connect(postgres::NoTls)
+}
+
 enum ProcessAction {
     Commit {
         outcome: &'static str,
@@ -433,6 +456,11 @@ async fn process_message(
                 return ProcessAction::Dlq { reason };
             }
         };
+    if !command_message_key_matches(&scope, &command, message.key()) {
+        return ProcessAction::Dlq {
+            reason: "invalid_message_key",
+        };
+    }
     let source_span = tracing::info_span!("ingestion.source.fetch", storage.system = "s3");
     let source = match fetch_source(config, minio, &scope, &command)
         .instrument(source_span)
@@ -471,7 +499,7 @@ async fn process_message(
     };
     let dsn = config.postgres_dsn.clone();
     let persisted = tokio::task::block_in_place(|| {
-        let mut client = postgres::Client::connect(&dsn, postgres::NoTls)?;
+        let mut client = connect_postgres_with_deadlines(&dsn)?;
         persist_ingestion_command(&mut client, &scope, &command, nodes, relations, &chunks)
     });
     match persisted {
@@ -543,22 +571,25 @@ async fn fetch_source(
         .get_object(&config.minio_bucket, key.as_str())
         .map_err(|_| SourceError::Permanent("invalid_object_key"))?
         .build();
-    let response = match tokio::time::timeout(Duration::from_secs(10), request.send()).await {
-        Err(_) => return Err(SourceError::Transient),
-        Ok(Err(error)) if object_not_found(&error) => {
-            return Err(SourceError::Permanent("source_not_found"))
+    let bytes = tokio::time::timeout(Duration::from_secs(10), async {
+        let response = match request.send().await {
+            Err(error) if object_not_found(&error) => {
+                return Err(SourceError::Permanent("source_not_found"))
+            }
+            Err(_) => return Err(SourceError::Transient),
+            Ok(response) => response,
+        };
+        let object_size = response.object_size().map_err(|_| SourceError::Transient)?;
+        if object_size != command.source_size_bytes() || object_size > config.max_source_bytes {
+            return Err(SourceError::Permanent("source_size_mismatch"));
         }
-        Ok(Err(_)) => return Err(SourceError::Transient),
-        Ok(Ok(response)) => response,
-    };
-    let object_size = response.object_size().map_err(|_| SourceError::Transient)?;
-    if object_size != command.source_size_bytes() || object_size > config.max_source_bytes {
-        return Err(SourceError::Permanent("source_size_mismatch"));
-    }
-    let bytes = response
-        .into_bytes()
-        .await
-        .map_err(|_| SourceError::Transient)?;
+        response
+            .into_bytes()
+            .await
+            .map_err(|_| SourceError::Transient)
+    })
+    .await
+    .map_err(|_| SourceError::Transient)??;
     if bytes.len() as u64 != command.source_size_bytes() {
         return Err(SourceError::Permanent("source_size_mismatch"));
     }
@@ -623,7 +654,7 @@ async fn probe_dependencies(
         health.set_dependency("kafka", kafka_ready);
         let dsn = config.postgres_dsn.clone();
         let postgres_ready = tokio::task::block_in_place(|| {
-            postgres::Client::connect(&dsn, postgres::NoTls)
+            connect_postgres_with_deadlines(&dsn)
                 .and_then(|mut client| client.simple_query("SELECT 1"))
                 .is_ok()
         });
@@ -767,6 +798,28 @@ mod tests {
             Some("/tls/user.crt")
         );
         assert_eq!(client.get("ssl.key.location"), Some("/tls/user.key"));
+    }
+
+    #[test]
+    fn postgres_client_deadlines_override_dsn_omissions() {
+        let config =
+            postgres_config_with_deadlines("postgresql://eci:secret@postgres.data-plane.svc/eci")
+                .unwrap();
+        assert_eq!(config.get_connect_timeout(), Some(&Duration::from_secs(5)));
+        assert_eq!(
+            config.get_tcp_user_timeout(),
+            Some(&Duration::from_secs(10))
+        );
+        assert_eq!(config.get_keepalives_idle(), Duration::from_secs(5));
+        assert_eq!(
+            config.get_keepalives_interval(),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(config.get_keepalives_retries(), Some(3));
+        let options = config.get_options().unwrap();
+        assert!(options.contains("statement_timeout=10000"));
+        assert!(options.contains("lock_timeout=5000"));
+        assert!(options.contains("idle_in_transaction_session_timeout=10000"));
     }
 
     #[test]

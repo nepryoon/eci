@@ -119,13 +119,15 @@ pub fn persist_ingestion_command(
 | Condizione | Comportamento atteso |
 |---|---|
 | header scope mancante, duplicato, non UTF-8, blank/control/>256 byte | permanent deny prima di MinIO/parser/DB; DLQ sanitizzata |
+| message key assente o diversa dalla key derivata | permanent `invalid_message_key`; impedisce di eludere l'ordinamento per path |
 | scope presente anche nel body/additional property | schema reject; il body non diventa autorita' |
 | payload >64 KiB o JSON/schema/versione invalida | permanent deny/DLQ; nessun echo del payload |
 | path assoluto, `.`/`..`, backslash, control o >1024 byte | permanent deny prima di costruire la key |
 | commit/digest/UUID/size invalido o size oltre config | permanent deny |
 | object key configurabile dal messaggio o endpoint non trusted | impossibile per tipo/schema; key derivata e endpoint solo env |
 | GET object 404/digest/size/UTF-8 mismatch | permanent failure/DLQ; nessun write |
-| MinIO timeout/5xx, Kafka transport, PostgreSQL unavailable | transient; no commit, readiness 503, retry bounded |
+| MinIO header/body timeout o 5xx, Kafka transport, PostgreSQL unavailable | transient; no commit, readiness 503, retry bounded |
+| PostgreSQL auth/connect/query/lock/commit stall | connect 5s, statement/TCP 10s e lock 5s; transient senza offset commit |
 | parse panic per input ostile | catturato al command boundary, permanent `parse_failed`; il processo resta vivo |
 | receipt esistente con fingerprint uguale | `Duplicate`, zero nuove righe outbox |
 | receipt esistente con fingerprint diverso | `command_id_conflict`, zero write canonici |
