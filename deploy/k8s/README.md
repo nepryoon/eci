@@ -57,6 +57,10 @@ consumer namespace without ever copying a CA private key.
 OpenSearch clients mount only the generated public HTTP CA and require Basic
 Auth. Semantic Cache maps `redis-password` explicitly to `REDIS_PASSWORD`.
 Missing keys or CA files remain a fail-closed rollout failure.
+The standalone Redis Service has exactly one backend; the chart does not claim
+replication by load-balancing independent caches. The bundled dev Keycloak
+Service exposes HTTPS 8443 with an ephemeral hostname-bound certificate created
+outside Helm; application pods receive only its public certificate.
 Application enablement also requires one or more explicit
 `routing.oidcIssuerEgressCIDRs`; they must resolve only the trusted HTTPS issuer
 or controlled egress proxy. The chart rejects an empty list instead of opening

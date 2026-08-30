@@ -169,6 +169,9 @@ literal `KafkaUser` ACLs deny sibling topics/groups. HTTPS OpenSearch requires C
 username and password. Redis is deployed with `requirepass`, so Semantic Cache
 also requires the explicit `redis-password` mapping. Each client fails before
 serving/consuming if its trust or credential input is absent.
+Redis deliberately has one standalone replica: a ClusterIP never balances one
+logical cache across independent stores. Cache loss remains a reconstructible
+degradation; a replicated Redis topology is not claimed by T7.1.
 
 The default-deny boundary is complemented by per-workload NetworkPolicy pairs:
 the egress side selects the calling pod and the ingress side selects the exact
@@ -176,7 +179,11 @@ store/service pod, with only its protocol port. A compromised LLM gateway, for
 example, has no path to PostgreSQL, Neo4j, Qdrant, OpenSearch or Redis even if
 it learns a Service DNS name. External production IdP egress must be added as a
 cluster-specific identity/CIDR policy; the portable chart permits only the dev
-Keycloak pod and otherwise fails closed.
+Keycloak pod and otherwise fails closed. The bundled dev issuer is reachable
+only on HTTPS 8443. `dev-up.sh` creates or reuses a hostname-bound, short-lived
+`eci-keycloak-tls` Secret and copies only its public certificate into the
+connectivity probe ConfigMap. An opt-in dev API gateway mounts only that public
+certificate as an additional trust root; no private key crosses workloads.
 The temporary connectivity probe runs in `data-plane`, where store-to-store
 traffic is already permitted, and receives two dev-only, port-specific paths
 to OPA and Keycloak. `observability` receives no general datastore path;

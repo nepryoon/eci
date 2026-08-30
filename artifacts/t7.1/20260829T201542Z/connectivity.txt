@@ -23,5 +23,5 @@ minio.data-plane.svc:9000=PASS
 opa.query-plane.svc:8181=PASS
 opa-valid-scope-allow=PASS
 opa-missing-tenant-deny=PASS
-keycloak.ingress.svc:8080=PASS
+keycloak.ingress.svc:8443=PASS (TLS trust and OIDC discovery issuer verified)
 overall=PASS

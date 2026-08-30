@@ -130,6 +130,11 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    sink-search richiedono CA HTTP e credenziali OpenSearch, mentre Semantic
    Cache riceve esplicitamente la password del Redis `requirepass`. Nessuna CA
    privata viene copiata fra namespace.
+   Redis resta intenzionalmente a replica singola finché non esiste un
+   topology replicato approvato: il Service non bilancia mai cache standalone
+   indipendenti. Una perdita cache è degradazione ricostruibile, non perdita di
+   una vista autorevole. Quando porta applicativa e porta metriche coincidono,
+   il Service/Pod dichiara una sola porta nominata, evitando chiavi duplicate.
    Ogni applicazione riceve solo un Secret per-workload con chiavi enumerate;
    nessun pod applicativo importa il Secret bootstrap condiviso. Le allow-list
    di rete selezionano chiamante, destinazione e porta, quindi essere nello
@@ -142,6 +147,10 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    restano esplicitamente disabilitati, non sono sostituiti da fake o sleep.
    L'overlay resta marcato non-HA/non-production e non è prova di grant Neo4j
    Enterprise, GPU, performance o disaster recovery.
+   Il Keycloak dev espone l'issuer solo via HTTPS 8443 attraverso il Service e
+   le NetworkPolicy. `dev-up.sh` genera localmente una identità hostname-bound
+   non versionata; il gateway monta soltanto il certificato pubblico come CA
+   aggiuntiva e lo smoke verifica discovery TLS e issuer esatto.
    Il binario ingestion corrente è one-shot: il chart lo rappresenta come
    template CronJob sospeso, con PVC sorgente read-only e scope Secret
    enumerato, non come Deployment/listener inesistente. ADR-0016 e T7.1a
@@ -313,6 +322,9 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       per topic/group; Connect è il solo writer primario, retry per-consumer e
       REST Connect loopback-only sono verificati; OpenSearch usa HTTPS+CA+Basic Auth;
       Redis `requirepass` è propagato esplicitamente, con unit test fail-closed.
+- [x] Redis standalone usa un solo backend coerente; porte service/metriche
+      coincidenti non producono duplicati Kubernetes; Keycloak dev espone
+      discovery OIDC HTTPS 8443 con certificato hostname-bound non versionato.
 - [x] Secret applicativi e NetworkPolicy sono per-workload/per-destinazione;
       ogni archivio Helm terzo è verificato SHA-256 prima dell'installazione.
 - [x] Qdrant runtime e chart-test images sono post-renderizzate/verificate per
@@ -365,7 +377,8 @@ senza immagine pubblicata è stato avviato nel profilo dev.
 Deviazioni dichiarate, non presentate come equivalenza production: replica
 singola, Neo4j Community, storage ridotto, workload ECI/GPU disabilitati e
 Keycloak `start-dev` con root filesystem scrivibile per la Quarkus augmentation
-(UID non-root, seccomp e capability drop restano applicati). Il profilo
+(UID non-root, seccomp e capability drop restano applicati); il solo endpoint
+Service/NetworkPolicy è HTTPS 8443 con certificato dev generato localmente. Il profilo
 Enterprise richiede un'accettazione licenza esterna esplicita; non è stata
 simulata né incorporata. La verifica di CI e la review PR restano necessarie
 prima del passaggio a `verified`.

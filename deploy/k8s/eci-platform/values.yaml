@@ -22,6 +22,11 @@ global:
 namespaces:
   create: true
 
+# The bundled IdP exists only in the reduced dev profile. dev-up provisions a
+# short-lived certificate Secret; no private key is rendered or committed.
+devIdentity:
+  tlsSecret: eci-keycloak-tls
+
 applications:
   enabled: false
   workloads:

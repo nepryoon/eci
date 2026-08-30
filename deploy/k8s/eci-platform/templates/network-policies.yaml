@@ -257,7 +257,7 @@ spec:
             matchLabels: {kubernetes.io/metadata.name: ingress}
           podSelector:
             matchLabels: {app.kubernetes.io/name: keycloak}
-      ports: [{protocol: TCP, port: 8080}]
+      ports: [{protocol: TCP, port: 8443}]
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -314,7 +314,7 @@ spec:
             matchLabels: {kubernetes.io/metadata.name: data-plane}
           podSelector:
             matchLabels: {app.kubernetes.io/name: eci-connectivity}
-      ports: [{protocol: TCP, port: 8080}]
+      ports: [{protocol: TCP, port: 8443}]
 {{- end }}
 {{- if .Values.applications.enabled }}
 {{- if not .Values.routing.oidcIssuerEgressCIDRs }}
@@ -340,7 +340,7 @@ spec:
 {{- $flows := list
   (dict "name" "envoy-to-api-gateway" "sourceNamespace" "ingress" "source" "envoy" "destinationNamespace" "ingress" "destinationSelector" (dict "app.kubernetes.io/name" "api-gateway") "port" 8081)
   (dict "name" "envoy-to-retrieval" "sourceNamespace" "ingress" "source" "envoy" "destinationNamespace" "query-plane" "destinationSelector" (dict "app.kubernetes.io/name" "retrieval-engine") "port" 50053)
-  (dict "name" "api-gateway-to-keycloak" "sourceNamespace" "ingress" "source" "api-gateway" "destinationNamespace" "ingress" "destinationSelector" (dict "app.kubernetes.io/name" "keycloak") "port" 8080)
+  (dict "name" "api-gateway-to-keycloak" "sourceNamespace" "ingress" "source" "api-gateway" "destinationNamespace" "ingress" "destinationSelector" (dict "app.kubernetes.io/name" "keycloak") "port" 8443)
   (dict "name" "api-gateway-to-retrieval" "sourceNamespace" "ingress" "source" "api-gateway" "destinationNamespace" "query-plane" "destinationSelector" (dict "app.kubernetes.io/name" "retrieval-engine") "port" 50053)
   (dict "name" "llm-gateway-to-vllm" "sourceNamespace" "query-plane" "source" "llm-gateway" "destinationNamespace" "gpu-plane" "destinationSelector" (dict "app.kubernetes.io/name" "vllm") "port" 8000)
   (dict "name" "retrieval-engine-to-embedder" "sourceNamespace" "query-plane" "source" "retrieval-engine" "destinationNamespace" "gpu-plane" "destinationSelector" (dict "app.kubernetes.io/name" "embedder") "port" 80)

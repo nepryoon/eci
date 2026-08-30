@@ -17,6 +17,8 @@ Results:
 - all pinned operator/chart releases deployed: PASS;
 - PostgreSQL, Kafka, Neo4j 5.26.30, Qdrant, OpenSearch, Redis, MinIO, OPA and
   Keycloak readiness: PASS;
+- Keycloak dev HTTPS 8443, hostname-bound certificate and OIDC discovery issuer:
+  PASS; no private key is included in evidence;
 - Kafka Connect/Debezium 3.6.0.Final readiness, distinct Strimzi mTLS identities and
   PostgreSQL connector plugin discovery: PASS;
 - PostgreSQL 17.6 `wal_level=logical`: PASS;
@@ -139,3 +141,9 @@ containers. The real kind cluster upgraded all verified chart archives to
 revision 13 and ECI to revision 18; Strimzi observed Kafka generation 4 with
 all four runtime container specs on their expected digests, then the complete
 readiness, connectivity, OPA and Kafka allowed/denied smoke passed.
+The final runtime-routing review pass deduplicated equal service/metrics ports,
+kept standalone Redis behind exactly one Service backend, and moved the bundled
+dev issuer path to HTTPS 8443. ECI revision 20 passed hostname verification,
+trusted OIDC discovery, readiness, connectivity, OPA and Kafka ACL smoke; all
+vendor releases remained Ready at revision 14. The generated certificate and
+private key are intentionally absent from this sanitized evidence directory.

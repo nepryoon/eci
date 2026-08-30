@@ -81,7 +81,7 @@ spec:
             {{- include "eci.containerSecurityContext" $ | nindent 12 }}
           ports:
             - {name: service, containerPort: {{ $workload.port }}}
-            {{- if $workload.metricsPort }}
+            {{- if and $workload.metricsPort (ne (int $workload.metricsPort) (int $workload.port)) }}
             - {name: metrics, containerPort: {{ $workload.metricsPort }}}
             {{- end }}
           envFrom:
@@ -95,6 +95,11 @@ spec:
                 secretKeyRef:
                   name: {{ required (printf "applications.workloads[%s].runtimeSecret is required when secretEnv is set" $workload.name) $workload.runtimeSecret }}
                   key: {{ $secret.key }}
+            {{- end }}
+            {{- if and (eq $.Values.global.profile "dev") (eq $workload.name "api-gateway") }}
+            # Preserve the image's public trust roots while adding the public
+            # certificate of the bundled development issuer.
+            - {name: SSL_CERT_DIR, value: "/etc/eci/oidc:/etc/ssl/certs"}
             {{- end }}
           {{- end }}
           readinessProbe:
@@ -122,6 +127,9 @@ spec:
             {{- if or (eq $workload.name "retrieval-engine") (eq $workload.name "sink-search") }}
             - {name: opensearch-ca, mountPath: /etc/eci/opensearch, readOnly: true}
             {{- end }}
+            {{- if and (eq $.Values.global.profile "dev") (eq $workload.name "api-gateway") }}
+            - {name: oidc-ca, mountPath: /etc/eci/oidc, readOnly: true}
+            {{- end }}
             {{- with $workload.modelPVC }}
             - {name: models, mountPath: /models, readOnly: true}
             {{- end }}
@@ -143,6 +151,12 @@ spec:
             secretName: {{ $.Values.routing.openSearchTLSSecret }}
             items: [{key: ca.crt, path: ca.crt}]
         {{- end }}
+        {{- if and (eq $.Values.global.profile "dev") (eq $workload.name "api-gateway") }}
+        - name: oidc-ca
+          secret:
+            secretName: {{ required "devIdentity.tlsSecret is required for the dev API gateway" $.Values.devIdentity.tlsSecret }}
+            items: [{key: tls.crt, path: keycloak.crt}]
+        {{- end }}
         {{- with $workload.modelPVC }}
         - name: models
           persistentVolumeClaim:
@@ -163,7 +177,7 @@ spec:
     {{- include "eci.selectorLabels" (dict "name" $workload.name) | nindent 4 }}
   ports:
     - {name: service, port: {{ $workload.port }}, targetPort: service}
-    {{- if $workload.metricsPort }}
+    {{- if and $workload.metricsPort (ne (int $workload.metricsPort) (int $workload.port)) }}
     - {name: metrics, port: {{ $workload.metricsPort }}, targetPort: metrics}
     {{- end }}
 ---

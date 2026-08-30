@@ -2,7 +2,9 @@
 set -euo pipefail
 
 KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
-command -v "$KUBECTL_BIN" >/dev/null || { echo "required executable not found: $KUBECTL_BIN" >&2; exit 1; }
+for executable in "$KUBECTL_BIN" openssl base64; do
+  command -v "$executable" >/dev/null || { echo "required executable not found: $executable" >&2; exit 1; }
+done
 [[ "$($KUBECTL_BIN config current-context)" == kind-eci-dev ]] || { echo "refusing verification outside kind-eci-dev" >&2; exit 1; }
 
 diagnostics() {
@@ -31,6 +33,8 @@ echo 'Debezium PostgreSQL connector plugin through loopback-only REST: PASS'
 "$KUBECTL_BIN" -n data-plane rollout status statefulset/minio --timeout=10m
 "$KUBECTL_BIN" -n query-plane wait --for=condition=Available deployment/opa --timeout=10m
 "$KUBECTL_BIN" -n ingress wait --for=condition=Available deployment/keycloak --timeout=10m
+"$KUBECTL_BIN" -n ingress get secret eci-keycloak-tls -o 'jsonpath={.data.tls\.crt}' | \
+  base64 --decode | openssl x509 -checkhost keycloak.ingress.svc -noout
 "$KUBECTL_BIN" -n data-plane wait --for=condition=Ready pod -l app.kubernetes.io/name=qdrant --timeout=10m
 "$KUBECTL_BIN" -n data-plane rollout status statefulset/neo4j --timeout=15m
 "$KUBECTL_BIN" -n data-plane wait --for=condition=Ready pod -l opster.io/opensearch-cluster=eci-opensearch --timeout=15m
@@ -78,7 +82,7 @@ spec:
             redis.data-plane.svc:6379 \
             minio.data-plane.svc:9000 \
             opa.query-plane.svc:8181 \
-            keycloak.ingress.svc:8080; do
+            keycloak.ingress.svc:8443; do
             host=${endpoint%:*}; port=${endpoint##*:}; nc -zvw5 "$host" "$port"
           done
           curl -fsS -H 'content-type: application/json' \
@@ -88,9 +92,18 @@ spec:
             --data '{"input":{"action":"/eci.retrieval.v1.RetrievalEngine/GetNode","subject":{"user_id":"smoke-user","allowed_repos":["smoke-repo"],"acl_groups":["smoke-acl"]}}}' \
             http://opa.query-plane.svc:8181/v1/data/eci/authz/decision | grep -q '"reason":"missing_tenant"'
           echo 'OPA allow and fail-closed decisions: PASS'
+          curl -fsS --cacert /etc/eci/keycloak/ca.crt \
+            https://keycloak.ingress.svc:8443/realms/master/.well-known/openid-configuration | \
+            grep -q '"issuer":"https://keycloak.ingress.svc:8443/realms/master"'
+          echo 'Keycloak HTTPS discovery with hostname-bound trust: PASS'
       resources:
         requests: {cpu: 10m, memory: 16Mi}
         limits: {cpu: 100m, memory: 128Mi}
+      volumeMounts:
+        - {name: keycloak-ca, mountPath: /etc/eci/keycloak, readOnly: true}
+  volumes:
+    - name: keycloak-ca
+      configMap: {name: eci-keycloak-ca}
 EOF
 "$KUBECTL_BIN" -n data-plane wait --for=jsonpath='{.status.phase}'=Succeeded pod/eci-connectivity --timeout=3m
 "$KUBECTL_BIN" -n data-plane logs eci-connectivity

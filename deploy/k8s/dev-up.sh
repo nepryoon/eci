@@ -50,6 +50,36 @@ for namespace in data-plane query-plane ingestion-plane ingress; do
     --from-env-file="$ECI_DEV_TMP_DIR/runtime.env" \
     --dry-run=client -o yaml | "$KUBECTL_BIN" apply -f - >/dev/null
 done
+
+# The in-cluster development issuer is HTTPS-only. Reuse a still-valid
+# hostname-bound certificate so repeated installs do not rotate trust
+# unexpectedly; generate it locally when the disposable cluster needs one.
+ECI_KEYCLOAK_TLS_ROTATED=false
+if "$KUBECTL_BIN" -n ingress get secret eci-keycloak-tls >/dev/null 2>&1; then
+  "$KUBECTL_BIN" -n ingress get secret eci-keycloak-tls \
+    -o 'jsonpath={.data.tls\.crt}' | base64 --decode >"$ECI_DEV_TMP_DIR/keycloak.crt"
+  if ! openssl x509 -in "$ECI_DEV_TMP_DIR/keycloak.crt" -checkend 86400 -noout >/dev/null 2>&1 || \
+     ! openssl x509 -in "$ECI_DEV_TMP_DIR/keycloak.crt" -checkhost keycloak.ingress.svc -noout >/dev/null 2>&1; then
+    ECI_KEYCLOAK_TLS_ROTATED=true
+  fi
+else
+  ECI_KEYCLOAK_TLS_ROTATED=true
+fi
+if [[ "$ECI_KEYCLOAK_TLS_ROTATED" == true ]]; then
+  openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 365 \
+    -subj '/CN=keycloak.ingress.svc' \
+    -addext 'subjectAltName=DNS:keycloak.ingress.svc,DNS:keycloak.ingress.svc.cluster.local' \
+    -addext 'basicConstraints=critical,CA:TRUE' \
+    -keyout "$ECI_DEV_TMP_DIR/keycloak.key" -out "$ECI_DEV_TMP_DIR/keycloak.crt" >/dev/null 2>&1
+  chmod 0600 "$ECI_DEV_TMP_DIR/keycloak.key" "$ECI_DEV_TMP_DIR/keycloak.crt"
+  "$KUBECTL_BIN" -n ingress create secret tls eci-keycloak-tls \
+    --cert="$ECI_DEV_TMP_DIR/keycloak.crt" --key="$ECI_DEV_TMP_DIR/keycloak.key" \
+    --dry-run=client -o yaml | "$KUBECTL_BIN" apply -f - >/dev/null
+fi
+# Connectivity smoke needs only the public certificate. Never copy tls.key.
+"$KUBECTL_BIN" -n data-plane create configmap eci-keycloak-ca \
+  --from-file=ca.crt="$ECI_DEV_TMP_DIR/keycloak.crt" \
+  --dry-run=client -o yaml | "$KUBECTL_BIN" apply -f - >/dev/null
 printf '%s\n' 'username=eci_cdc' "password=$ECI_CDC_PASSWORD" \
   >"$ECI_DEV_TMP_DIR/postgres-cdc.env"
 chmod 0600 "$ECI_DEV_TMP_DIR/postgres-cdc.env"
@@ -93,6 +123,10 @@ ECI_K8S_PROFILE=dev HELM_BIN="$HELM_BIN" KUBECTL_BIN="$KUBECTL_BIN" "$ROOT_DIR/d
 "$HELM_BIN" upgrade --install eci "$ROOT_DIR/deploy/k8s/eci-platform" \
   --namespace query-plane --values "$ROOT_DIR/deploy/k8s/eci-platform/values-dev.yaml" \
   --wait --atomic --timeout 20m
+if [[ "$ECI_KEYCLOAK_TLS_ROTATED" == true ]]; then
+  "$KUBECTL_BIN" -n ingress rollout restart deployment/keycloak >/dev/null
+  "$KUBECTL_BIN" -n ingress rollout status deployment/keycloak --timeout=10m
+fi
 
 # Strimzi owns client private keys in data-plane. The dev bootstrap copies only
 # each workload's own public CA/certificate/private key into ingestion-plane;

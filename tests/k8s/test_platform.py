@@ -506,6 +506,93 @@ class PlatformChartTests(unittest.TestCase):
             )
         )
 
+    def test_application_services_cache_and_dev_issuer_are_operational(self) -> None:
+        # A metrics listener that shares the service port must not be emitted a
+        # second time: Kubernetes keys Service ports by (port, protocol).
+        same_port_workloads = {
+            "embedding-worker": "ingestion-plane",
+            "sink-graph": "ingestion-plane",
+            "sink-vector": "ingestion-plane",
+            "sink-search": "ingestion-plane",
+            "vllm": "gpu-plane",
+            "embedder": "gpu-plane",
+            "reranker": "gpu-plane",
+        }
+        for name, namespace in same_port_workloads.items():
+            deployment = self.by_key[("Deployment", namespace, name)]
+            service = self.by_key[("Service", namespace, name)]
+            self.assertEqual(
+                deployment["spec"]["template"]["spec"]["containers"][0]["ports"],
+                [{"name": "service", "containerPort": service["spec"]["ports"][0]["port"]}],
+            )
+            self.assertEqual(len(service["spec"]["ports"]), 1)
+
+        # A ClusterIP must never load-balance one logical cache across
+        # independent standalone Redis processes.
+        redis = self.by_key[("Deployment", "data-plane", "redis")]
+        self.assertEqual(redis["spec"]["replicas"], 1)
+
+        # The bundled issuer is dev-only, but it still uses HTTPS. The gateway
+        # receives only the public certificate as a trust root, never its key.
+        dev_app_objects = render("values-dev.yaml", application_catalog=True)
+        dev_apps = keyed(dev_app_objects)
+        keycloak = dev_apps[("Deployment", "ingress", "keycloak")]
+        keycloak_container = keycloak["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(keycloak_container["ports"], [{"name": "service", "containerPort": 8443}])
+        self.assertIn("--http-enabled=false", keycloak_container["args"])
+        self.assertIn("--https-port=8443", keycloak_container["args"])
+        self.assertIn(
+            {"name": "tls", "mountPath": "/etc/eci/keycloak/tls", "readOnly": True},
+            keycloak_container["volumeMounts"],
+        )
+        keycloak_volumes = {
+            item["name"]: item for item in keycloak["spec"]["template"]["spec"]["volumes"]
+        }
+        self.assertEqual(keycloak_volumes["tls"]["secret"]["secretName"], "eci-keycloak-tls")
+        self.assertEqual(keycloak_volumes["tls"]["secret"]["defaultMode"], 0o440)
+
+        gateway = dev_apps[("Deployment", "ingress", "api-gateway")]
+        gateway_container = gateway["spec"]["template"]["spec"]["containers"][0]
+        self.assertIn(
+            {"name": "oidc-ca", "mountPath": "/etc/eci/oidc", "readOnly": True},
+            gateway_container["volumeMounts"],
+        )
+        self.assertIn(
+            {"name": "SSL_CERT_DIR", "value": "/etc/eci/oidc:/etc/ssl/certs"},
+            gateway_container["env"],
+        )
+        gateway_volumes = {
+            item["name"]: item for item in gateway["spec"]["template"]["spec"]["volumes"]
+        }
+        self.assertEqual(
+            gateway_volumes["oidc-ca"]["secret"],
+            {"secretName": "eci-keycloak-tls", "items": [{"key": "tls.crt", "path": "keycloak.crt"}]},
+        )
+
+        policies = {
+            (obj["metadata"]["namespace"], obj["metadata"]["name"]): obj
+            for obj in dev_app_objects
+            if obj.get("kind") == "NetworkPolicy"
+        }
+        self.assertEqual(
+            policies[("ingress", "allow-api-gateway-to-keycloak")]["spec"]["egress"][0]["ports"],
+            [{"protocol": "TCP", "port": 8443}],
+        )
+        self.assertEqual(
+            keyed(self.dev)[("NetworkPolicy", "ingress", "allow-dev-connectivity-to-keycloak")]
+            ["spec"]["ingress"][0]["ports"],
+            [{"protocol": "TCP", "port": 8443}],
+        )
+
+        up = (ROOT / "deploy/k8s/dev-up.sh").read_text()
+        verify = (ROOT / "deploy/k8s/dev-verify.sh").read_text()
+        self.assertIn("create secret tls eci-keycloak-tls", up)
+        self.assertIn("subjectAltName=DNS:keycloak.ingress.svc", up)
+        self.assertIn("create configmap eci-keycloak-ca", up)
+        self.assertNotIn("--from-file=tls.key", up)
+        self.assertIn("https://keycloak.ingress.svc:8443", verify)
+        self.assertIn("--cacert /etc/eci/keycloak/ca.crt", verify)
+
     def test_dev_probe_image_is_immutable(self) -> None:
         verifier = (ROOT / "deploy/k8s/dev-verify.sh").read_text()
         self.assertIn(

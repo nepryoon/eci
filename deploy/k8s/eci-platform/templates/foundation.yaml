@@ -10,11 +10,11 @@ data:
 {{ .Files.Get "policies/eci_authz.rego" | indent 4 }}
 ---
 {{- $items := list
-  (dict "name" "opa" "namespace" "query-plane" "image" "openpolicyagent/opa@sha256:39daf255ae7f25d81103f03a0c18308a50b7b5bb67907bed6166f70e24a970ff" "port" 8181 "args" (list "run" "--server" "--addr=0.0.0.0:8181" "/policies/eci_authz.rego"))
-  (dict "name" "redis" "namespace" "data-plane" "image" "redis@sha256:987c376c727652f99625c7d205a1cba3cb2c53b92b0b62aade2bd48ee1593232" "port" 6379 "args" (list "redis-server" "--requirepass" "$(REDIS_PASSWORD)"))
+  (dict "name" "opa" "namespace" "query-plane" "image" "openpolicyagent/opa@sha256:39daf255ae7f25d81103f03a0c18308a50b7b5bb67907bed6166f70e24a970ff" "port" 8181 "replicas" (ternary 2 1 .Values.global.highAvailability) "args" (list "run" "--server" "--addr=0.0.0.0:8181" "/policies/eci_authz.rego"))
+  (dict "name" "redis" "namespace" "data-plane" "image" "redis@sha256:987c376c727652f99625c7d205a1cba3cb2c53b92b0b62aade2bd48ee1593232" "port" 6379 "replicas" 1 "args" (list "redis-server" "--requirepass" "$(REDIS_PASSWORD)"))
 }}
 {{- if eq .Values.global.profile "dev" }}
-{{- $items = append $items (dict "name" "keycloak" "namespace" "ingress" "image" "quay.io/keycloak/keycloak@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067" "port" 8080 "args" (list "start-dev" "--health-enabled=true")) }}
+{{- $items = append $items (dict "name" "keycloak" "namespace" "ingress" "image" "quay.io/keycloak/keycloak@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067" "port" 8443 "replicas" 1 "args" (list "start-dev" "--health-enabled=true" "--http-enabled=false" "--https-port=8443" "--https-certificate-file=/etc/eci/keycloak/tls/tls.crt" "--https-certificate-key-file=/etc/eci/keycloak/tls/tls.key" "--hostname=https://keycloak.ingress.svc:8443")) }}
 {{- end }}
 {{- range $item := $items }}
 ---
@@ -36,7 +36,7 @@ metadata:
     {{- include "eci.labels" $ | nindent 4 }}
     app.kubernetes.io/name: {{ $item.name }}
 spec:
-  replicas: {{ ternary 2 1 $.Values.global.highAvailability }}
+  replicas: {{ $item.replicas }}
   strategy:
     type: RollingUpdate
     rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
@@ -52,6 +52,10 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         {{- include "eci.podSecurityContext" $ | nindent 8 }}
+        {{- if eq $item.name "keycloak" }}
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        {{- end }}
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: topology.kubernetes.io/zone
@@ -124,6 +128,7 @@ spec:
             - {name: policy, mountPath: /policies, readOnly: true}
             {{- else if eq $item.name "keycloak" }}
             - {name: data, mountPath: /opt/keycloak/data}
+            - {name: tls, mountPath: /etc/eci/keycloak/tls, readOnly: true}
             {{- end }}
       volumes:
         - name: tmp
@@ -134,6 +139,13 @@ spec:
         {{- else if eq $item.name "keycloak" }}
         - name: data
           emptyDir: {}
+        - name: tls
+          secret:
+            secretName: {{ required "devIdentity.tlsSecret is required in the dev profile" $.Values.devIdentity.tlsSecret }}
+            defaultMode: 0440
+            items:
+              - {key: tls.crt, path: tls.crt}
+              - {key: tls.key, path: tls.key}
         {{- end }}
 ---
 apiVersion: v1
