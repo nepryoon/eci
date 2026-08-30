@@ -414,6 +414,48 @@ spec:
 {{- if and (ne .Values.global.profile "dev") (not .Values.routing.oidcIssuerEgressCIDRs) }}
 {{- fail "routing.oidcIssuerEgressCIDRs must contain explicit trusted issuer/proxy CIDRs when applications.enabled=true outside the bundled dev profile" }}
 {{- end }}
+---
+# Metrics scraping is an explicit cross-namespace flow. Both sides are needed
+# because the chart applies default-deny egress in observability and
+# default-deny ingress in ingestion-plane. Exact pod selectors prevent other
+# observability workloads from reaching the ingestion listener.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-to-ingestion-metrics
+  namespace: observability
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: prometheus}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: ingestion-plane}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: ingestion}
+      ports: [{protocol: TCP, port: 9100}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-to-ingestion-metrics-ingress
+  namespace: ingestion-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: ingestion}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: observability}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: prometheus}
+      ports: [{protocol: TCP, port: 9100}]
 {{- if .Values.routing.oidcIssuerEgressCIDRs }}
 ---
 apiVersion: networking.k8s.io/v1

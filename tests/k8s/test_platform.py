@@ -514,6 +514,52 @@ class PlatformChartTests(unittest.TestCase):
                     f"{obj['metadata']['name']} grants namespace-membership egress",
                 )
         self.assertNotIn(("observability", "allow-observability-probes"), policies)
+        prometheus_egress = self.by_key[(
+            "NetworkPolicy", "observability", "allow-prometheus-to-ingestion-metrics",
+        )]
+        self.assertEqual(
+            prometheus_egress["spec"],
+            {
+                "podSelector": {
+                    "matchLabels": {"app.kubernetes.io/name": "prometheus"},
+                },
+                "policyTypes": ["Egress"],
+                "egress": [{
+                    "to": [{
+                        "namespaceSelector": {
+                            "matchLabels": {"kubernetes.io/metadata.name": "ingestion-plane"},
+                        },
+                        "podSelector": {
+                            "matchLabels": {"app.kubernetes.io/name": "ingestion"},
+                        },
+                    }],
+                    "ports": [{"protocol": "TCP", "port": 9100}],
+                }],
+            },
+        )
+        ingestion_metrics_ingress = self.by_key[(
+            "NetworkPolicy", "ingestion-plane", "allow-prometheus-to-ingestion-metrics-ingress",
+        )]
+        self.assertEqual(
+            ingestion_metrics_ingress["spec"],
+            {
+                "podSelector": {
+                    "matchLabels": {"app.kubernetes.io/name": "ingestion"},
+                },
+                "policyTypes": ["Ingress"],
+                "ingress": [{
+                    "from": [{
+                        "namespaceSelector": {
+                            "matchLabels": {"kubernetes.io/metadata.name": "observability"},
+                        },
+                        "podSelector": {
+                            "matchLabels": {"app.kubernetes.io/name": "prometheus"},
+                        },
+                    }],
+                    "ports": [{"protocol": "TCP", "port": 9100}],
+                }],
+            },
+        )
         self.assertNotIn(("Service", "data-plane", "kafka-connect"), self.by_key)
         for name in {
             "allow-kafka-connect-to-kafka", "allow-kafka-connect-to-kafka-ingress",
