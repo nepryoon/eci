@@ -100,6 +100,22 @@ no service port. ADR-0017/T7.1b owns the authenticated long-running API,
 streaming protocol and real health probes. Until then, orchestration remains a
 deliberate deployment gap and T7.1 remains `implemented`, not `verified`.
 
+Verification and summarization must likewise remain absent from
+`applications.workloads` while their packages expose no server entrypoint.
+ADR-0018/T7.1c owns their authenticated APIs and health lifecycle. The same ADR
+defines `gds-impact` as a suspended template. Prepare
+`eci-runtime-gds-impact` with `NEO4J_USER`, `NEO4J_PASSWORD`,
+`ECI_GDS_ENTRY_NODE_ID`, `ECI_GDS_TENANT_ID`, `ECI_GDS_REPOSITORY` and
+`ECI_GDS_ACL_GROUP`, then clone exactly one bounded Job with
+`kubectl -n ingestion-plane create job gds-<scope-id> --from=cronjob/gds-impact`.
+Never unsuspend the shared schedule or take scope from a user prompt.
+
+Before enabling applications, resolve the trusted OIDC issuer (or a controlled
+HTTPS egress proxy) to the smallest stable CIDR set and pass each entry as
+`--set-string routing.oidcIssuerEgressCIDRs[N]=<cidr>`. The chart fails when
+this list is empty and grants only TCP/443 from the API Gateway pod. Do not use
+`0.0.0.0/0`; update the release atomically when issuer addresses rotate.
+
 Application enablement is a two-phase operation because the Strimzi and
 OpenSearch operators create identities/CAs only after the infrastructure CRs
 exist. After the infrastructure release is Ready, the Strimzi User Operator

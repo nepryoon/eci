@@ -163,6 +163,26 @@ spec:
       ports: [{protocol: TCP, port: 8080}]
 {{- end }}
 {{- if .Values.applications.enabled }}
+{{- if not .Values.routing.oidcIssuerEgressCIDRs }}
+{{- fail "routing.oidcIssuerEgressCIDRs must contain explicit trusted issuer/proxy CIDRs when applications.enabled=true" }}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-gateway-to-oidc-issuer
+  namespace: ingress
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: api-gateway}
+  policyTypes: [Egress]
+  egress:
+    {{- range $cidr := .Values.routing.oidcIssuerEgressCIDRs }}
+    - to: [{ipBlock: {cidr: {{ $cidr | quote }}}}]
+      ports: [{protocol: TCP, port: 443}]
+    {{- end }}
 {{- $flows := list
   (dict "name" "envoy-to-api-gateway" "sourceNamespace" "ingress" "source" "envoy" "destinationNamespace" "ingress" "destinationSelector" (dict "app.kubernetes.io/name" "api-gateway") "port" 8081)
   (dict "name" "envoy-to-retrieval" "sourceNamespace" "ingress" "source" "envoy" "destinationNamespace" "query-plane" "destinationSelector" (dict "app.kubernetes.io/name" "retrieval-engine") "port" 50053)
@@ -177,7 +197,6 @@ spec:
   (dict "name" "retrieval-engine-to-opa" "sourceNamespace" "query-plane" "source" "retrieval-engine" "destinationNamespace" "query-plane" "destinationSelector" (dict "app.kubernetes.io/name" "opa") "port" 8181)
   (dict "name" "llm-gateway-to-opa" "sourceNamespace" "query-plane" "source" "llm-gateway" "destinationNamespace" "query-plane" "destinationSelector" (dict "app.kubernetes.io/name" "opa") "port" 8181)
   (dict "name" "semantic-cache-to-opa" "sourceNamespace" "query-plane" "source" "semantic-cache" "destinationNamespace" "query-plane" "destinationSelector" (dict "app.kubernetes.io/name" "opa") "port" 8181)
-  (dict "name" "verification-to-minio" "sourceNamespace" "query-plane" "source" "verification" "destinationNamespace" "data-plane" "destinationSelector" (dict "app.kubernetes.io/name" "minio") "port" 9000)
   (dict "name" "semantic-cache-to-redis" "sourceNamespace" "query-plane" "source" "semantic-cache" "destinationNamespace" "data-plane" "destinationSelector" (dict "app.kubernetes.io/name" "redis") "port" 6379)
   (dict "name" "ingestion-to-postgres" "sourceNamespace" "ingestion-plane" "source" "ingestion" "destinationNamespace" "data-plane" "destinationSelector" (dict "cnpg.io/cluster" "eci-postgres") "port" 5432)
   (dict "name" "ingestion-to-embedder" "sourceNamespace" "ingestion-plane" "source" "ingestion" "destinationNamespace" "gpu-plane" "destinationSelector" (dict "app.kubernetes.io/name" "embedder") "port" 80)

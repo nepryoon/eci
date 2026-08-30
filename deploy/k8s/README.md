@@ -45,6 +45,10 @@ The Python orchestrator is likewise CLI-only today, so this chart does not
 render an orchestrator Deployment or fictional listener. ADR-0017 records that
 truth boundary; T7.1b owns the authenticated long-running API, streaming,
 readiness and shutdown lifecycle required before T7.1 can be verified.
+Verification and summarization are currently importable Python libraries only;
+ADR-0018/T7.1c keeps them out of the Deployment catalog until authenticated
+server entrypoints and real probes exist. The same ADR models `gds-impact` as a
+suspended, scope-bound Job template rather than an argument-less schedule.
 Kafka uses a TLS-authenticated listener with simple authorization. Kafka
 Connect and every consumer have a distinct Strimzi `KafkaUser`; consumers
 mount the broker public `ca.crt` plus only their own `user.crt` and `user.key`, and literal ACLs
@@ -53,6 +57,10 @@ consumer namespace without ever copying a CA private key.
 OpenSearch clients mount only the generated public HTTP CA and require Basic
 Auth. Semantic Cache maps `redis-password` explicitly to `REDIS_PASSWORD`.
 Missing keys or CA files remain a fail-closed rollout failure.
+Application enablement also requires one or more explicit
+`routing.oidcIssuerEgressCIDRs`; they must resolve only the trusted HTTPS issuer
+or controlled egress proxy. The chart rejects an empty list instead of opening
+broad Internet egress.
 
 `install-operators.sh` downloads every pinned Helm archive from its canonical
 HTTPS release URL into a temporary directory and verifies its repository

@@ -28,11 +28,13 @@ done
 # Render the opt-in application topology with explicitly synthetic digest-shaped
 # references. This validates template/schema/policy completeness only; it is
 # never deployment or image-publication evidence.
-catalog_args=(--set applications.enabled=true)
+catalog_args=(
+  --set applications.enabled=true
+  --set-string routing.oidcIssuerEgressCIDRs[0]=192.0.2.10/32
+)
 test_digest="$(printf '0123456789abcdef%.0s' {1..4})"
 for application in \
-  api-gateway orchestrator retrieval-engine verification llm-gateway \
-  summarization semantic-cache ingestion embedding-worker sink-graph \
+  api-gateway retrieval-engine llm-gateway semantic-cache ingestion embedding-worker sink-graph \
   sink-vector sink-search gds-impact; do
   catalog_args+=(--set-string "global.imageReferences.${application}=registry.example.invalid/eci-test/${application}@sha256:${test_digest}")
 done

@@ -5,9 +5,7 @@ global:
   imageReferences:
     api-gateway: ""
     retrieval-engine: ""
-    verification: ""
     llm-gateway: ""
-    summarization: ""
     semantic-cache: ""
     ingestion: ""
     embedding-worker: ""
@@ -49,9 +47,7 @@ applications:
         - {name: NEO4J_PASSWORD, key: NEO4J_PASSWORD}
         - {name: OPENSEARCH_USERNAME, key: OPENSEARCH_USERNAME}
         - {name: OPENSEARCH_PASSWORD, key: OPENSEARCH_PASSWORD}
-    - {name: verification, namespace: query-plane, port: 8080, metricsPort: 9090, replicas: 2, profile: io}
-    - {name: llm-gateway, namespace: query-plane, port: 8002, metricsPort: 9090, replicas: 2, profile: io}
-    - {name: summarization, namespace: query-plane, port: 8080, metricsPort: 9090, replicas: 2, profile: io}
+    - {name: llm-gateway, namespace: query-plane, port: 8002, replicas: 2, profile: io}
     - name: semantic-cache
       namespace: query-plane
       port: 50054
@@ -158,6 +154,9 @@ routing:
   kafkaTLSSecretPrefix: eci-kafka
   openSearchTLSSecret: eci-opensearch-client-ca
   vllmURL: http://vllm.gpu-plane.svc.cluster.local:8000/v1
+  # Resolve the trusted external issuer or an egress proxy to explicit CIDRs.
+  # Applications fail to render when this list is empty.
+  oidcIssuerEgressCIDRs: []
 
 resources:
   io:
@@ -195,6 +194,10 @@ batch:
     secretEnv:
       - {name: NEO4J_USER, key: NEO4J_USER}
       - {name: NEO4J_PASSWORD, key: NEO4J_PASSWORD}
+      - {name: ECI_GDS_ENTRY_NODE_ID, key: ECI_GDS_ENTRY_NODE_ID}
+      - {name: ECI_GDS_TENANT_ID, key: ECI_GDS_TENANT_ID}
+      - {name: ECI_GDS_REPOSITORY, key: ECI_GDS_REPOSITORY}
+      - {name: ECI_GDS_ACL_GROUP, key: ECI_GDS_ACL_GROUP}
 
 cdc:
   enabled: true

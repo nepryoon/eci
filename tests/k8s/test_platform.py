@@ -18,8 +18,7 @@ HELM = os.environ.get("HELM_BIN", "helm")
 
 
 APPLICATION_IMAGES = (
-    "api-gateway", "retrieval-engine", "verification",
-    "llm-gateway", "summarization", "semantic-cache", "ingestion",
+    "api-gateway", "retrieval-engine", "llm-gateway", "semantic-cache", "ingestion",
     "embedding-worker", "sink-graph", "sink-vector", "sink-search", "gds-impact",
 )
 TEST_DIGEST = "0123456789abcdef" * 4
@@ -31,6 +30,7 @@ def render(values: str | None = None, *, application_catalog: bool = False) -> l
         command.extend(["--values", str(CHART / values)])
     if application_catalog:
         command.extend(["--set", "applications.enabled=true"])
+        command.extend(["--set-string", "routing.oidcIssuerEgressCIDRs[0]=192.0.2.10/32"])
         for name in APPLICATION_IMAGES:
             # Template-only fixture. It proves that every workload requires a
             # digest-shaped reference without pretending an ECI image exists.
@@ -73,9 +73,7 @@ class PlatformChartTests(unittest.TestCase):
             ("ingress", "envoy"),
             ("ingress", "api-gateway"),
             ("query-plane", "retrieval-engine"),
-            ("query-plane", "verification"),
             ("query-plane", "llm-gateway"),
-            ("query-plane", "summarization"),
             ("query-plane", "semantic-cache"),
             ("ingestion-plane", "embedding-worker"),
             ("ingestion-plane", "sink-graph"),
@@ -88,6 +86,8 @@ class PlatformChartTests(unittest.TestCase):
         }
         self.assertTrue(expected.issubset(deployments), expected - deployments)
         self.assertNotIn(("query-plane", "orchestrator"), deployments)
+        self.assertNotIn(("query-plane", "verification"), deployments)
+        self.assertNotIn(("query-plane", "summarization"), deployments)
         cronjobs = {obj["metadata"]["name"] for obj in self.standard if obj.get("kind") == "CronJob"}
         self.assertEqual(cronjobs, {"gds-impact", "ingestion-template"})
         ingestion = self.by_key[("CronJob", "ingestion-plane", "ingestion-template")]
@@ -101,6 +101,25 @@ class PlatformChartTests(unittest.TestCase):
         self.assertEqual(
             ingestion_pod["volumes"][1]["persistentVolumeClaim"],
             {"claimName": "eci-ingestion-source", "readOnly": True},
+        )
+        gds = self.by_key[("CronJob", "ingestion-plane", "gds-impact")]
+        self.assertTrue(gds["spec"]["suspend"])
+        gds_container = gds["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(
+            gds_container["args"],
+            [
+                "--entry-node-id=$(ECI_GDS_ENTRY_NODE_ID)",
+                "--tenant-id=$(ECI_GDS_TENANT_ID)",
+                "--repo=$(ECI_GDS_REPOSITORY)",
+                "--acl-group=$(ECI_GDS_ACL_GROUP)",
+            ],
+        )
+        self.assertEqual(
+            {item["name"] for item in gds_container["env"]},
+            {
+                "NEO4J_USER", "NEO4J_PASSWORD", "ECI_GDS_ENTRY_NODE_ID",
+                "ECI_GDS_TENANT_ID", "ECI_GDS_REPOSITORY", "ECI_GDS_ACL_GROUP",
+            },
         )
         connector = self.by_key[("ConfigMap", "data-plane", "eci-debezium-connector")]
         connector_config = connector["data"]["connector.json"]
@@ -469,6 +488,18 @@ spec:
         self.assertEqual(routing["REDIS_REQUIRE_AUTH"], "true")
         self.assertNotIn("localhost", "\n".join(routing.values()))
 
+        llm = self.by_key[("Deployment", "query-plane", "llm-gateway")]
+        llm_template = llm["spec"]["template"]
+        self.assertNotIn("prometheus.io/scrape", llm_template["metadata"].get("annotations", {}))
+        self.assertEqual(
+            llm_template["spec"]["containers"][0]["ports"],
+            [{"name": "service", "containerPort": 8002}],
+        )
+        self.assertEqual(
+            self.by_key[("Service", "query-plane", "llm-gateway")]["spec"]["ports"],
+            [{"name": "service", "port": 8002, "targetPort": "service"}],
+        )
+
         for obj in self.standard:
             if obj.get("kind") != "Deployment" or obj["metadata"]["name"] in {
                 "envoy", "kafka-connect", "opa", "redis"
@@ -556,6 +587,12 @@ spec:
         }:
             self.assertIn((namespace, name), policies)
 
+        oidc = policies[("ingress", "allow-api-gateway-to-oidc-issuer")]
+        self.assertEqual(
+            oidc["spec"]["egress"],
+            [{"to": [{"ipBlock": {"cidr": "192.0.2.10/32"}}], "ports": [{"protocol": "TCP", "port": 443}]}],
+        )
+
         neo4j_egress = policies[("query-plane", "allow-retrieval-engine-to-neo4j")]
         self.assertEqual(
             neo4j_egress["spec"]["podSelector"]["matchLabels"],
@@ -584,6 +621,8 @@ spec:
             str(CHART),
             "--set",
             "applications.enabled=true",
+            "--set-string",
+            "routing.oidcIssuerEgressCIDRs[0]=192.0.2.10/32",
             "--set-json",
             f"applications.workloads={invalid_workloads}",
             "--set-string",
@@ -630,6 +669,13 @@ spec:
         }:
             self.assertIn(expected, installer)
         self.assertIn("qdrant-post-renderer.sh", installer)
+        self.assertIn("opensearch-operator-post-renderer.sh", installer)
+        dev_up = (ROOT / "deploy/k8s/dev-up.sh").read_text()
+        self.assertIn(
+            "opensearchproject/opensearch@sha256:23297b8d8545e129dd58c254ed08d786dc552410ba772983ad2af31048d2f04b",
+            dev_up,
+        )
+        self.assertNotIn("opensearchproject/opensearch:3.2.0", dev_up)
 
         post_renderer = ROOT / "deploy/k8s/qdrant-post-renderer.sh"
         mutable = (
@@ -648,14 +694,22 @@ spec:
 
     def test_review_application_enablement_requires_real_release_digests(self) -> None:
         result = subprocess.run(
-            [HELM, "template", "eci", str(CHART), "--set", "applications.enabled=true"],
+            [
+                HELM, "template", "eci", str(CHART),
+                "--set", "applications.enabled=true",
+                "--set-string", "routing.oidcIssuerEgressCIDRs[0]=192.0.2.10/32",
+            ],
             capture_output=True,
             text=True,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("global.imageReferences.api-gateway", result.stderr)
 
-        base = [HELM, "template", "eci", str(CHART), "--set", "applications.enabled=true"]
+        base = [
+            HELM, "template", "eci", str(CHART),
+            "--set", "applications.enabled=true",
+            "--set-string", "routing.oidcIssuerEgressCIDRs[0]=192.0.2.10/32",
+        ]
         for name in APPLICATION_IMAGES:
             base.extend(
                 [

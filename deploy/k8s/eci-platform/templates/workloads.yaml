@@ -36,10 +36,12 @@ spec:
     metadata:
       labels:
         {{- include "eci.selectorLabels" (dict "name" $workload.name) | nindent 8 }}
+      {{- if $workload.metricsPort }}
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: {{ $workload.metricsPort | quote }}
         prometheus.io/path: /metrics
+      {{- end }}
     spec:
       serviceAccountName: {{ $workload.name }}
       automountServiceAccountToken: false
@@ -79,7 +81,9 @@ spec:
             {{- include "eci.containerSecurityContext" $ | nindent 12 }}
           ports:
             - {name: service, containerPort: {{ $workload.port }}}
+            {{- if $workload.metricsPort }}
             - {name: metrics, containerPort: {{ $workload.metricsPort }}}
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: eci-runtime-routing
@@ -159,7 +163,9 @@ spec:
     {{- include "eci.selectorLabels" (dict "name" $workload.name) | nindent 4 }}
   ports:
     - {name: service, port: {{ $workload.port }}, targetPort: service}
+    {{- if $workload.metricsPort }}
     - {name: metrics, port: {{ $workload.metricsPort }}, targetPort: metrics}
+    {{- end }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

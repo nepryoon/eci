@@ -73,7 +73,7 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    namespace `ingress`, `query-plane`,
    `gpu-plane`, `ingestion-plane`, `data-plane`, `observability`; Deployment,
    Service, account e PDB coprono Envoy/API gateway, retrieval,
-   verification, LLM gateway, summarization, semantic cache, tre sink,
+   LLM gateway, semantic cache, tre sink,
    ingestion CPU, embedding/reranker/vLLM; GDS è un workload batch esplicito.
    Senza tali riferimenti il profilo infrastrutturale resta applicazioni-off e
    Helm fallisce se si forza l'abilitazione: nessun digest sintetico è default.
@@ -143,6 +143,11 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    Anche l'orchestrator corrente espone soltanto il CLI `eci ask`/`eval-golden`:
    non viene renderizzato come Deployment con listener inventato. ADR-0017 e
    T7.1b rendono esplicito il runtime API/streaming ancora da implementare.
+   Verification e summarization sono oggi librerie Python prive di entrypoint
+   server: ADR-0018/T7.1c ne vietano Deployment/listener fittizi e tracciano i
+   runtime API autenticati mancanti. Il job GDS è un template sospeso: riceve
+   entry node e scope soltanto dal proprio Secret preparato e viene clonato
+   esplicitamente, mai avviato senza argomenti.
    I server GPU richiedono un PVC modelli esterno read-only e ricevono path e
    model/served ID canonici; nessun download di pesi o modello alternativo è
    un fallback implicito.
@@ -218,7 +223,8 @@ mTLS Kafka per workload con ACL literal, pod security, secret references, pin
 di release/immagini, script con target fisso e fail-closed.
 
 Non-goals: worker ingestion long-running (T7.1a), orchestrator server/API
-long-running (T7.1b), autoscaling HPA/KEDA (T7.2), collector/dashboard/alert completi
+long-running (T7.1b), verification/summarization server API (T7.1c),
+autoscaling HPA/KEDA (T7.2), collector/dashboard/alert completi
 (T7.3), pipeline eval (T7.4), load test/SLO (T7.5), produzione cloud,
 provisioning DNS/certificati/GPU, accettazione licenza Neo4j per conto di un
 operatore, backup/restore production e modifica ADD/contratti. Il dev smoke non
@@ -308,6 +314,11 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       espliciti, mai come server fittizio; deviazione D8 tracciata in ADR-0016.
 - [x] Orchestrator CLI non è modellato come Deployment/listener fittizio;
       deviazione runtime tracciata in ADR-0017/T7.1b.
+- [x] Verification/summarization library-only non sono modellati come server;
+      deviazione tracciata in ADR-0018/T7.1c. GDS è un template sospeso con
+      scope/entry node provenienti dal Secret dedicato.
+- [x] API Gateway riceve un egress HTTPS soltanto verso CIDR issuer/proxy
+      espliciti; lista assente blocca il render applicativo.
 - [x] Kubeconform valida built-in e CRD contro schemi pinned.
 - [x] Cluster dev realmente creato; operatori/store Ready e connettività
       in-cluster verificata, oppure eventuale limite esterno/risorse è riportato
@@ -318,6 +329,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       readiness/backpressure reali; solo allora lo stato può diventare verified.
 - [ ] T7.1b fornisce il server orchestrator autenticato/streaming e probe reali;
       solo allora l'inventario applicativo T7.1 può diventare verified.
+- [ ] T7.1c fornisce server verification/summarization autenticati e probe
+      reali; solo allora l'inventario applicativo T7.1 può diventare verified.
 - [ ] `task build`, `task lint`, `task test`, `task guard`, `task k8s:validate`
       e CI verdi; SPEC `verified` solo dopo evidenza e review.
 

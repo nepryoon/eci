@@ -61,7 +61,7 @@ The later supply-chain/routing review fixes were verified at revision 6. The
 final least-privilege/supply-chain review fixes were then applied at ECI
 revision 8 after all five operator chart archives passed their checked-in
 SHA-256 gates and upgraded the real cluster releases to revision 6. The
-catalog of 191 application objects was exercised only with an explicit
+catalog of 182 application objects was exercised only with an explicit
 `registry.example.invalid` unit fixture; this proves template completeness and
 digest enforcement, not image publication or application readiness. Released
 applications remain opt-in and require real registry digests plus external
@@ -83,3 +83,9 @@ OpenSearch Operator revision 9 was then applied through a fail-closed
 post-renderer: both the manager and kube-rbac-proxy references, plus their live
 image IDs, matched the recorded multi-arch digests and the full connectivity
 smoke remained green.
+The last executable-boundary pass removed library-only verification and
+summarization Deployments, made GDS a suspended scope-bound template, removed
+the nonexistent LLM Gateway metrics endpoint, and required explicit HTTPS OIDC
+issuer/proxy CIDRs. The host-side OpenSearch password hasher is digest-pinned.
+These are deterministic render/security checks; no unpublished application was
+claimed as live runtime evidence.

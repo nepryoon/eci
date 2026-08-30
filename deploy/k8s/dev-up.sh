@@ -49,7 +49,7 @@ done
 # the supplied security configuration. Generate the bcrypt hash at install
 # time so the repository never contains a default or literal dev password.
 ECI_OPENSEARCH_HASH="$(printf '%s\n' "$ECI_DEV_PASSWORD" | \
-  docker run --rm -i docker.io/opensearchproject/opensearch:3.2.0 /bin/bash -c \
+  docker run --rm -i docker.io/opensearchproject/opensearch@sha256:23297b8d8545e129dd58c254ed08d786dc552410ba772983ad2af31048d2f04b /bin/bash -c \
   'IFS= read -r password; exec /usr/share/opensearch/plugins/opensearch-security/tools/hash.sh -p "$password"' | \
   tail -n 1)"
 test -n "$ECI_OPENSEARCH_HASH"
