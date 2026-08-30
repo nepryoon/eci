@@ -47,10 +47,10 @@ eci_verify_existing_kind_cluster() {
         in_server = 1
         line = substr(line, position)
       }
-      if (match(line, /\"gitVersion\"[[:space:]]*:[[:space:]]*\"[^\"]+\"/)) {
+      if (match(line, /"gitVersion"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
         value = substr(line, RSTART, RLENGTH)
-        sub(/^\"gitVersion\"[[:space:]]*:[[:space:]]*\"/, "", value)
-        sub(/\"$/, "", value)
+        sub(/^"gitVersion"[[:space:]]*:[[:space:]]*"/, "", value)
+        sub(/"$/, "", value)
         print value
         exit
       }
