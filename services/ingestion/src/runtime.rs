@@ -349,7 +349,7 @@ pub async fn run() -> Result<(), RuntimeError> {
                     Err(_) => {
                         health.set_dependency("kafka", false);
                         tokio::select! {
-                            _ = tokio::time::sleep(backoff) => {},
+                            _ = tokio::time::sleep(jittered_backoff(backoff)) => {},
                             _ = shutdown_rx.changed() => break 'consume,
                         }
                         backoff = (backoff * 2).min(Duration::from_secs(30));
@@ -465,8 +465,14 @@ pub async fn run() -> Result<(), RuntimeError> {
                 .with_label_values(&["retry"])
                 .observe(started.elapsed().as_secs_f64());
             if matches!(
-                poll_during_backoff(&consumer, backoff, &mut shutdown_rx, &mut buffered, &health,)
-                    .await,
+                poll_during_backoff(
+                    &consumer,
+                    jittered_backoff(backoff),
+                    &mut shutdown_rx,
+                    &mut buffered,
+                    &health,
+                )
+                .await,
                 BackoffOutcome::Shutdown
             ) {
                 health.metrics.inflight.set(0);
@@ -546,6 +552,12 @@ fn retain_owned_records(consumer: &IngestionConsumer, buffered: &mut VecDeque<Bu
 
 fn retry_buffer_has_capacity(buffered_records: usize) -> bool {
     buffered_records < MAX_RETRY_BUFFERED_MESSAGES
+}
+
+fn jittered_backoff(cap: Duration) -> Duration {
+    let cap_ms = u64::try_from(cap.as_millis()).unwrap_or(u64::MAX);
+    let floor_ms = cap_ms / 2;
+    Duration::from_millis(fastrand::u64(floor_ms..=cap_ms))
 }
 
 fn resume_if_buffer_empty(
@@ -1186,6 +1198,17 @@ mod tests {
         assert!(retry_buffer_has_capacity(MAX_RETRY_BUFFERED_MESSAGES - 1));
         assert!(!retry_buffer_has_capacity(MAX_RETRY_BUFFERED_MESSAGES));
         assert!(!retry_buffer_has_capacity(MAX_RETRY_BUFFERED_MESSAGES + 1));
+    }
+
+    #[test]
+    fn dependency_backoff_uses_bounded_equal_jitter() {
+        for cap in [Duration::from_millis(250), Duration::from_secs(30)] {
+            for _ in 0..128 {
+                let delay = jittered_backoff(cap);
+                assert!(delay >= cap / 2);
+                assert!(delay <= cap);
+            }
+        }
     }
 
     #[test]

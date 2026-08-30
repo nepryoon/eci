@@ -116,6 +116,7 @@ class PlatformChartTests(unittest.TestCase):
         self.assertEqual(container["envFrom"], [{"configMapRef": {"name": "eci-runtime-routing"}}])
         self.assertEqual(container["ports"], [{"name": "service", "containerPort": 9100}])
         self.assertEqual(container["readinessProbe"]["httpGet"], {"path": "/ready", "port": "service", "scheme": "HTTP"})
+        self.assertEqual(container["startupProbe"]["httpGet"], {"path": "/live", "port": "service", "scheme": "HTTP"})
         self.assertEqual(container["livenessProbe"]["httpGet"], {"path": "/live", "port": "service", "scheme": "HTTP"})
         self.assertEqual(ingestion["metadata"]["annotations"], {"eci.io/max-replicas": "40"})
         self.assertEqual(

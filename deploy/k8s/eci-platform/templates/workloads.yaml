@@ -126,7 +126,9 @@ spec:
             timeoutSeconds: 2
             failureThreshold: 6
           startupProbe:
-            {{- if or (eq $workload.name "semantic-cache") (eq $workload.name "retrieval-engine") (eq $workload.name "llm-gateway") }}
+            {{- if eq $workload.name "ingestion" }}
+            httpGet: {path: /live, port: service, scheme: HTTP}
+            {{- else if or (eq $workload.name "semantic-cache") (eq $workload.name "retrieval-engine") (eq $workload.name "llm-gateway") }}
             httpGet: {path: /ready, port: {{ ternary "service" "metrics" (eq $workload.name "llm-gateway") }}, scheme: HTTP}
             {{- else if eq $workload.namespace "ingestion-plane" }}
             httpGet: {path: /ready, port: service, scheme: HTTP}

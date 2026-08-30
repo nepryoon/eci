@@ -1630,6 +1630,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "eci-common",
+ "fastrand",
  "minio",
  "native-tls",
  "opentelemetry",

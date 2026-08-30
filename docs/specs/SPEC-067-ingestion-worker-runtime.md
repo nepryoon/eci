@@ -241,7 +241,8 @@ separato emerso dall'audit di completezza.
       zero nuovi effetti e conflitto produce zero write; receipt gia' durevoli
       sono classificati prima di qualunque object fetch.
 - [x] Offset originale solo dopo DB commit o DLQ publish confermata; fault
-      transienti conservano backlog e readiness 503; rebalance invalida i
+      transienti conservano backlog e readiness 503; i retry applicano equal
+      jitter bounded per evitare burst sincronizzati; rebalance invalida i
       record revocati prima di una nuova elaborazione e del commit offset,
       incluso il confine successivo alla publish DLQ.
 - [x] Provenance soddisfa `repo/commit_sha/path/ingested_at` senza alterare i
@@ -285,3 +286,6 @@ un record prefetched e' riavvolto prima di continuare. La readiness PostgreSQL
 interroga deterministicamente tabelle e privilegi effettivamente richiesti;
 un test PostgreSQL 17 con ruolo least-privilege verifica il pass e il fail dopo
 revoca di `SELECT` sulla receipt.
+Lo startup probe usa `/live`, separato dal dependency gate `/ready`, così un
+outage iniziale prolungato non genera restart loop; il backoff esponenziale usa
+equal jitter tra meta' e intero cap per desincronizzare le repliche.
