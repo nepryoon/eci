@@ -16,6 +16,7 @@ debezium-connector=RUNNING (1/1 tasks; dedicated eci_cdc identity)
 neo4j.data-plane.svc:7687=PASS
 qdrant.data-plane.svc:6333=PASS
 qdrant.data-plane.svc:6334=PASS
+qdrant-untrusted-data-plane-pod=DENIED (PASS; unauthenticated API ingress is component-scoped)
 eci-opensearch.data-plane.svc:9200=PASS
 redis.data-plane.svc:6379=PASS
 minio.data-plane.svc:9000=PASS

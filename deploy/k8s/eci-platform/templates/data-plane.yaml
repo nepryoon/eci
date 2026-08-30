@@ -132,6 +132,7 @@ spec:
   general:
     serviceName: eci-opensearch
     version: {{ .Values.dataPlane.openSearch.version | quote }}
+    image: {{ include "eci.digestImage" (dict "field" "dataPlane.openSearch.image" "value" .Values.dataPlane.openSearch.image) | quote }}
     httpPort: 9200
     vendor: opensearch
     podSecurityContext:

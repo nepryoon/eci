@@ -223,6 +223,7 @@ dataPlane:
   openSearch:
     replicas: 3
     version: "3.2.0"
+    image: docker.io/opensearchproject/opensearch@sha256:23297b8d8545e129dd58c254ed08d786dc552410ba772983ad2af31048d2f04b
     storage: 30Gi
     adminCredentialsSecret: eci-opensearch-admin
     securityConfigSecret: eci-opensearch-security-config

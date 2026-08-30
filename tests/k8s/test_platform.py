@@ -159,6 +159,10 @@ class PlatformChartTests(unittest.TestCase):
             }],
         )
         self.assertEqual(opensearch["apiVersion"], "opensearch.opster.io/v1")
+        self.assertEqual(
+            opensearch["spec"]["general"]["image"],
+            "docker.io/opensearchproject/opensearch@sha256:23297b8d8545e129dd58c254ed08d786dc552410ba772983ad2af31048d2f04b",
+        )
         self.assertEqual(opensearch["spec"]["nodePools"][0]["replicas"], 3)
         self.assertEqual(
             opensearch["spec"]["security"]["config"],
@@ -365,7 +369,7 @@ class PlatformChartTests(unittest.TestCase):
         data_internal = self.by_key[("NetworkPolicy", "data-plane", "allow-data-plane-internal")]
         self.assertEqual(
             data_internal["spec"]["podSelector"]["matchExpressions"],
-            [{"key": "app.kubernetes.io/name", "operator": "NotIn", "values": ["kafka-connect"]}],
+            [{"key": "app.kubernetes.io/name", "operator": "NotIn", "values": ["kafka-connect", "qdrant"]}],
         )
         self.assertEqual(data_internal["spec"]["ingress"][0]["from"], [{"podSelector": {}}])
         self.assertEqual(data_internal["spec"]["egress"][0]["to"], [{"podSelector": {}}])
@@ -374,8 +378,21 @@ class PlatformChartTests(unittest.TestCase):
         for name in {
             "allow-kafka-connect-to-kafka", "allow-kafka-connect-to-kafka-ingress",
             "allow-kafka-connect-to-postgres", "allow-kafka-connect-to-postgres-ingress",
+            "allow-qdrant-peer", "allow-qdrant-bootstrap", "allow-qdrant-bootstrap-ingress",
         }:
             self.assertIn(("data-plane", name), policies)
+        qdrant_peer = self.by_key[("NetworkPolicy", "data-plane", "allow-qdrant-peer")]
+        self.assertEqual(
+            qdrant_peer["spec"]["podSelector"]["matchLabels"],
+            {"app.kubernetes.io/name": "qdrant"},
+        )
+        self.assertEqual(
+            qdrant_peer["spec"]["ingress"],
+            [{
+                "from": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "qdrant"}}}],
+                "ports": [{"protocol": "TCP", "port": 6335}],
+            }],
+        )
         dev_policies = {
             (obj["metadata"]["namespace"], obj["metadata"]["name"])
             for obj in self.dev

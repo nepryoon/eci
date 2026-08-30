@@ -42,6 +42,10 @@ Results:
   runtime digest: PASS;
 - OpenSearch operator manager and kube-rbac-proxy live pod spec/imageID match
   their registry-resolved multi-architecture digests: PASS;
+- OpenSearch data-node image is pinned in the CR and its recreated live pod
+  spec/imageID matches that digest: PASS;
+- Qdrant peer/bootstrap/client ingress is component- and port-scoped; a pinned
+  unrelated data-plane probe could not reach its unauthenticated API: PASS;
 - registry-resolved SHA-256 pins for every rendered third-party container:
   PASS; no non-existent ECI image is a default;
 - CloudNativePG webhook ingress on the operator-only selector/TCP 9443: PASS;
@@ -51,6 +55,13 @@ Results:
 - immutable Qdrant bootstrap Job upgrade: the first atomic upgrade failed and
   rolled back as designed; the hook lifecycle fix then upgraded successfully
   at revision 6 and the full smoke remained green.
+
+During the final data-node pin verification, deleting the only OpenSearch dev
+pod exposed the expected non-HA single-node quorum boundary. The disposable
+OpenSearch smoke-test PVC alone was removed and recreated through the operator;
+the digest-pinned node then became Ready and the complete connectivity check
+passed. No PostgreSQL, Kafka, MinIO or source artifact was deleted. This is not
+evidence of an HA rollback or disaster-recovery guarantee.
 
 `render-sha256.txt` identifies the exact standard infrastructure and dev Helm renders without
 versioning the bulky generated YAML. Re-rendering with the pinned Helm version
