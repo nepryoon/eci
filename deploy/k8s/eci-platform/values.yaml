@@ -61,6 +61,25 @@ applications:
       profile: io
       runtimeSecret: eci-runtime-semantic-cache
       secretEnv: [{name: REDIS_PASSWORD, key: REDIS_PASSWORD}]
+    - name: ingestion
+      namespace: ingestion-plane
+      port: 9100
+      metricsPort: 9100
+      replicas: 4
+      maxReplicas: 40
+      profile: cpu
+      runtimeSecret: eci-runtime-ingestion
+      fixedEnv:
+        - {name: KAFKA_TOPIC, value: eci.ingestion.file.v1}
+        - {name: KAFKA_GROUP_ID, value: ingestion}
+        - {name: MINIO_ENDPOINT, value: http://minio.data-plane.svc.cluster.local:9000}
+        - {name: MINIO_BUCKET, value: eci-sources}
+        - {name: ECI_INGESTION_MAX_SOURCE_BYTES, value: "16777216"}
+        - {name: ECI_METRICS_ADDRESS, value: "0.0.0.0:9100"}
+      secretEnv:
+        - {name: POSTGRES_DSN, key: POSTGRES_DSN}
+        - {name: MINIO_ACCESS_KEY, key: MINIO_ACCESS_KEY}
+        - {name: MINIO_SECRET_KEY, key: MINIO_SECRET_KEY}
     - name: embedding-worker
       namespace: ingestion-plane
       port: 9102
@@ -187,17 +206,6 @@ resources:
     limits: {cpu: "2", memory: 2Gi}
 
 batch:
-  ingestion:
-    schedule: "0 0 31 2 *"
-    sourcePVC: eci-ingestion-source
-    sourcePath: /input/source
-    runtimeSecret: eci-runtime-ingestion
-    secretEnv:
-      - {name: POSTGRES_DSN, key: POSTGRES_DSN}
-      - {name: ECI_TENANT_ID, key: ECI_TENANT_ID}
-      - {name: ECI_REPOSITORY, key: ECI_REPOSITORY}
-      - {name: ECI_ACL_GROUP, key: ECI_ACL_GROUP}
-    profile: cpu
   gds:
     schedule: "0 2 * * *"
     profile: io
@@ -235,6 +243,7 @@ dataPlane:
     operatorImage: quay.io/strimzi/operator@sha256:77f8fa8121a67561c3418de985783d197f51b8931e9a47f793dc0437dc6bb21f
     storage: 500Gi
     topicPartitions: 12
+    ingestionTopicPartitions: 40
   openSearch:
     replicas: 3
     version: "3.2.0"

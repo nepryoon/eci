@@ -24,11 +24,15 @@ kind: Deployment
 metadata:
   name: {{ $workload.name }}
   namespace: {{ $workload.namespace }}
+  {{- with $workload.maxReplicas }}
+  annotations:
+    eci.io/max-replicas: {{ . | quote }}
+  {{- end }}
   labels:
     {{- include "eci.labels" $ | nindent 4 }}
     app.kubernetes.io/name: {{ $workload.name }}
 spec:
-  replicas: {{ $workload.replicas }}
+  replicas: {{ ternary 1 $workload.replicas (and (eq $.Values.global.profile "dev") (eq $workload.name "ingestion")) }}
   strategy:
     type: RollingUpdate
     rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
@@ -90,8 +94,12 @@ spec:
           envFrom:
             - configMapRef:
                 name: eci-runtime-routing
-          {{- with $workload.secretEnv }}
+          {{- if or $workload.fixedEnv $workload.secretEnv }}
           env:
+            {{- range $fixed := $workload.fixedEnv }}
+            - {name: {{ $fixed.name }}, value: {{ $fixed.value | quote }}}
+            {{- end }}
+          {{- with $workload.secretEnv }}
             {{- range $secret := . }}
             - name: {{ $secret.name }}
               valueFrom:
@@ -104,6 +112,7 @@ spec:
             # certificate of the bundled development issuer.
             - {name: SSL_CERT_DIR, value: "/etc/eci/oidc:/etc/ssl/certs"}
             {{- end }}
+          {{- end }}
           {{- end }}
           readinessProbe:
             {{- if or (eq $workload.name "semantic-cache") (eq $workload.name "retrieval-engine") (eq $workload.name "llm-gateway") }}
@@ -128,7 +137,11 @@ spec:
             timeoutSeconds: 2
             failureThreshold: 180
           livenessProbe:
+            {{- if eq $workload.name "ingestion" }}
+            httpGet: {path: /live, port: service, scheme: HTTP}
+            {{- else }}
             tcpSocket: {port: service}
+            {{- end }}
             periodSeconds: 10
             timeoutSeconds: 2
             failureThreshold: 3

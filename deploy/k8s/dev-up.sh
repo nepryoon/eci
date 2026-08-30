@@ -134,7 +134,7 @@ fi
 # Strimzi owns client private keys in data-plane. The dev bootstrap copies only
 # each workload's own public CA/certificate/private key into ingestion-plane;
 # it never copies a CA private key or shares one client identity across apps.
-for workload in embedding-worker sink-graph sink-vector sink-search; do
+for workload in ingestion embedding-worker sink-graph sink-vector sink-search; do
   user="eci-kafka-${workload}"
   "$KUBECTL_BIN" -n data-plane wait --for=condition=Ready "kafkauser/${user}" --timeout=5m
   identity_dir="$ECI_DEV_TMP_DIR/$user"

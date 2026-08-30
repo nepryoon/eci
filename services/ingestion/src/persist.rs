@@ -50,9 +50,15 @@ impl IngestionScope {
         Ok(value)
     }
 
-    pub fn tenant_id(&self) -> &str { &self.tenant_id }
-    pub fn repo(&self) -> &str { &self.repo }
-    pub fn acl_group(&self) -> &str { &self.acl_group }
+    pub fn tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+    pub fn repo(&self) -> &str {
+        &self.repo
+    }
+    pub fn acl_group(&self) -> &str {
+        &self.acl_group
+    }
 }
 
 fn valid_scope_value(value: &str) -> bool {
@@ -92,24 +98,60 @@ pub struct PersistSummary {
 /// §4 — fail-fast, nessun retry automatico, nessuna categorizzazione
 /// ulteriore in questa SPEC).
 #[derive(Debug)]
-pub struct PersistError(postgres::Error);
+enum PersistErrorKind {
+    Database(postgres::Error),
+    CommandIdConflict,
+    InvalidCommandData,
+}
+
+#[derive(Debug)]
+pub struct PersistError(PersistErrorKind);
+
+impl PersistError {
+    pub fn is_command_id_conflict(&self) -> bool {
+        matches!(self.0, PersistErrorKind::CommandIdConflict)
+    }
+}
 
 impl std::fmt::Display for PersistError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "persist_parsed_file: {}", self.0)
+        match &self.0 {
+            PersistErrorKind::Database(error) => write!(f, "persist_parsed_file: {error}"),
+            PersistErrorKind::CommandIdConflict => {
+                write!(f, "persist_ingestion_command: command id conflict")
+            }
+            PersistErrorKind::InvalidCommandData => {
+                write!(f, "persist_ingestion_command: invalid command data")
+            }
+        }
     }
 }
 
 impl std::error::Error for PersistError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.0)
+        match &self.0 {
+            PersistErrorKind::Database(error) => Some(error),
+            PersistErrorKind::CommandIdConflict | PersistErrorKind::InvalidCommandData => None,
+        }
     }
 }
 
 impl From<postgres::Error> for PersistError {
     fn from(err: postgres::Error) -> Self {
-        PersistError(err)
+        PersistError(PersistErrorKind::Database(err))
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum CommandOutcome {
+    Applied(PersistSummary),
+    Duplicate,
+}
+
+struct CommitProvenance<'a> {
+    commit_sha: &'a str,
+    path: &'a str,
+    ingested_at: &'a str,
 }
 
 /// Persiste `nodes`/`relations` (output di `parse_file`) su PostgreSQL
@@ -136,7 +178,97 @@ pub fn persist_parsed_file(
     let trace_id = eci_common::observability::current_trace_id_hex();
 
     let mut tx = client.transaction()?;
+    let summary = persist_parsed_file_in_transaction(
+        &mut tx, scope, nodes, relations, chunks, &trace_id, None,
+    )?;
+    tx.commit()?;
+    Ok(summary)
+}
 
+/// SPEC-067: receipt and canonical writes share one PostgreSQL transaction.
+/// The advisory transaction lock serializes the same command id so concurrent
+/// redeliveries observe either the completed receipt or a clean first apply.
+pub fn persist_ingestion_command(
+    client: &mut postgres::Client,
+    scope: &crate::worker::AuthenticatedCommitScope,
+    command: &crate::worker::IngestionFileCommand,
+    nodes: Vec<CodeNode>,
+    relations: Vec<CodeRelation>,
+    chunks: &[CodeChunk],
+) -> Result<CommandOutcome, PersistError> {
+    if nodes.iter().any(|node| node.file_path != command.path()) {
+        return Err(PersistError(PersistErrorKind::InvalidCommandData));
+    }
+    let _span = tracing::info_span!("ingestion.command.persist").entered();
+    let trace_id = eci_common::observability::current_trace_id_hex();
+    let fingerprint = crate::worker::command_fingerprint(scope, command);
+    let command_id = command.command_id();
+    let mut tx = client.transaction()?;
+    tx.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        &[&command_id.to_string()],
+    )?;
+    if let Some(row) = tx.query_opt(
+        "SELECT fingerprint FROM ingestion_command_receipt WHERE command_id = $1",
+        &[&command_id],
+    )? {
+        let existing: String = row.get(0);
+        if existing == fingerprint {
+            tx.commit()?;
+            return Ok(CommandOutcome::Duplicate);
+        }
+        return Err(PersistError(PersistErrorKind::CommandIdConflict));
+    }
+
+    let ingested_at: String = tx
+        .query_one(
+            "SELECT to_char(transaction_timestamp() AT TIME ZONE 'UTC',\
+             'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
+            &[],
+        )?
+        .get(0);
+    let canonical_scope = scope.ingestion_scope();
+    let provenance = CommitProvenance {
+        commit_sha: command.commit_sha(),
+        path: command.path(),
+        ingested_at: &ingested_at,
+    };
+    let summary = persist_parsed_file_in_transaction(
+        &mut tx,
+        &canonical_scope,
+        nodes,
+        relations,
+        chunks,
+        &trace_id,
+        Some(&provenance),
+    )?;
+    tx.execute(
+        "INSERT INTO ingestion_command_receipt
+         (command_id, fingerprint, tenant_id, repository, commit_sha, path, source_sha256)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        &[
+            &command_id,
+            &fingerprint,
+            &scope.tenant_id(),
+            &scope.repository(),
+            &command.commit_sha(),
+            &command.path(),
+            &command.source_sha256(),
+        ],
+    )?;
+    tx.commit()?;
+    Ok(CommandOutcome::Applied(summary))
+}
+
+fn persist_parsed_file_in_transaction(
+    tx: &mut postgres::Transaction<'_>,
+    scope: &IngestionScope,
+    nodes: Vec<CodeNode>,
+    relations: Vec<CodeRelation>,
+    chunks: &[CodeChunk],
+    trace_id: &Option<String>,
+    commit: Option<&CommitProvenance<'_>>,
+) -> Result<PersistSummary, PersistError> {
     let mut nodes_upserted = 0usize;
     let mut outbox_rows_written = 0usize;
 
@@ -145,12 +277,7 @@ pub fn persist_parsed_file(
         // Le etichette sono parte della provenance transazionale e provengono
         // soltanto dall'ingestion context validato (ADR-0010). Non sono mai
         // ricavate dal path, dal payload o da un consumer downstream.
-        let provenance = serde_json::json!({
-            "path": node.file_path,
-            "tenant_id": scope.tenant_id(),
-            "repo": scope.repo(),
-            "acl_group": scope.acl_group(),
-        });
+        let provenance = provenance_json(scope, &node.file_path, commit);
 
         tx.execute(
             "INSERT INTO code_node (id, domain, node_type, name, ast_hash, provenance)
@@ -226,11 +353,7 @@ pub fn persist_parsed_file(
                 &from_id,
                 &to_id,
                 &weight,
-                &serde_json::json!({
-                    "tenant_id": scope.tenant_id(),
-                    "repo": scope.repo(),
-                    "acl_group": scope.acl_group(),
-                }),
+                &provenance_json(scope, commit.map_or("", |value| value.path), commit),
             ],
         )?;
         let relation_id: String = row.get(0);
@@ -243,11 +366,7 @@ pub fn persist_parsed_file(
             "from_id": from_id,
             "to_id": to_id,
             "weight": relation.weight,
-            "provenance": {
-                "tenant_id": scope.tenant_id(),
-                "repo": scope.repo(),
-                "acl_group": scope.acl_group(),
-            },
+            "provenance": provenance_json(scope, commit.map_or("", |value| value.path), commit),
         });
         tx.execute(
             "INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload, trace_id)
@@ -300,12 +419,7 @@ pub fn persist_parsed_file(
         // resta semplicemente omesso dal payload — mai un panic, mai un
         // valore fabbricato.
         if let Some(file_path) = file_path_by_node_id.get(&entity_id) {
-            payload["provenance"] = serde_json::json!({
-                "path": file_path,
-                "tenant_id": scope.tenant_id(),
-                "repo": scope.repo(),
-                "acl_group": scope.acl_group(),
-            });
+            payload["provenance"] = provenance_json(scope, file_path, commit);
         }
         tx.execute(
             "INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload, trace_id)
@@ -315,11 +429,30 @@ pub fn persist_parsed_file(
         outbox_rows_written += 1;
     }
 
-    tx.commit()?;
-
     Ok(PersistSummary {
         nodes_upserted,
         relations_replaced,
         outbox_rows_written,
     })
+}
+
+fn provenance_json(
+    scope: &IngestionScope,
+    legacy_path: &str,
+    commit: Option<&CommitProvenance<'_>>,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "tenant_id": scope.tenant_id(),
+        "repo": scope.repo(),
+        "acl_group": scope.acl_group(),
+    });
+    if !legacy_path.is_empty() {
+        value["path"] = serde_json::Value::String(legacy_path.to_owned());
+    }
+    if let Some(commit) = commit {
+        value["path"] = serde_json::Value::String(commit.path.to_owned());
+        value["commit_sha"] = serde_json::Value::String(commit.commit_sha.to_owned());
+        value["ingested_at"] = serde_json::Value::String(commit.ingested_at.to_owned());
+    }
+    value
 }

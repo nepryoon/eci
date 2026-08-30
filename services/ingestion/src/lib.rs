@@ -22,8 +22,11 @@ pub mod resolve;
 pub mod hashing;
 pub mod lineage;
 pub mod persist;
+pub mod runtime;
+pub mod worker;
 pub use persist::{
-    persist_parsed_file, scoped_node_id, IngestionScope, PersistError, PersistSummary, ScopeError,
+    persist_ingestion_command, persist_parsed_file, scoped_node_id, CommandOutcome, IngestionScope,
+    PersistError, PersistSummary, ScopeError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

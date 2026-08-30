@@ -30,6 +30,24 @@ spec:
   replicas: {{ min 3 $.Values.dataPlane.kafka.replicas }}
 {{- end }}
 {{- range $topic := list
+  (dict "name" "eci-ingestion-file-v1" "topic" "eci.ingestion.file.v1")
+  (dict "name" "eci-ingestion-file-v1-dlq" "topic" "eci.ingestion.file.v1.DLQ")
+}}
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: {{ $topic.name }}
+  namespace: data-plane
+  labels:
+    strimzi.io/cluster: eci-kafka
+    {{- include "eci.labels" $ | nindent 4 }}
+spec:
+  topicName: {{ $topic.topic | quote }}
+  partitions: {{ $.Values.dataPlane.kafka.ingestionTopicPartitions }}
+  replicas: {{ min 3 $.Values.dataPlane.kafka.replicas }}
+{{- end }}
+{{- range $topic := list
   (dict "name" "eci_connect_configs" "partitions" 1)
   (dict "name" "eci_connect_offsets" "partitions" 25)
   (dict "name" "eci_connect_status" "partitions" 5)
@@ -52,6 +70,12 @@ spec:
 {{- end }}
 
 {{- $users := list
+  (dict "name" "ingestion-commit-producer" "group" ""
+    "readTopics" (list)
+    "writeTopics" (list "eci.ingestion.file.v1"))
+  (dict "name" "ingestion" "group" "ingestion"
+    "readTopics" (list "eci.ingestion.file.v1")
+    "writeTopics" (list "eci.ingestion.file.v1.DLQ"))
   (dict "name" "kafka-connect" "group" "eci-connect"
     "readTopics" (list "eci_connect_configs" "eci_connect_offsets" "eci_connect_status")
     "writeTopics" (concat (list "eci_connect_configs" "eci_connect_offsets" "eci_connect_status") (slice $applicationTopics 0 4))
@@ -94,9 +118,11 @@ spec:
         operations: [Describe, Write]
         host: "*"
       {{- end }}
+      {{- if $user.group }}
       - resource: {type: group, name: {{ $user.group | quote }}, patternType: literal}
         operations: [Read]
         host: "*"
+      {{- end }}
       {{- if $user.clusterDescribe }}
       - resource: {type: cluster}
         operations: [Describe]

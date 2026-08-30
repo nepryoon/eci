@@ -1,55 +1,47 @@
-//! Entrypoint di `services/ingestion`: parsa un file Go passato come
-//! argomento (o il fixture di SPEC-009 di default), poi persiste il
-//! risultato su PostgreSQL dentro un'unica transazione ACID (SPEC-014,
-//! T1.2 — `persist_parsed_file`). Inizializza l'OTel bootstrap di
-//! `eci-common` (SPEC-010) prima del parsing, così lo span aperto da
-//! `parse_file` E quello aperto da `persist_parsed_file` vengono
-//! esportati su stdout, e le righe `outbox` prodotte condividono il
-//! `trace_id` di questa esecuzione (SPEC-014 §8).
-//!
-//! DSN letto da `POSTGRES_DSN` via `eci_common::config::env_or_default`
-//! (SPEC-014 §2 — "stesso pattern già stabilito"), stesso default già
-//! usato da `task db:migrate` in `Taskfile.yml` per lo stack compose
-//! locale.
+//! Entrypoint SPEC-067. Default is the authenticated long-running worker. The
+//! historical one-shot path remains an explicit local diagnostic subcommand.
 
-fn main() {
-    let _guard = eci_common::observability::init_tracing("ingestion");
-
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "../../tests/fixtures/sample-repo/order_service.go".to_string());
+fn run_oneshot(path: String) {
     let source = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("lettura di {path}: {e}"));
-
+        .unwrap_or_else(|error| panic!("source read failed: {error}"));
     let (nodes, relations, chunks) = ingestion::parse_file_full(&path, &source);
-    println!(
-        "parse_file_full({path:?}): {} CodeNode, {} CodeRelation, {} CodeChunk",
-        nodes.len(),
-        relations.len(),
-        chunks.len()
-    );
-
-    let dsn = eci_common::config::env_or_default(
-        "POSTGRES_DSN",
-        "postgres://eci:eci-dev-only@localhost:5432/eci?sslmode=disable",
-    );
+    let dsn = std::env::var("POSTGRES_DSN")
+        .unwrap_or_else(|_| panic!("POSTGRES_DSN is required and has no security default"));
     let mut client = postgres::Client::connect(&dsn, postgres::NoTls)
-        .unwrap_or_else(|e| panic!("connessione a Postgres ({dsn}): {e}"));
-
-    let required_env = |name: &str| {
-        std::env::var(name).unwrap_or_else(|_| panic!("{name} is required and has no security default"))
+        .unwrap_or_else(|error| panic!("PostgreSQL connection failed: {error}"));
+    let required = |name: &str| {
+        std::env::var(name)
+            .unwrap_or_else(|_| panic!("{name} is required and has no security default"))
     };
     let scope = ingestion::IngestionScope::new(
-        required_env("ECI_TENANT_ID"),
-        required_env("ECI_REPOSITORY"),
-        required_env("ECI_ACL_GROUP"),
+        required("ECI_TENANT_ID"),
+        required("ECI_REPOSITORY"),
+        required("ECI_ACL_GROUP"),
     )
-    .unwrap_or_else(|e| panic!("invalid ingestion scope: {e}"));
+    .expect("invalid ingestion scope");
+    ingestion::persist_parsed_file(&mut client, &scope, nodes, relations, &chunks)
+        .expect("one-shot persistence failed");
+}
 
-    let summary = ingestion::persist_parsed_file(&mut client, &scope, nodes, relations, &chunks)
-        .unwrap_or_else(|e| panic!("persist_parsed_file({path:?}): {e}"));
-    println!(
-        "persist_parsed_file({path:?}): {} nodi upsert, {} relazioni sostituite, {} righe outbox",
-        summary.nodes_upserted, summary.relations_replaced, summary.outbox_rows_written
-    );
+#[tokio::main]
+async fn main() {
+    std::panic::set_hook(Box::new(|_| eprintln!("ingestion internal panic")));
+    let _guard = eci_common::observability::init_tracing("ingestion");
+    let mut args = std::env::args().skip(1);
+    match args.next() {
+        Some(mode) if mode == "oneshot" => {
+            let path = args.next().expect("usage: ingestion oneshot <path>");
+            run_oneshot(path);
+            return;
+        }
+        Some(_) => {
+            eprintln!("ingestion configuration error: unsupported command");
+            std::process::exit(2);
+        }
+        None => {}
+    }
+    if let Err(error) = ingestion::runtime::run().await {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
 }
