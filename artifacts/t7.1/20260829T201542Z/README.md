@@ -26,8 +26,11 @@ Results:
 - in-cluster DNS/TCP connectivity to every required store/service: PASS;
 - Pod Security admission label `restricted` on all six ECI namespaces: PASS;
 - deterministic Helm/policy/kubeconform/unit validation: PASS;
-- five Kafka users and eleven explicit topics Ready; embedding-worker publish
-  to its own DLQ allowed and publish to sink-vector's DLQ denied: PASS;
+- five Kafka users and sixteen explicit topics Ready; embedding-worker publish
+  to its own retry topic allowed and publish to the primary CodeChunk topic
+  denied: PASS;
+- Kafka Connect REST reachable on loopback only, absent as a Service and denied
+  on the pod IP; plugin discovery through administrative exec: PASS;
 - Qdrant live pod spec and imageID match the registry-resolved immutable
   runtime digest: PASS;
 - OpenSearch operator manager and kube-rbac-proxy live pod spec/imageID match
@@ -61,7 +64,7 @@ The later supply-chain/routing review fixes were verified at revision 6. The
 final least-privilege/supply-chain review fixes were then applied at ECI
 revision 8 after all five operator chart archives passed their checked-in
 SHA-256 gates and upgraded the real cluster releases to revision 6. The
-catalog of 182 application objects was exercised only with an explicit
+catalog of 190 application objects was exercised only with an explicit
 `registry.example.invalid` unit fixture; this proves template completeness and
 digest enforcement, not image publication or application readiness. Released
 applications remain opt-in and require real registry digests plus external
@@ -89,3 +92,9 @@ the nonexistent LLM Gateway metrics endpoint, and required explicit HTTPS OIDC
 issuer/proxy CIDRs. The host-side OpenSearch password hasher is digest-pinned.
 These are deterministic render/security checks; no unpublished application was
 claimed as live runtime evidence.
+ADR-0019 then removed the remaining Kafka confused-deputy paths. Consumer
+retries use five explicit per-consumer topics and consumers have no primary
+Write ACL. ECI release revision 14 binds Kafka Connect REST to loopback, exposes no Service
+and is excluded from the namespace-wide data policy; real allowed/denied
+broker publishes and loopback/pod-IP REST probes passed. Vendor release
+revision 11 remained Ready after the final upgrade.

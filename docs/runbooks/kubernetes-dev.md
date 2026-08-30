@@ -184,9 +184,9 @@ task k8s:dev:verify
 
 Verification waits with bounded timeouts and runs DNS/TCP probes from inside
 the cluster. It also verifies `wal_level=logical`, waits for every Kafka topic
-and mTLS user, proves an allowed DLQ publish and a denied cross-workload DLQ
-publish with the embedding-worker identity, and loads the Kafka Connect
-plugin inventory to prove the PostgreSQL Debezium connector is available. On
+and mTLS user, proves an allowed consumer-scoped retry publish and a denied
+primary-event forgery with the embedding-worker identity, and loads the Kafka
+Connect plugin inventory through its loopback-only REST listener. On
 failure it prints pod state and the latest events. Inspect a
 component with `kubectl -n <namespace> describe ...` and `kubectl logs` before
 retrying; never disable OpenSearch security or operator readiness to make the
@@ -212,12 +212,27 @@ narrow the CIDR when their control-plane source ranges are known.
 Kafka Connect authenticates with `eci-kafka-kafka-connect`; its PKCS#12
 password is read only from the Strimzi-generated Secret. Its ACLs cover the
 exact three Connect internal topics, `eci-connect` group and four outbox
-output topics—never a wildcard. Kafka Connect is Ready before application migrations by design, but the
+output topics—never a wildcard. Consumer identities can write only their own
+retry/DLQ topics, never the primary outbox topics. Kafka Connect REST binds
+only `127.0.0.1:8083`, has no Kubernetes Service and is excluded from the
+general data-plane policy; only its Kafka and PostgreSQL data paths are
+allowed. Kafka Connect is Ready before application migrations by design, but the
 `eci-outbox-connector` is not registered automatically against an empty
 database. After the checked-in SQL migrations have created `public.outbox`, a
 platform deployment step must submit the config-only JSON stored in ConfigMap
 `eci-debezium-connector` to
-`PUT /connectors/eci-outbox-connector/config`. The worker resolves
+`PUT /connectors/eci-outbox-connector/config` through an administrator-authorized
+exec session:
+
+```bash
+kubectl -n data-plane get configmap eci-debezium-connector \
+  -o jsonpath='{.data.connector\.json}' | \
+kubectl -n data-plane exec -i deployment/kafka-connect -c kafka-connect -- \
+  curl -fsS -X PUT -H 'content-type: application/json' --data-binary @- \
+  http://127.0.0.1:8083/connectors/eci-outbox-connector/config
+```
+
+The worker resolves
 `${env:POSTGRES_PASSWORD}` from `eci-runtime`; the ConfigMap and deployment
 logs never contain the password. Registration must fail if the table or
 connector plugin is absent, and readiness of the worker alone must not be

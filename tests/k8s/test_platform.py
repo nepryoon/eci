@@ -170,6 +170,13 @@ class PlatformChartTests(unittest.TestCase):
         self.assertEqual(connect_container["securityContext"]["readOnlyRootFilesystem"], True)
         self.assertEqual(env["BOOTSTRAP_SERVERS"]["value"], "eci-kafka-kafka-bootstrap.data-plane.svc:9093")
         self.assertEqual(env["CONNECT_SSL_KEYSTORE_TYPE"]["value"], "PKCS12")
+        self.assertEqual(env["REST_HOST_NAME"]["value"], "127.0.0.1")
+        self.assertEqual(env["CONNECT_LISTENERS"]["value"], "http://127.0.0.1:8083")
+        self.assertNotIn(("Service", "data-plane", "kafka-connect"), self.by_key)
+        for probe_name in ("startupProbe", "readinessProbe", "livenessProbe"):
+            probe = connect_container[probe_name]
+            self.assertNotIn("httpGet", probe)
+            self.assertIn("http://127.0.0.1:8083/connectors", probe["exec"]["command"][-1])
         self.assertEqual(env["CONNECT_SSL_KEYSTORE_LOCATION"]["value"], "/etc/kafka-user/user.p12")
         self.assertEqual(
             env["CONNECT_SSL_KEYSTORE_PASSWORD"]["valueFrom"]["secretKeyRef"],
@@ -182,7 +189,9 @@ class PlatformChartTests(unittest.TestCase):
             "outbox.event.CodeEmbedding", "outbox.event.CodeNode.DLQ",
             "outbox.event.CodeRelation.DLQ", "outbox.event.CodeChunk.DLQ",
             "outbox.event.CodeEmbedding.DLQ", "eci_connect_configs", "eci_connect_offsets",
-            "eci_connect_status",
+            "eci_connect_status", "outbox.event.CodeChunk.retry.embedding-worker",
+            "outbox.event.CodeNode.retry.sink-graph", "outbox.event.CodeRelation.retry.sink-graph",
+            "outbox.event.CodeEmbedding.retry.sink-vector", "outbox.event.CodeChunk.retry.sink-search",
         }
         self.assertEqual(set(topics), expected_topics)
         self.assertTrue(all(topic["spec"]["replicas"] == 3 for topic in topics.values()))
@@ -213,7 +222,27 @@ class PlatformChartTests(unittest.TestCase):
             for acl in users["eci-kafka-sink-graph"]["spec"]["authorization"]["acls"]
         }
         self.assertIn(("group", "sink-graph"), graph_resources)
+        for user_name, forbidden_primary, expected_retry in {
+            ("eci-kafka-embedding-worker", "outbox.event.CodeChunk", "outbox.event.CodeChunk.retry.embedding-worker"),
+            ("eci-kafka-sink-search", "outbox.event.CodeChunk", "outbox.event.CodeChunk.retry.sink-search"),
+            ("eci-kafka-sink-vector", "outbox.event.CodeEmbedding", "outbox.event.CodeEmbedding.retry.sink-vector"),
+        }:
+            write_topics = {
+                acl["resource"]["name"]
+                for acl in users[user_name]["spec"]["authorization"]["acls"]
+                if acl["resource"]["type"] == "topic" and "Write" in acl["operations"]
+            }
+            self.assertNotIn(forbidden_primary, write_topics)
+            self.assertIn(expected_retry, write_topics)
         self.assertNotIn(("topic", "outbox.event.CodeChunk"), graph_resources)
+        for primary in ("outbox.event.CodeNode", "outbox.event.CodeRelation"):
+            graph_write_topics = {
+                acl["resource"]["name"]
+                for acl in users["eci-kafka-sink-graph"]["spec"]["authorization"]["acls"]
+                if acl["resource"]["type"] == "topic" and "Write" in acl["operations"]
+            }
+            self.assertNotIn(primary, graph_write_topics)
+            self.assertIn(f"{primary}.retry.sink-graph", graph_write_topics)
 
         qdrant_values = yaml.safe_load((ROOT / "deploy/k8s/vendor-values/qdrant.yaml").read_text())
         self.assertEqual(qdrant_values["replicaCount"], 3)
@@ -318,9 +347,19 @@ class PlatformChartTests(unittest.TestCase):
             )
 
         data_internal = self.by_key[("NetworkPolicy", "data-plane", "allow-data-plane-internal")]
+        self.assertEqual(
+            data_internal["spec"]["podSelector"]["matchExpressions"],
+            [{"key": "app.kubernetes.io/name", "operator": "NotIn", "values": ["kafka-connect"]}],
+        )
         self.assertEqual(data_internal["spec"]["ingress"][0]["from"], [{"podSelector": {}}])
         self.assertEqual(data_internal["spec"]["egress"][0]["to"], [{"podSelector": {}}])
         self.assertNotIn(("observability", "allow-observability-probes"), policies)
+        self.assertNotIn(("Service", "data-plane", "kafka-connect"), self.by_key)
+        for name in {
+            "allow-kafka-connect-to-kafka", "allow-kafka-connect-to-kafka-ingress",
+            "allow-kafka-connect-to-postgres", "allow-kafka-connect-to-postgres-ingress",
+        }:
+            self.assertIn(("data-plane", name), policies)
         dev_policies = {
             (obj["metadata"]["namespace"], obj["metadata"]["name"])
             for obj in self.dev

@@ -8,6 +8,11 @@
   "outbox.event.CodeRelation.DLQ"
   "outbox.event.CodeChunk.DLQ"
   "outbox.event.CodeEmbedding.DLQ"
+  "outbox.event.CodeChunk.retry.embedding-worker"
+  "outbox.event.CodeNode.retry.sink-graph"
+  "outbox.event.CodeRelation.retry.sink-graph"
+  "outbox.event.CodeEmbedding.retry.sink-vector"
+  "outbox.event.CodeChunk.retry.sink-search"
 }}
 {{- range $topic := $applicationTopics }}
 ---
@@ -52,17 +57,17 @@ spec:
     "writeTopics" (concat (list "eci_connect_configs" "eci_connect_offsets" "eci_connect_status") (slice $applicationTopics 0 4))
     "clusterDescribe" true)
   (dict "name" "embedding-worker" "group" "embedding-worker"
-    "readTopics" (list "outbox.event.CodeChunk")
-    "writeTopics" (list "outbox.event.CodeChunk" "outbox.event.CodeChunk.DLQ"))
+    "readTopics" (list "outbox.event.CodeChunk" "outbox.event.CodeChunk.retry.embedding-worker")
+    "writeTopics" (list "outbox.event.CodeChunk.retry.embedding-worker" "outbox.event.CodeChunk.DLQ"))
   (dict "name" "sink-graph" "group" "sink-graph"
-    "readTopics" (list "outbox.event.CodeNode" "outbox.event.CodeRelation")
-    "writeTopics" (list "outbox.event.CodeNode" "outbox.event.CodeRelation" "outbox.event.CodeNode.DLQ" "outbox.event.CodeRelation.DLQ"))
+    "readTopics" (list "outbox.event.CodeNode" "outbox.event.CodeRelation" "outbox.event.CodeNode.retry.sink-graph" "outbox.event.CodeRelation.retry.sink-graph")
+    "writeTopics" (list "outbox.event.CodeNode.retry.sink-graph" "outbox.event.CodeRelation.retry.sink-graph" "outbox.event.CodeNode.DLQ" "outbox.event.CodeRelation.DLQ"))
   (dict "name" "sink-vector" "group" "sink-vector"
-    "readTopics" (list "outbox.event.CodeEmbedding")
-    "writeTopics" (list "outbox.event.CodeEmbedding" "outbox.event.CodeEmbedding.DLQ"))
+    "readTopics" (list "outbox.event.CodeEmbedding" "outbox.event.CodeEmbedding.retry.sink-vector")
+    "writeTopics" (list "outbox.event.CodeEmbedding.retry.sink-vector" "outbox.event.CodeEmbedding.DLQ"))
   (dict "name" "sink-search" "group" "sink-search"
-    "readTopics" (list "outbox.event.CodeChunk")
-    "writeTopics" (list "outbox.event.CodeChunk" "outbox.event.CodeChunk.DLQ"))
+    "readTopics" (list "outbox.event.CodeChunk" "outbox.event.CodeChunk.retry.sink-search")
+    "writeTopics" (list "outbox.event.CodeChunk.retry.sink-search" "outbox.event.CodeChunk.DLQ"))
 }}
 {{- range $user := $users }}
 ---

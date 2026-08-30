@@ -89,10 +89,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("sink-search: configurazione Kafka: %v", err)
 	}
+	retryTopicSuffix := ".retry." + consumer.ConsumerName
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     brokers,
 		GroupID:     consumer.ConsumerName,
-		GroupTopics: []string{consumer.TopicCodeChunk},
+		GroupTopics: []string{consumer.TopicCodeChunk, resilience.RetryTopic(consumer.TopicCodeChunk, retryTopicSuffix)},
 		Dialer:      kafkaTransport.Dialer,
 	})
 	defer reader.Close()
@@ -113,7 +114,7 @@ func main() {
 		BatchTimeout:           10 * time.Millisecond,
 	}
 	defer retryProducer.Close()
-	process := resilience.WithRetryAndDLQ(resilience.Config{}, retryProducer, func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (resilience.Outcome, error) {
+	process := resilience.WithRetryAndDLQ(resilience.Config{RetryTopicSuffix: retryTopicSuffix}, retryProducer, func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (resilience.Outcome, error) {
 		_, err := consumer.ProcessMessage(ctx, deps, topic, value, headers)
 		return resilience.OutcomeProcessed, err
 	})

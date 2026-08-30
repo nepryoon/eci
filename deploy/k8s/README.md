@@ -81,11 +81,18 @@ the checked-in bootstrap on port 8080. The runbook contains the exact creation
 commands; the chart never synthesizes a certificate or a descriptor.
 
 Kafka Connect runs the pinned Debezium image with its own Strimzi mTLS
-identity and literal ACLs. The connector
+identity and literal ACLs. Its credential-bearing REST listener is bound to
+loopback and has no Service; post-migration registration uses an
+administrator-authorized `kubectl exec` as documented in the runbook. The connector
 configuration is stored separately in `eci-debezium-connector`, uses the
 Kafka environment config provider for the PostgreSQL password, and is not
 submitted before the `public.outbox` migration exists. See the runbook for the
 post-migration registration boundary.
+
+Each Kafka consumer retries on `{primary}.retry.{consumer}`. Consumers can
+read the primary and their own retry topic, but cannot write any primary topic;
+Kafka Connect remains the sole primary-event producer. DLQ names remain
+`{primary}.DLQ`. ADR-0019 records the compatibility and rollout boundary.
 
 The OPA ConfigMap is checked byte-for-byte against the canonical Compose Rego
 policy. MinIO uses a four-member distributed StatefulSet with PVCs in the

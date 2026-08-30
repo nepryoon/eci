@@ -44,3 +44,16 @@ func TestRetryCountNegativeValueIsZero(t *testing.T) {
 		t.Fatalf("RetryCount con valore negativo = %d, want 0", got)
 	}
 }
+
+func TestRetryTopicIsConsumerScopedAndOriginalTopicIsStable(t *testing.T) {
+	const suffix = ".retry.embedding-worker"
+	if got := resilience.RetryTopic("outbox.event.CodeChunk", suffix); got != "outbox.event.CodeChunk.retry.embedding-worker" {
+		t.Fatalf("RetryTopic = %q", got)
+	}
+	if got := resilience.OriginalTopic("outbox.event.CodeChunk.retry.embedding-worker", suffix); got != "outbox.event.CodeChunk" {
+		t.Fatalf("OriginalTopic(retry) = %q", got)
+	}
+	if got := resilience.OriginalTopic("outbox.event.CodeChunk", suffix); got != "outbox.event.CodeChunk" {
+		t.Fatalf("OriginalTopic(primary) = %q", got)
+	}
+}

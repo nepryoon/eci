@@ -18,6 +18,15 @@ for user in kafka-connect embedding-worker sink-graph sink-vector sink-search; d
 done
 "$KUBECTL_BIN" -n data-plane wait --for=condition=Ready kafkatopic --all --timeout=5m
 "$KUBECTL_BIN" -n data-plane wait --for=condition=Available deployment/kafka-connect --timeout=10m
+"$KUBECTL_BIN" -n data-plane exec deployment/kafka-connect -c kafka-connect -- \
+  curl -fsS http://127.0.0.1:8083/connector-plugins | \
+  grep -q 'io.debezium.connector.postgresql.PostgresConnector'
+connect_pod="$($KUBECTL_BIN -n data-plane get pod -l app.kubernetes.io/name=kafka-connect -o jsonpath='{.items[0].metadata.name}')"
+connect_pod_ip="$($KUBECTL_BIN -n data-plane get pod "$connect_pod" -o jsonpath='{.status.podIP}')"
+test -n "$connect_pod_ip"
+"$KUBECTL_BIN" -n data-plane exec "$connect_pod" -c kafka-connect -- \
+  /bin/bash -ec 'if curl -fsS --connect-timeout 2 "http://${1}:8083/connectors" >/dev/null 2>&1; then echo "Kafka Connect REST listens on pod IP" >&2; exit 1; fi' _ "$connect_pod_ip"
+echo 'Debezium PostgreSQL connector plugin through loopback-only REST: PASS'
 "$KUBECTL_BIN" -n data-plane wait --for=condition=Available deployment/redis --timeout=10m
 "$KUBECTL_BIN" -n data-plane rollout status statefulset/minio --timeout=10m
 "$KUBECTL_BIN" -n query-plane wait --for=condition=Available deployment/opa --timeout=10m
@@ -59,7 +68,6 @@ spec:
           for endpoint in \
             eci-postgres-rw.data-plane.svc:5432 \
             eci-kafka-kafka-bootstrap.data-plane.svc:9093 \
-            kafka-connect.data-plane.svc:8083 \
             neo4j.data-plane.svc:7687 \
             qdrant.data-plane.svc:6333 \
             qdrant.data-plane.svc:6334 \
@@ -70,9 +78,6 @@ spec:
             keycloak.ingress.svc:8080; do
             host=${endpoint%:*}; port=${endpoint##*:}; nc -zvw5 "$host" "$port"
           done
-          curl -fsS http://kafka-connect.data-plane.svc:8083/connector-plugins | \
-            grep -q 'io.debezium.connector.postgresql.PostgresConnector'
-          echo 'Debezium PostgreSQL connector plugin: PASS'
           curl -fsS -H 'content-type: application/json' \
             --data '{"input":{"action":"/eci.retrieval.v1.RetrievalEngine/GetNode","subject":{"tenant_id":"smoke-tenant","user_id":"smoke-user","allowed_repos":["smoke-repo"],"acl_groups":["smoke-acl"]}}}' \
             http://opa.query-plane.svc:8181/v1/data/eci/authz/decision | grep -q '"allow":true'
@@ -135,22 +140,22 @@ spec:
           PROPERTIES
           bin/kafka-producer-perf-test.sh \
             --bootstrap-server eci-kafka-kafka-bootstrap.data-plane.svc:9093 \
-            --command-config /tmp/client.properties --topic outbox.event.CodeChunk.DLQ \
+            --command-config /tmp/client.properties --topic outbox.event.CodeChunk.retry.embedding-worker \
             --num-records 1 --record-size 22 --throughput -1
           set +e
           bin/kafka-producer-perf-test.sh \
             --bootstrap-server eci-kafka-kafka-bootstrap.data-plane.svc:9093 \
-            --command-config /tmp/client.properties --topic outbox.event.CodeEmbedding.DLQ \
+            --command-config /tmp/client.properties --topic outbox.event.CodeChunk \
             --num-records 1 --record-size 22 --throughput -1 \
             >/tmp/denied.log 2>&1
           set -e
           if ! grep -q 'TopicAuthorizationException' /tmp/denied.log || \
              ! grep -q '^0 records sent' /tmp/denied.log; then
             cat /tmp/denied.log >&2
-            echo 'cross-workload Kafka ACL unexpectedly allowed' >&2
+            echo 'consumer unexpectedly allowed to forge a primary Kafka event' >&2
             exit 1
           fi
-          echo 'Kafka mTLS identity and literal ACL isolation: PASS'
+          echo 'Kafka mTLS retry identity and primary-topic provenance: PASS'
       resources:
         requests: {cpu: 10m, memory: 64Mi}
         limits: {cpu: 500m, memory: 512Mi}

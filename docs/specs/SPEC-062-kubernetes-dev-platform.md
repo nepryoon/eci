@@ -119,7 +119,9 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    Kafka espone soltanto il listener applicativo mTLS 9093 con simple
    authorization deny-by-default. Connect e ogni consumer hanno un
    `KafkaUser` distinto; topic e consumer group sono ACL literal senza
-   wildcard. Ogni consumer monta soltanto la CA pubblica del broker, il proprio `user.crt` e
+   wildcard. Connect è l'unico writer dei topic primari; ogni consumer può
+   scrivere soltanto `{primary}.retry.{consumer}` e `{primary}.DLQ`. La REST
+   Connect è loopback-only e priva di Service. Ogni consumer monta soltanto la CA pubblica del broker, il proprio `user.crt` e
    `user.key`; reader e writer falliscono se trust o identità mancano. Retrieval e
    sink-search richiedono CA HTTP e credenziali OpenSearch, mentre Semantic
    Cache riceve esplicitamente la password del Redis `requirepass`. Nessuna CA
@@ -164,10 +166,11 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    `kube-rbac-proxy`.
 7. **Connettività reale.** Given il cluster dev pronto, When
    `task k8s:dev:verify` gira, Then un probe in-cluster risolve e raggiunge
-   PostgreSQL, Kafka bootstrap, Kafka Connect con plugin PostgreSQL Debezium,
+   PostgreSQL, Kafka bootstrap, Kafka Connect con plugin PostgreSQL Debezium
+   verificato via loopback exec,
    Neo4j Bolt, Qdrant REST/gRPC, OpenSearch HTTPS, MinIO, Redis e OPA; inoltre
    PostgreSQL riporta `wal_level=logical`; inoltre una prova mTLS Kafka
-   pubblica sulla propria DLQ e riceve un deny sulla DLQ sibling. I workload applicativi abilitati
+   pubblica sul proprio retry topic e riceve un deny sul topic primario. I workload applicativi abilitati
    diventano Ready. Un
    componente assente/degradato produce exit non-zero e diagnostica mirata.
 8. **Rollback sicuro.** Given un upgrade applicativo fallito, When Helm supera
@@ -302,7 +305,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       descriptor e TLS esterni sulla porta 8080 reale; NetworkPolicy e pod
       security passano i check fail-closed.
 - [x] Kafka Connect e reader/writer usano identità mTLS distinte e ACL literal
-      per topic/group; OpenSearch usa HTTPS+CA+Basic Auth;
+      per topic/group; Connect è il solo writer primario, retry per-consumer e
+      REST Connect loopback-only sono verificati; OpenSearch usa HTTPS+CA+Basic Auth;
       Redis `requirepass` è propagato esplicitamente, con unit test fail-closed.
 - [x] Secret applicativi e NetworkPolicy sono per-workload/per-destinazione;
       ogni archivio Helm terzo è verificato SHA-256 prima dell'installazione.
@@ -400,3 +404,10 @@ cluster MinIO distribuito a quattro PVC. Non
 emerge una decisione architetturale nuova: l'uso di Helm ufficiale per Neo4j e
 Qdrant è esplicitamente una delle alternative già ammesse dall'ADD; quindi non
 serve ADR.
+
+Il pass security successivo ha individuato due confused-deputy boundary e ha
+prodotto ADR-0019. Le ACL ora rendono Kafka Connect l'unico writer dei topic
+primari e assegnano a ogni consumer un retry topic distinto; la REST Connect è
+loopback-only, senza Service, ed esclusa dalla policy data-plane generale. Il
+dev smoke deve provare sia il retry publish consentito sia il primary publish
+negato e ispezionare il plugin soltanto tramite exec amministrativo.

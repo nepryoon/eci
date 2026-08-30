@@ -47,6 +47,52 @@ func TestWithRetryAndDLQ(t *testing.T) {
 	t.Run("EdgeCase_DLQPublishFailurePropagatesErrorOffsetNotCommitted", func(t *testing.T) {
 		edgeCaseDLQPublishFailurePropagatesError(t, ctx, brokers)
 	})
+	t.Run("Security_ConsumerScopedRetryNormalizesOriginalTopic", func(t *testing.T) {
+		securityConsumerScopedRetryNormalizesOriginalTopic(t, ctx, brokers)
+	})
+}
+
+// ADR-0019 — il retry di produzione non richiede Write sul topic primario:
+// viene pubblicato sul topic per-consumer e normalizzato prima della logica
+// applicativa. Il topic primario non riceve una seconda copia.
+func securityConsumerScopedRetryNormalizesOriginalTopic(t *testing.T, ctx context.Context, brokers []string) {
+	primary := uniqueTopic(t, "scoped-retry")
+	suffix := ".retry.embedding-worker"
+	retryTopic := resilience.RetryTopic(primary, suffix)
+	ensureTopics(t, ctx, brokers, primary, retryTopic)
+	producer := newWriter(brokers)
+	defer producer.Close()
+
+	var innerTopics []string
+	wrapped := resilience.WithRetryAndDLQ(
+		resilience.Config{MaxRetries: 2, BackoffBase: 20 * time.Millisecond, RetryTopicSuffix: suffix},
+		producer,
+		func(_ context.Context, topic string, _ []byte, headers []kafka.Header) (resilience.Outcome, error) {
+			innerTopics = append(innerTopics, topic)
+			if resilience.RetryCount(headers) == 0 {
+				return 0, errors.New("simulated first-attempt failure")
+			}
+			return resilience.OutcomeProcessed, nil
+		},
+	)
+
+	if outcome, err := wrapped(ctx, primary, []byte("payload"), nil); err != nil || outcome != resilience.OutcomeRetried {
+		t.Fatalf("first attempt = (%v, %v), want (OutcomeRetried, nil)", outcome, err)
+	}
+
+	retryReader := newReaderWithGroup(brokers, "scoped-retry-group", retryTopic)
+	defer retryReader.Close()
+	retry := fetchWithTimeout(t, ctx, retryReader)
+	if retry.Topic != retryTopic {
+		t.Fatalf("retry topic = %q, want %q", retry.Topic, retryTopic)
+	}
+	if outcome, err := wrapped(ctx, retry.Topic, retry.Value, retry.Headers); err != nil || outcome != resilience.OutcomeProcessed {
+		t.Fatalf("retry attempt = (%v, %v), want (OutcomeProcessed, nil)", outcome, err)
+	}
+	if len(innerTopics) != 2 || innerTopics[0] != primary || innerTopics[1] != primary {
+		t.Fatalf("inner topics = %v, want [%q %q]", innerTopics, primary, primary)
+	}
+	assertNoMessageArrives(t, ctx, brokers, primary)
 }
 
 // ============================================================
@@ -107,6 +153,8 @@ func scenario1RetrySucceedsEventuallyNoDLQ(t *testing.T, ctx context.Context, br
 
 func scenario2ExhaustedRetriesGoesToDLQWithMaxCount(t *testing.T, ctx context.Context, brokers []string) {
 	topic := uniqueTopic(t, "scenario2")
+	retrySuffix := ".retry.sink-graph"
+	retryTopic := resilience.RetryTopic(topic, retrySuffix)
 	// Il topic DLQ va creato esplicitamente QUI (confluent-local non ha
 	// auto.create.topics.enable=true a livello di broker, stessa
 	// deviazione già nota da SPEC-015 §10 — AllowAutoTopicCreation lato
@@ -118,22 +166,28 @@ func scenario2ExhaustedRetriesGoesToDLQWithMaxCount(t *testing.T, ctx context.Co
 	// DLQ nasce davvero implicitamente al primo publish, come da SPEC-035
 	// §2 — qui nel test lo anticipiamo esplicitamente per lo stesso
 	// motivo per cui lo fanno già tutti i topic "normali" in questo repo).
-	ensureTopics(t, ctx, brokers, topic, topic+".DLQ")
+	ensureTopics(t, ctx, brokers, topic, retryTopic, topic+".DLQ")
 	producer := newWriter(brokers)
 	defer producer.Close()
 
 	produce(t, ctx, producer, topic, "k2", []byte("payload"), nil)
 
-	cfg := resilience.Config{MaxRetries: 2, BackoffBase: 30 * time.Millisecond}
+	cfg := resilience.Config{MaxRetries: 2, BackoffBase: 30 * time.Millisecond, RetryTopicSuffix: retrySuffix}
 	alwaysFails := func(context.Context, string, []byte, []kafka.Header) (resilience.Outcome, error) {
 		return 0, errors.New("simulated permanent failure")
 	}
 	wrapped := resilience.WithRetryAndDLQ(cfg, producer, alwaysFails)
 
-	reader := newReaderWithGroup(brokers, "scenario2-group", topic)
-	defer reader.Close()
+	primaryReader := newReaderWithGroup(brokers, "scenario2-primary-group", topic)
+	defer primaryReader.Close()
+	retryReader := newReaderWithGroup(brokers, "scenario2-retry-group", retryTopic)
+	defer retryReader.Close()
 
 	for i := 0; i < cfg.MaxRetries; i++ {
+		reader := retryReader
+		if i == 0 {
+			reader = primaryReader
+		}
 		msg := fetchWithTimeout(t, ctx, reader)
 		if got := resilience.RetryCount(msg.Headers); got != i {
 			t.Fatalf("retry-count al giro %d = %d, want %d", i, got, i)
@@ -150,7 +204,7 @@ func scenario2ExhaustedRetriesGoesToDLQWithMaxCount(t *testing.T, ctx context.Co
 		}
 	}
 
-	lastMsg := fetchWithTimeout(t, ctx, reader)
+	lastMsg := fetchWithTimeout(t, ctx, retryReader)
 	if got := resilience.RetryCount(lastMsg.Headers); got != cfg.MaxRetries {
 		t.Fatalf("retry-count dell'ultimo tentativo = %d, want %d", got, cfg.MaxRetries)
 	}
@@ -161,7 +215,7 @@ func scenario2ExhaustedRetriesGoesToDLQWithMaxCount(t *testing.T, ctx context.Co
 	if outcome != resilience.OutcomeDeadLettered {
 		t.Fatalf("outcome = %v, want OutcomeDeadLettered", outcome)
 	}
-	if err := reader.CommitMessages(ctx, lastMsg); err != nil {
+	if err := retryReader.CommitMessages(ctx, lastMsg); err != nil {
 		t.Fatalf("commit finale: %v", err)
 	}
 

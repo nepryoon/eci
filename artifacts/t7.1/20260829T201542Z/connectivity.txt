@@ -1,10 +1,12 @@
 eci-postgres-rw.data-plane.svc:5432=PASS
 eci-kafka-kafka-bootstrap.data-plane.svc:9093=PASS (mTLS listener)
 kafka-mtls-client-identity=PASS
-kafka-own-dlq-publish=PASS
-kafka-cross-workload-dlq-publish=DENIED (PASS)
-kafka-connect.data-plane.svc:8083=PASS
-debezium-postgresql-plugin=PASS
+kafka-own-retry-topic-publish=PASS
+kafka-primary-topic-publish=DENIED (PASS; Connect-only provenance)
+kafka-connect-service=ABSENT (PASS)
+kafka-connect-rest-loopback=PASS
+kafka-connect-rest-pod-ip=DENIED (PASS)
+debezium-postgresql-plugin-via-exec=PASS
 neo4j.data-plane.svc:7687=PASS
 qdrant.data-plane.svc:6333=PASS
 qdrant.data-plane.svc:6334=PASS

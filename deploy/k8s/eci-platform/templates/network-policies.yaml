@@ -60,7 +60,13 @@ metadata:
   labels:
     {{- include "eci.labels" . | nindent 4 }}
 spec:
-  podSelector: {}
+  # Kafka Connect is excluded: its credential-bearing REST API is loopback-only
+  # and its data paths receive dedicated least-privilege policies below.
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: NotIn
+        values: [kafka-connect]
   policyTypes: [Ingress, Egress]
   ingress:
     - from:
@@ -68,6 +74,78 @@ spec:
   egress:
     - to:
         - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kafka-connect-to-kafka
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: kafka-connect}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: eci-kafka
+              strimzi.io/component-type: kafka
+      ports: [{protocol: TCP, port: 9093}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kafka-connect-to-kafka-ingress
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      strimzi.io/cluster: eci-kafka
+      strimzi.io/component-type: kafka
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: kafka-connect}
+      ports: [{protocol: TCP, port: 9093}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kafka-connect-to-postgres
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: kafka-connect}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {cnpg.io/cluster: eci-postgres}
+      ports: [{protocol: TCP, port: 5432}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kafka-connect-to-postgres-ingress
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {cnpg.io/cluster: eci-postgres}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: kafka-connect}
+      ports: [{protocol: TCP, port: 5432}]
 {{- $apiClients := list
   (dict "name" "strimzi" "selector" (dict "name" "strimzi-cluster-operator"))
   (dict "name" "strimzi-entity" "selector" (dict "app.kubernetes.io/name" "entity-operator"))

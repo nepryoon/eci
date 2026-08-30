@@ -123,6 +123,11 @@ spec:
           ports:
             - {name: rest, containerPort: 8083}
           env:
+            # The Connect REST control surface carries an EnvVarConfigProvider
+            # with database credentials. It is deliberately loopback-only and
+            # has no Service; operators register connectors through kubectl exec.
+            - {name: CONNECT_LISTENERS, value: "http://127.0.0.1:8083"}
+            - {name: REST_HOST_NAME, value: "127.0.0.1"}
             - {name: BOOTSTRAP_SERVERS, value: "eci-kafka-kafka-bootstrap.data-plane.svc:9093"}
             - {name: GROUP_ID, value: "eci-connect"}
             - {name: CONFIG_STORAGE_TOPIC, value: "eci_connect_configs"}
@@ -166,17 +171,20 @@ spec:
               valueFrom:
                 secretKeyRef: {name: {{ .Values.global.existingSecret }}, key: password}
           startupProbe:
-            httpGet: {path: /connectors, port: rest}
+            exec:
+              command: ["/bin/bash", "-ec", "curl -fsS http://127.0.0.1:8083/connectors >/dev/null"]
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 60
           readinessProbe:
-            httpGet: {path: /connectors, port: rest}
+            exec:
+              command: ["/bin/bash", "-ec", "curl -fsS http://127.0.0.1:8083/connectors >/dev/null"]
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 6
           livenessProbe:
-            httpGet: {path: /connectors, port: rest}
+            exec:
+              command: ["/bin/bash", "-ec", "curl -fsS http://127.0.0.1:8083/connectors >/dev/null"]
             periodSeconds: 10
             timeoutSeconds: 2
             failureThreshold: 3
@@ -201,20 +209,6 @@ spec:
         - {name: data, emptyDir: {}}
         - {name: logs, emptyDir: {}}
         - {name: tmp, emptyDir: {}}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: kafka-connect
-  namespace: data-plane
-  labels:
-    {{- include "eci.labels" . | nindent 4 }}
-spec:
-  type: ClusterIP
-  selector:
-    {{- include "eci.selectorLabels" (dict "name" "kafka-connect") | nindent 4 }}
-  ports:
-    - {name: rest, port: 8083, targetPort: rest}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
