@@ -1,5 +1,5 @@
 # SPEC-077 — Boundary gRPC Python autenticato e fail-closed
-Stato: approved
+Stato: verified
 Task-tree: T7.1b/T7.1c · Libreria: libs/py/eci_core · ADD: Modulo 3 §§2.1, 3.1, Modulo 4 §1
 Contratti: contracts/proto/eci/retrieval/v1/retrieval.proto, ADR-0012, ADR-0017, ADR-0018
 
@@ -87,11 +87,11 @@ bounded; l'interceptor espone eccezioni gRPC generiche.
 
 ## 9. Criteri di accettazione
 
-- [ ] Test nuovi osservati rossi contro libreria assente.
-- [ ] `ruff check eci_core`
-- [ ] `pytest -q`
-- [ ] `task build && task lint && task test && task test:security`
-- [ ] Review duplicate metadata/context leak/OPA SSRF/redirect/size/deadline.
+- [x] Test nuovi osservati rossi contro libreria assente.
+- [x] `ruff check eci_core`
+- [x] `pytest -q`
+- [x] `task build && task lint && task test && task test:security`
+- [x] Review duplicate metadata/context leak/OPA SSRF/redirect/size/deadline.
 
 ## 10. Review avversariale pre-implementazione
 
@@ -100,3 +100,15 @@ metadata binario, con limiti prima del parse, e conserva il subject in un
 ContextVar soltanto per la durata effettiva del handler/generatore. Il client
 OPA costruisce URL solo da configurazione startup validata, vieta redirect e
 normalizza gli errori prima del wire gRPC.
+
+## 11. Evidenza di verifica
+
+- Test red `99974bb`; implementazione `3bfe0ee`; suite/redirect
+  `16b6b42`/`e98dc0d`; gate security `dcee4c0`.
+- `ruff check eci_core` e `pytest -q`: 38 test verdi, inclusi 18 scenari
+  dedicati al boundary autenticato.
+- `task build`, `task lint`, `task test` e `task test:security` verdi; il gate
+  security esegue esplicitamente `test_grpc_server.py`.
+- Review conferma metadata unico/limitato, nessuna autorita' dal body,
+  ContextVar ripristinato nel `finally`, OPA URL di processo validato, redirect
+  vietati, risposta limitata a 64 KiB e timeout 0–2 secondi.
