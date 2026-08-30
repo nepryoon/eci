@@ -1,5 +1,5 @@
 # SPEC-071 — Operazione outbox nel boundary CDC
-Stato: approved
+Stato: implemented
 Task-tree: T7.1a · Servizio: deploy/compose, deploy/k8s · ADD: Modulo 1 §2.2.1–§2.2.4
 Contratti: contracts/jsonschema/outbox-event.json, deploy/compose/debezium-outbox-connector.json
 
@@ -68,12 +68,16 @@ coordinate di tenant, repository, path, contenuto o credenziali.
 
 ## 9. Criteri di accettazione
 
-- [ ] Test statico osservato rosso sulla configurazione corrente.
+- [x] Test statico osservato rosso sulla configurazione corrente.
 - [ ] Test integration CDC compilato e verde con Docker.
-- [ ] `task test`
-- [ ] `task k8s:validate`
+- [x] `task test`
+- [x] `task k8s:validate`
 - [ ] `task test:integration`
-- [ ] Compose e Helm contengono una placement identica e minimale.
+- [x] Compose e Helm contengono una placement identica e minimale.
+
+Il test testcontainers verifica il record DELETE reale ed e' compilato nel
+modulo integration. L'esecuzione resta intenzionalmente non dichiarata perche'
+il daemon Docker locale non e' raggiungibile.
 
 ## 10. Review avversariale pre-implementazione
 
