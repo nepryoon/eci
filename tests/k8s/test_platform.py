@@ -935,6 +935,50 @@ class PlatformChartTests(unittest.TestCase):
         self.assertIn(resolution, up)
         self.assertLess(up.index(resolution), up.index(first_runtime_secret_write))
 
+    def test_review_minio_tls_reuse_requires_matching_private_key(self) -> None:
+        policy = ROOT / "deploy/k8s/lib/tls-keypair.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            cert = temp / "server.crt"
+            matching_key = temp / "server.key"
+            other_key = temp / "other.key"
+            subprocess.run(
+                [
+                    "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-days", "1", "-subj", "/CN=minio.data-plane.svc",
+                    "-keyout", str(matching_key), "-out", str(cert),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "openssl", "genpkey", "-algorithm", "RSA",
+                    "-pkeyopt", "rsa_keygen_bits:2048", "-out", str(other_key),
+                ],
+                check=True,
+                capture_output=True,
+            )
+
+            def matches(key: Path) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [
+                        "bash", "-c",
+                        'source "$1"; eci_tls_private_key_matches_certificate "$2" "$3"',
+                        "_", str(policy), str(cert), str(key),
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+
+            self.assertEqual(matches(matching_key).returncode, 0)
+            self.assertNotEqual(matches(other_key).returncode, 0)
+            self.assertNotEqual(matches(temp / "missing.key").returncode, 0)
+
+        up = (ROOT / "deploy/k8s/dev-up.sh").read_text()
+        self.assertIn("eci_tls_private_key_matches_certificate", up)
+        self.assertIn("jsonpath={.data.tls\\.key}", up)
+
     def test_review_existing_kind_cluster_must_match_pinned_image_and_version(self) -> None:
         policy = ROOT / "deploy/k8s/lib/kind-cluster.sh"
         expected_image = (

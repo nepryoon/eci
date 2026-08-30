@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT_DIR/deploy/k8s/lib/dev-password.sh"
 source "$ROOT_DIR/deploy/k8s/lib/kind-cluster.sh"
+source "$ROOT_DIR/deploy/k8s/lib/tls-keypair.sh"
 HELM_BIN="${HELM_BIN:-helm}"
 KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
 KIND_BIN="${KIND_BIN:-kind}"
@@ -13,6 +14,7 @@ for executable in "$DOCKER_BIN" "$HELM_BIN" "$KUBECTL_BIN" "$KIND_BIN" openssl b
   command -v "$executable" >/dev/null || { echo "required executable not found: $executable" >&2; exit 1; }
 done
 "$DOCKER_BIN" info >/dev/null
+umask 077
 ECI_DEV_TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$ECI_DEV_TMP_DIR"' EXIT
 
@@ -63,12 +65,15 @@ if "$KUBECTL_BIN" -n data-plane get secret eci-minio-tls >/dev/null 2>&1; then
     -o 'jsonpath={.data.tls\.crt}' | base64 --decode >"$ECI_DEV_TMP_DIR/minio.crt"
   "$KUBECTL_BIN" -n data-plane get secret eci-minio-tls \
     -o 'jsonpath={.data.ca\.crt}' | base64 --decode >"$ECI_DEV_TMP_DIR/minio-ca.crt"
+  "$KUBECTL_BIN" -n data-plane get secret eci-minio-tls \
+    -o 'jsonpath={.data.tls\.key}' | base64 --decode >"$ECI_DEV_TMP_DIR/minio.key"
   if ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio.crt" -checkend 86400 -noout >/dev/null 2>&1 || \
      ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio.crt" -checkhost minio.data-plane.svc -noout >/dev/null 2>&1 || \
      ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio.crt" -noout -text | grep -q 'CA:FALSE' || \
      ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio-ca.crt" -checkend 86400 -noout >/dev/null 2>&1 || \
      ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio-ca.crt" -noout -text | grep -q 'CA:TRUE' || \
-     ! openssl verify -CAfile "$ECI_DEV_TMP_DIR/minio-ca.crt" "$ECI_DEV_TMP_DIR/minio.crt" >/dev/null 2>&1; then
+     ! openssl verify -CAfile "$ECI_DEV_TMP_DIR/minio-ca.crt" "$ECI_DEV_TMP_DIR/minio.crt" >/dev/null 2>&1 || \
+     ! eci_tls_private_key_matches_certificate "$ECI_DEV_TMP_DIR/minio.crt" "$ECI_DEV_TMP_DIR/minio.key"; then
     ECI_MINIO_TLS_ROTATED=true
   fi
 else
