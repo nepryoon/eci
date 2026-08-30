@@ -416,16 +416,16 @@ pub async fn run() -> Result<(), RuntimeError> {
                     },
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
-                            match await_task_with_deadline(
+                            let _ = await_task_with_deadline(
                                 &mut processing,
                                 SHUTDOWN_DRAIN_DEADLINE,
-                            ).await {
-                                Some(action) => break action,
-                                None => {
-                                    span.record("ingestion.outcome", "retry");
-                                    break 'consume;
-                                }
-                            }
+                            ).await;
+                            // Once shutdown is latched, never start a new DLQ
+                            // publication or offset commit. A transaction that
+                            // completed during the drain is safe to replay via
+                            // its receipt on the next owner.
+                            span.record("ingestion.outcome", "retry");
+                            break 'consume;
                         }
                     }
                     received = consumer.recv() => match received {

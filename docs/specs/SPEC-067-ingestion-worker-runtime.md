@@ -309,3 +309,6 @@ pool con deadline esterne; il commit offset sincrono conserva acknowledgement
 ma gira nel blocking pool con timeout broker 5s/deadline 6s. Il drain SIGTERM
 e' limitato a 20s e il runtime non attende task blocking oltre altri 5s, entro
 la `terminationGracePeriodSeconds: 30` verificata nel render Helm.
+Una volta latched SIGTERM il worker non avvia piu' publish DLQ o commit offset:
+un'eventuale transazione completata durante il drain viene ripresa come replay
+idempotente tramite receipt dal nuovo owner.
