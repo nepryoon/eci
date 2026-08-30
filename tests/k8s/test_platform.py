@@ -1002,6 +1002,33 @@ spec:
             "dataPlane.enabled=false must omit Kafka Connect policies and workloads",
         )
 
+    def test_review_cdc_disablement_preserves_qdrant_bootstrap_network_path(self) -> None:
+        command = [
+            HELM,
+            "template",
+            "eci",
+            str(CHART),
+            "--set",
+            "cdc.enabled=false",
+        ]
+        output = subprocess.run(command, check=True, capture_output=True, text=True).stdout
+        objects = [doc for doc in yaml.safe_load_all(output) if isinstance(doc, dict)]
+        rendered = keyed(objects)
+        self.assertIn(
+            ("NetworkPolicy", "data-plane", "allow-qdrant-bootstrap-ingress"),
+            rendered,
+        )
+        self.assertNotIn(("Deployment", "data-plane", "kafka-connect"), rendered)
+        self.assertNotIn(("ConfigMap", "data-plane", "eci-debezium-connector"), rendered)
+        self.assertFalse(
+            any(
+                obj.get("kind") == "NetworkPolicy"
+                and "kafka-connect" in obj.get("metadata", {}).get("name", "")
+                for obj in objects
+            ),
+            "cdc.enabled=false must omit Kafka Connect policies without removing Qdrant policy",
+        )
+
     def test_review_application_enablement_requires_real_release_digests(self) -> None:
         result = subprocess.run(
             [

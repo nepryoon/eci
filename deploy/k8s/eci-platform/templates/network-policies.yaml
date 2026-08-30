@@ -114,7 +114,6 @@ spec:
         - podSelector:
             matchLabels: {app.kubernetes.io/name: qdrant}
       ports: [{protocol: TCP, port: 6333}]
-{{- if and .Values.dataPlane.enabled .Values.cdc.enabled }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -132,6 +131,7 @@ spec:
         - podSelector:
             matchLabels: {app.kubernetes.io/name: qdrant-collection-bootstrap}
       ports: [{protocol: TCP, port: 6333}]
+{{- if and .Values.dataPlane.enabled .Values.cdc.enabled }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
