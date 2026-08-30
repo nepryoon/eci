@@ -50,6 +50,7 @@ const INPUT_TOPIC: &str = "eci.ingestion.file.v1";
 const DLQ_TOPIC: &str = "eci.ingestion.file.v1.DLQ";
 const CONSUMER_GROUP: &str = "ingestion";
 const MAX_RETRY_BUFFERED_MESSAGES: usize = 64;
+const KAFKA_OFFSET_COMMIT_DEADLINE: Duration = Duration::from_secs(6);
 
 #[derive(Clone)]
 struct Config {
@@ -446,7 +447,7 @@ pub async fn run() -> Result<(), RuntimeError> {
             }
             let completed = match action {
                 ProcessAction::Commit { outcome, reason } => {
-                    if commit_message_offset(&consumer, &message).is_ok() {
+                    if commit_message_offset(consumer.clone(), &message).await {
                         span.record("ingestion.outcome", outcome);
                         health
                             .metrics
@@ -479,7 +480,7 @@ pub async fn run() -> Result<(), RuntimeError> {
                             resume_if_buffer_empty(&consumer, &buffered, &health);
                             break;
                         }
-                        if commit_message_offset(&consumer, &message).is_ok() {
+                        if commit_message_offset(consumer.clone(), &message).await {
                             span.record("ingestion.outcome", "failed");
                             health
                                 .metrics
@@ -563,30 +564,50 @@ fn kafka_client_config(config: &Config) -> ClientConfig {
         .set("enable.auto.offset.store", "false")
         .set("auto.offset.reset", "earliest")
         .set("max.poll.interval.ms", "300000")
+        .set("socket.timeout.ms", "5000")
         .set("queued.min.messages", "1")
         .set("queued.max.messages.kbytes", "256")
         .set("message.timeout.ms", "5000");
     client
 }
 
-fn commit_message_offset<M: Message>(
-    consumer: &IngestionConsumer,
-    message: &M,
-) -> rdkafka::error::KafkaResult<()> {
+async fn commit_message_offset<M: Message>(consumer: Arc<IngestionConsumer>, message: &M) -> bool {
     let mut offsets = TopicPartitionList::new();
-    let next_offset =
-        message
-            .offset()
-            .checked_add(1)
-            .ok_or(rdkafka::error::KafkaError::OffsetFetch(
-                rdkafka::types::RDKafkaErrorCode::InvalidArgument,
-            ))?;
-    offsets.add_partition_offset(
-        message.topic(),
-        message.partition(),
-        Offset::Offset(next_offset),
-    )?;
-    consumer.commit(&offsets, CommitMode::Sync)
+    let Some(next_offset) = message.offset().checked_add(1) else {
+        return false;
+    };
+    if offsets
+        .add_partition_offset(
+            message.topic(),
+            message.partition(),
+            Offset::Offset(next_offset),
+        )
+        .is_err()
+    {
+        return false;
+    }
+    matches!(
+        run_blocking_with_deadline(KAFKA_OFFSET_COMMIT_DEADLINE, move || {
+            consumer.commit(&offsets, CommitMode::Sync)
+        })
+        .await,
+        Some(Ok(()))
+    )
+}
+
+/// Execute a synchronous client operation without occupying a Tokio worker.
+/// The outer deadline is deliberately just above librdkafka's configured
+/// socket timeout so probes and shutdown remain bounded even if an offset
+/// acknowledgement stalls.
+async fn run_blocking_with_deadline<F, T>(deadline: Duration, operation: F) -> Option<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::time::timeout(deadline, tokio::task::spawn_blocking(operation))
+        .await
+        .ok()
+        .and_then(Result::ok)
 }
 
 fn record_is_owned<M: Message>(
@@ -1245,12 +1266,24 @@ mod tests {
         assert_eq!(client.get("group.id"), Some(CONSUMER_GROUP));
         assert_eq!(client.get("enable.auto.commit"), Some("false"));
         assert_eq!(client.get("enable.auto.offset.store"), Some("false"));
+        assert_eq!(client.get("socket.timeout.ms"), Some("5000"));
         assert_eq!(client.get("ssl.ca.location"), Some("/tls/ca.crt"));
         assert_eq!(
             client.get("ssl.certificate.location"),
             Some("/tls/user.crt")
         );
         assert_eq!(client.get("ssl.key.location"), Some("/tls/user.key"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_kafka_operations_obey_async_deadline() {
+        let result = run_blocking_with_deadline(Duration::from_millis(20), || {
+            std::thread::sleep(Duration::from_millis(100));
+            42
+        })
+        .await;
+
+        assert!(result.is_none());
     }
 
     #[test]
