@@ -42,6 +42,9 @@ test ne verificano la presenza anche con CDC disabilitato. Quando CDC è
 abilitato, CNPG riconcilia `eci_cdc` dal Secret dedicato
 `eci-postgres-cdc`, con `login=true`, `replication=true`, membership in
 `eci_cdc_outbox_reader` e tutti gli attributi amministrativi disabilitati.
+Quando CDC è disabilitato il chart mantiene `eci_cdc` in `managed.roles` con
+`ensure: absent`, così anche un passaggio enabled → disabled elimina il login
+role storico invece di lasciarne LOGIN, REPLICATION e grant ereditati.
 Debezium usa
 `publication.autocreate.mode=disabled`, quindi non deve possedere tabelle né
 creare publication.
@@ -61,6 +64,8 @@ con chiavi `username=eci_cdc` e `password` prima del Cluster/Connect rollout.
 - Un’installazione iniziale con `cdc.enabled=false` applica comunque il grant
   al carrier NOLOGIN. Abilitare CDC in seguito eredita il privilegio senza
   riscrivere né fingere di rieseguire una migration già applicata.
+- Disabilitare CDC riconcilia esplicitamente l'assenza del login role; la sola
+  omissione dalla lista CNPG non sarebbe una revoca.
 
 ## Migrazione, rollback e sicurezza
 

@@ -365,9 +365,10 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       soltanto l'already-exists tipizzato è idempotente e il mapping security
       viene comunque riconciliato.
 - [x] Kafka Connect loopback-only è vincolato a una replica ed è omesso con il
-      data plane; quando CDC è disabilitato il login role CNPG `eci_cdc` e il
-      relativo Secret reference sono omessi, mentre resta soltanto il carrier
-      NOLOGIN senza password necessario al grant upgrade-safe; i quattro worker sono Ready solo dopo topic Read+group access via
+      data plane; quando CDC è disabilitato CNPG riceve `eci_cdc` con
+      `ensure: absent` per revocare anche un ruolo già riconciliato, il relativo
+      Secret reference è omesso e resta presente il carrier NOLOGIN senza
+      password necessario al grant upgrade-safe; i quattro worker sono Ready solo dopo topic Read+group access via
       il transport Kafka autenticato e embedding-worker entra nel consume-loop
       solo dopo `/health` TEI e mantiene tale dipendenza nella readiness;
       Semantic Cache è Ready solo dopo PING
@@ -517,3 +518,6 @@ come membro con REPLICATION least-privilege. La migration 0005 crea la
 publication outbox fissa e concede SELECT al carrier; Connect usa un Secret
 distinto con autocreation disabilitata. Il test PostgreSQL riproduce anche
 l'abilitazione del login role dopo una migration già applicata.
+Il render con CDC disabilitato mantiene invece la dichiarazione `eci_cdc` con
+`ensure: absent`, perché CNPG non elimina un ruolo storico se viene soltanto
+omesso da `managed.roles`.

@@ -335,6 +335,9 @@ SELECT to that carrier. With CDC enabled, CNPG manages `eci_cdc` as its member
 with LOGIN+REPLICATION but without superuser, createdb, createrole or bypassrls.
 This ordering also supports enabling CDC after migration 0005 was applied while
 the connector was disabled; no migration is replayed.
+Disabling CDC after it was enabled keeps `eci_cdc` in the CNPG managed-role
+list with `ensure: absent`: omission alone does not revoke an existing role.
+The CDC Secret reference and Connect resources are omitted in that state.
 `publication.autocreate.mode` remains disabled. The ConfigMap and deployment
 logs never contain the password. Registration must fail if the table or
 connector plugin is absent, and readiness of the worker alone must not be

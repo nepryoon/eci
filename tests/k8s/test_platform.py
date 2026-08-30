@@ -1349,14 +1349,17 @@ spec:
         postgres = rendered[("Cluster", "data-plane", "eci-postgres")]
         self.assertEqual(
             postgres["spec"]["managed"]["roles"],
-            [{
-                "name": "eci_cdc_outbox_reader", "ensure": "present",
-                "login": False, "replication": False, "superuser": False,
-                "createdb": False, "createrole": False, "bypassrls": False,
-                "disablePassword": True,
-            }],
+            [
+                {
+                    "name": "eci_cdc_outbox_reader", "ensure": "present",
+                    "login": False, "replication": False, "superuser": False,
+                    "createdb": False, "createrole": False, "bypassrls": False,
+                    "disablePassword": True,
+                },
+                {"name": "eci_cdc", "ensure": "absent"},
+            ],
             "cdc.enabled=false must preserve the passwordless privilege role "
-            "without requiring the CDC login Secret",
+            "and explicitly revoke the CDC login role without requiring its Secret",
         )
         self.assertNotIn("eci-postgres-cdc", output)
         self.assertFalse(

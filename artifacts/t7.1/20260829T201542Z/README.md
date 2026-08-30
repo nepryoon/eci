@@ -203,13 +203,17 @@ the marker; a real Neo4j marker-loss replay proves that an identical MERGE does
 not advance GDS partition generation. These are CPU/Docker integration and
 deterministic render evidence;
 they do not rewrite the earlier live-cluster observations.
-The final CDC upgrade regression keeps only the passwordless NOLOGIN privilege
-carrier when Connect is disabled, with no `eci_cdc` login role or CDC Secret
-reference. PostgreSQL integration applies migration 0005 first, creates the
+The final CDC upgrade regression keeps the passwordless NOLOGIN privilege
+carrier when Connect is disabled and renders `eci_cdc` with `ensure: absent`,
+so CNPG removes a login role left by an enabled installation; no CDC Secret is
+referenced. PostgreSQL integration applies migration 0005 first, creates the
 login role afterward, and proves inherited SELECT. The live kind revision 24
 reconciled the same carrier membership, removed the legacy direct grant, and
 passed the complete dev verification without replaying or falsifying a
 migration.
+The explicit absent-role transition is deterministic render evidence added
+after review; it was not exercised against or attributed to that historical
+live cluster.
 The closing render review rejects `applications.enabled=true` together with
 `dataPlane.enabled=false`: the current chart has no external-backend identity,
 trust, or egress contract and therefore cannot claim that topology. This is a

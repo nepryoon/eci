@@ -41,6 +41,12 @@ spec:
         bypassrls: false
         inRoles: [eci_cdc_outbox_reader]
         passwordSecret: {name: {{ .Values.cdc.postgresSecret }}}
+      {{- else }}
+      # CNPG only deletes a previously managed role when it remains declared
+      # with ensure=absent. Omitting it would leave LOGIN+REPLICATION behind
+      # after an enabled -> disabled upgrade.
+      - name: eci_cdc
+        ensure: absent
       {{- end }}
   storage:
     size: {{ .Values.dataPlane.postgres.storage }}
