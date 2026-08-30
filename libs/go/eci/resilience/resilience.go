@@ -35,6 +35,10 @@ type Config struct {
 	MaxRetries       int
 	BackoffBase      time.Duration
 	RetryTopicSuffix string
+	// ShouldRetry can reserve infrastructure-unavailability errors for the
+	// caller, which must then leave the source offset uncommitted. Nil keeps
+	// the historical behavior: every processing error is retried/DLQed.
+	ShouldRetry func(error) bool
 }
 
 // RetryTopic returns a consumer-scoped retry topic. An empty suffix preserves
@@ -98,7 +102,9 @@ const (
 type ProcessFunc func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (Outcome, error)
 
 // WithRetryAndDLQ avvolge inner (SPEC-035 §2): su successo, ritorna
-// direttamente il risultato di inner. Su errore, legge il retry-count
+// direttamente il risultato di inner. Se ShouldRetry rifiuta l'errore, lo
+// propaga senza pubblicare e il chiamante deve lasciare l'offset non
+// committato. Sugli altri errori legge il retry-count
 // dagli header (assente o non numerico = 0, §4 edge case — fail-safe, mai
 // un crash), applica un backoff ESPONENZIALE SINCRONO (`BackoffBase *
 // 2^retryCount` — l'unico modo di produrre un ritardo reale osservabile
@@ -141,6 +147,9 @@ func WithRetryAndDLQ(cfg Config, producer *kafka.Writer, inner ProcessFunc) Proc
 		outcome, err := inner(ctx, originalTopic, value, headers)
 		if err == nil {
 			return outcome, nil
+		}
+		if cfg.ShouldRetry != nil && !cfg.ShouldRetry(err) {
+			return outcome, err
 		}
 
 		retryCount := RetryCount(headers)

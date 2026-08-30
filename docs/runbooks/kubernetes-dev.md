@@ -220,8 +220,13 @@ or group authorization failures return 503 without broker details. The
 liveness probe remains a local TCP check so broker recovery is not amplified
 into pod restart churn. Embedding Worker additionally calls the embedder's
 native `/health` with a two-second deadline before entering its consume loop,
-then includes the same non-inference dependency in `/ready`. A cold GPU rollout
-therefore cannot consume and DLQ a valid backlog before the model is ready.
+after every uncommitted failure before reopening consumption, then includes
+the same non-inference dependency in `/ready`. Transport failures, throttling,
+and TEI 5xx responses bypass
+retry/DLQ: their source offset stays uncommitted, the reader is recreated on
+the same group before any later offset can commit, and polling remains paused
+until health recovers. Cold starts and later GPU outages therefore cannot drain
+a valid backlog into the DLQ.
 LLM Gateway startup/readiness calls its own `/ready`, which checks each unique
 configured vLLM `/health` path through the same HTTP client within two seconds.
 This does not enqueue inference or include backend details in the response.

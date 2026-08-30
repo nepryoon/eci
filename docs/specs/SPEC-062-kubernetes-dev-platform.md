@@ -155,9 +155,12 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    che esercita realmente la Topic Read ACL. Errori TLS/topic/group rispondono
    503 senza dettagli; liveness resta locale per evitare restart storm durante
    un outage recuperabile del broker. In aggiunta, `embedding-worker` verifica
-   `/health` nativo TEI con deadline prima di entrare nel consume-loop e a ogni
-   readiness: un cold start GPU non può quindi drenare backlog verso DLQ e il
-   probe non esegue inferenza. Semantic Cache applica lo stesso
+   `/health` nativo TEI con deadline prima di entrare nel consume-loop, durante
+   il recupero da ogni errore non committato e a ogni readiness. Trasporto, 429 e 5xx TEI non sono
+   poison pill: restano non committati, il reader viene ricreato sullo stesso
+   group prima di qualunque offset successivo e il polling riprende solo dopo
+   health positiva. Cold start e outage GPU non possono quindi drenare backlog
+   verso DLQ; il probe non esegue inferenza. Semantic Cache applica lo stesso
    principio: `/ready` esegue PING Redis con il client autenticato e risponde
    soltanto 204/503, mentre liveness resta locale. Retrieval Engine verifica
    in parallelo e con deadline Neo4j autenticato, collection Qdrant

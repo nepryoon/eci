@@ -1,6 +1,8 @@
 package resilience_test
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	kafka "github.com/segmentio/kafka-go"
@@ -55,5 +57,21 @@ func TestRetryTopicIsConsumerScopedAndOriginalTopicIsStable(t *testing.T) {
 	}
 	if got := resilience.OriginalTopic("outbox.event.CodeChunk", suffix); got != "outbox.event.CodeChunk" {
 		t.Fatalf("OriginalTopic(primary) = %q", got)
+	}
+}
+
+func TestShouldRetryFalsePropagatesWithoutPublishing(t *testing.T) {
+	want := errors.New("dependency unavailable")
+	process := resilience.WithRetryAndDLQ(
+		resilience.Config{ShouldRetry: func(err error) bool { return !errors.Is(err, want) }},
+		nil,
+		func(context.Context, string, []byte, []kafka.Header) (resilience.Outcome, error) {
+			return resilience.OutcomeProcessed, want
+		},
+	)
+
+	outcome, err := process(context.Background(), "topic", nil, nil)
+	if outcome != resilience.OutcomeProcessed || !errors.Is(err, want) {
+		t.Fatalf("outcome/error = %v/%v, want OutcomeProcessed/%v", outcome, err, want)
 	}
 }
