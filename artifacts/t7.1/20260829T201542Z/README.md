@@ -45,8 +45,10 @@ Results:
   exact OpenSearch index and both native TEI health paths concurrently, bounded
   and without inference or response detail: PASS (deterministic unit/render
   evidence; first-party image not deployed);
-- dedicated CNPG-managed `eci_cdc` role, fixed outbox publication, SELECT-only
-  table grant, logical slot and live Debezium connector/task: PASS;
+- dedicated CNPG-managed `eci_cdc` role, passwordless
+  `eci_cdc_outbox_reader` carrier membership, inherited SELECT-only table
+  grant, fixed outbox publication, logical slot and live Debezium
+  connector/task: PASS;
 - migration 0006 consumer-scoped `processed_events` key applied live; a
   rolled-back probe registered the same event for `embedding-worker` and
   `sink-search`, while integration tests retain same-consumer dedup and verify
@@ -174,5 +176,10 @@ Real Postgres-backed failure-path regressions prove that unreachable Neo4j,
 Qdrant and OpenSearch writes leave no processed marker and therefore remain
 retryable. These are CPU/Docker integration and deterministic render evidence;
 they do not rewrite the earlier live-cluster observations.
-The CDC-disable regression additionally proves that a fresh CNPG cluster has
-no `eci_cdc` managed-role or CDC Secret dependency when Connect is disabled.
+The final CDC upgrade regression keeps only the passwordless NOLOGIN privilege
+carrier when Connect is disabled, with no `eci_cdc` login role or CDC Secret
+reference. PostgreSQL integration applies migration 0005 first, creates the
+login role afterward, and proves inherited SELECT. The live kind revision 24
+reconciled the same carrier membership, removed the legacy direct grant, and
+passed the complete dev verification without replaying or falsifying a
+migration.

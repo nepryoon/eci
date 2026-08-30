@@ -116,10 +116,13 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    NetworkPolicy non identifica un apiserver esterno, la sorgente portabile è
    `0.0.0.0/0` ma il selector resta limitato ai soli pod operator e il CIDR è
    restringibile per cluster.
-   PostgreSQL riconcilia un ruolo `eci_cdc` dedicato con LOGIN+REPLICATION ma
-   senza privilegi amministrativi; usa un Secret separato dal database owner.
-   La publication outbox è creata dalla migration 0005 e Connect non può
-   auto-crearla.
+   PostgreSQL riconcilia sempre il privilege carrier NOLOGIN
+   `eci_cdc_outbox_reader`; la migration 0005 gli concede SELECT outbox. Con
+   CDC abilitato riconcilia anche `eci_cdc`, membro del carrier, con
+   LOGIN+REPLICATION ma senza privilegi amministrativi e un Secret separato
+   dal database owner. La publication outbox è creata dalla migration 0005 e
+   Connect non può auto-crearla. Il percorso installazione senza CDC → upgrade
+   con CDC conserva quindi deterministicamente il grant già applicato.
    Kafka espone soltanto il listener applicativo mTLS 9093 con simple
    authorization deny-by-default. Connect e ogni consumer hanno un
    `KafkaUser` distinto; topic e consumer group sono ACL literal senza
@@ -343,8 +346,9 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       REST Connect loopback-only sono verificati; OpenSearch usa HTTPS+CA+Basic Auth;
       Redis `requirepass` è propagato esplicitamente, con unit test fail-closed.
 - [x] Kafka Connect loopback-only è vincolato a una replica ed è omesso con il
-      data plane; quando CDC è disabilitato anche il ruolo CNPG `eci_cdc` e il
-      relativo Secret reference sono omessi; i quattro worker sono Ready solo dopo topic+group access via
+      data plane; quando CDC è disabilitato il login role CNPG `eci_cdc` e il
+      relativo Secret reference sono omessi, mentre resta soltanto il carrier
+      NOLOGIN senza password necessario al grant upgrade-safe; i quattro worker sono Ready solo dopo topic+group access via
       il transport Kafka autenticato; Semantic Cache è Ready solo dopo PING
       Redis autenticato; Retrieval Engine richiede tutti i cinque backend
       reali, mentre le liveness restano locali.
@@ -463,5 +467,8 @@ dev smoke deve provare sia il retry publish consentito sia il primary publish
 negato e ispezionare il plugin soltanto tramite exec amministrativo.
 
 ADR-0020 elimina inoltre il riuso del database owner in Connect: CNPG gestisce
-`eci_cdc` con REPLICATION least-privilege, la migration 0005 crea la publication
-outbox fissa e Connect usa un Secret distinto con autocreation disabilitata.
+il carrier NOLOGIN `eci_cdc_outbox_reader` e, quando CDC è attivo, `eci_cdc`
+come membro con REPLICATION least-privilege. La migration 0005 crea la
+publication outbox fissa e concede SELECT al carrier; Connect usa un Secret
+distinto con autocreation disabilitata. Il test PostgreSQL riproduce anche
+l'abilitazione del login role dopo una migration già applicata.

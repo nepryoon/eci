@@ -43,6 +43,10 @@ test -n "$postgres_primary"
 "$KUBECTL_BIN" -n data-plane exec "$postgres_primary" -- psql -U postgres -tAc 'SHOW wal_level' | grep -qx logical
 "$KUBECTL_BIN" -n data-plane exec "$postgres_primary" -- psql -U postgres -tAc \
   "SELECT rolreplication AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolbypassrls FROM pg_roles WHERE rolname='eci_cdc'" | grep -qx t
+"$KUBECTL_BIN" -n data-plane exec "$postgres_primary" -- psql -U postgres -tAc \
+  "SELECT NOT rolcanlogin AND NOT rolreplication AND NOT rolsuper FROM pg_roles WHERE rolname='eci_cdc_outbox_reader'" | grep -qx t
+"$KUBECTL_BIN" -n data-plane exec "$postgres_primary" -- psql -U postgres -tAc \
+  "SELECT pg_has_role('eci_cdc', 'eci_cdc_outbox_reader', 'MEMBER')" | grep -qx t
 echo 'PostgreSQL dedicated eci_cdc replication role: PASS'
 
 "$KUBECTL_BIN" -n data-plane delete pod eci-connectivity --ignore-not-found --wait=true >/dev/null

@@ -21,16 +21,28 @@ deve comunque ricevere credenziali database a privilegio minimo.
 1. **Aggiungere `REPLICATION` a `eci`.** Scartato: conserva credenziali da
    database owner nel worker CDC.
 2. **Rendere il connector superuser.** Scartato: viola least privilege.
-3. **Ruolo `eci_cdc` gestito da CNPG e publication pre-creata.** Scelto: il
-   worker ha solo LOGIN, REPLICATION e SELECT sulla singola outbox.
+3. **Ruolo `eci_cdc` gestito da CNPG e publication pre-creata.** Insufficiente
+   da solo: se CDC è abilitato dopo che la migration è stata registrata, un
+   grant condizionale al login role viene perso definitivamente.
+4. **Privilege carrier passwordless sempre riconciliato.** Scelto: la migration
+   concede SELECT a un ruolo NOLOGIN stabile e CNPG rende il login role membro
+   soltanto quando CDC è abilitato.
 
 ## Decisione
 
-CloudNativePG riconcilia `eci_cdc` da un Secret dedicato
-`eci-postgres-cdc`, con `login=true`, `replication=true` e tutti gli attributi
-amministrativi disabilitati. La migration `0005_cdc_publication` eseguita dal
-database owner crea `eci_outbox_publication` esclusivamente su
-`public.outbox` e concede SELECT al ruolo se presente. Debezium usa
+CloudNativePG riconcilia sempre `eci_cdc_outbox_reader` come ruolo NOLOGIN,
+senza password né privilegi amministrativi. La migration
+`0005_cdc_publication` eseguita dal database owner crea
+`eci_outbox_publication` esclusivamente su `public.outbox` e concede SELECT a
+questo privilege carrier quando presente. Compose/testcontainer non hanno il
+reconciler CNPG e conservano il percorso development owner-based preesistente;
+la migration resta quindi portabile e non crea ruoli infrastrutturali. Nel
+chart Kubernetes, invece, il carrier è un invariante sempre renderizzato e i
+test ne verificano la presenza anche con CDC disabilitato. Quando CDC è
+abilitato, CNPG riconcilia `eci_cdc` dal Secret dedicato
+`eci-postgres-cdc`, con `login=true`, `replication=true`, membership in
+`eci_cdc_outbox_reader` e tutti gli attributi amministrativi disabilitati.
+Debezium usa
 `publication.autocreate.mode=disabled`, quindi non deve possedere tabelle né
 creare publication.
 
@@ -44,13 +56,19 @@ con chiavi `username=eci_cdc` e `password` prima del Cluster/Connect rollout.
   slot; il verifier controlla attributi e privilegi prima della registrazione.
 - La compromissione Connect non consegna più le credenziali del database owner.
 - La publication è un contratto SQL versionato e il rollback migration la
-  rimuove senza eliminare il ruolo o lo slot eventualmente esistente.
+  rimuove e revoca il grant dal carrier senza eliminare ruoli CNPG o lo slot
+  eventualmente esistente.
+- Un’installazione iniziale con `cdc.enabled=false` applica comunque il grant
+  al carrier NOLOGIN. Abilitare CDC in seguito eredita il privilegio senza
+  riscrivere né fingere di rieseguire una migration già applicata.
 
 ## Migrazione, rollback e sicurezza
 
-Ordine: Secret dedicato, riconciliazione ruolo CNPG, migration 0005,
-registrazione connector. Un passo mancante deve fallire prima di dichiarare CDC
-operativo. Il rollback del connector non elimina automaticamente slot o WAL;
+Ordine iniziale: riconciliazione carrier CNPG, migration 0005, eventuale Secret
+dedicato e riconciliazione login role, registrazione connector. In un upgrade
+disabled→enabled i primi due passi sono già conclusi e CNPG aggiunge la
+membership prima della registrazione. Un passo mancante deve fallire prima di
+dichiarare CDC operativo. Il rollback del connector non elimina automaticamente slot o WAL;
 l’operatore deve fermare Connect, verificare i consumer lag, rimuovere lo slot
 solo se non più necessario e infine applicare la down migration. Password,
 Secret data e DSN non entrano in log o artefatti.

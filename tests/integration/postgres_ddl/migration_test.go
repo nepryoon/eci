@@ -62,8 +62,11 @@ func TestPostgresDDLMigration(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	db.SetConnMaxLifetime(time.Minute)
-	if _, err := db.ExecContext(ctx, `CREATE ROLE eci_cdc LOGIN REPLICATION NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS`); err != nil {
-		t.Fatalf("creazione ruolo CDC fixture: %v", err)
+	// CNPG keeps this passwordless privilege role present even while CDC is
+	// disabled. The login role is intentionally created only after migrations
+	// to reproduce a supported disabled -> enabled chart upgrade.
+	if _, err := db.ExecContext(ctx, `CREATE ROLE eci_cdc_outbox_reader NOLOGIN NOREPLICATION NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS`); err != nil {
+		t.Fatalf("creazione ruolo privilegi CDC fixture: %v", err)
 	}
 
 	// Scenario 1: DB vuoto, applico `up` -> le 4 tabelle esistono.
@@ -71,7 +74,11 @@ func TestPostgresDDLMigration(t *testing.T) {
 
 	assertTablesExist(t, db, "code_node", "code_relation", "outbox", "processed_events")
 
-	t.Run("ADR0020_DedicatedCDCReplicationRoleAndFixedPublication", func(t *testing.T) {
+	if _, err := db.ExecContext(ctx, `CREATE ROLE eci_cdc LOGIN REPLICATION NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS IN ROLE eci_cdc_outbox_reader`); err != nil {
+		t.Fatalf("abilitazione ruolo CDC dopo migrations: %v", err)
+	}
+
+	t.Run("ADR0020_DedicatedCDCUpgradeRoleAndFixedPublication", func(t *testing.T) {
 		var replication, superuser, createDB, createRole, bypassRLS bool
 		if err := db.QueryRowContext(ctx, `
 			SELECT rolreplication, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls

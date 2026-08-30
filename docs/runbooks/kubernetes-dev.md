@@ -281,10 +281,13 @@ kubectl -n data-plane exec -i deployment/kafka-connect -c kafka-connect -- \
 
 The worker resolves
 `${env:POSTGRES_PASSWORD}` from the dedicated `eci-postgres-cdc` Secret. CNPG
-manages the `eci_cdc` role with LOGIN+REPLICATION but without superuser,
-createdb, createrole or bypassrls. Migration 0005 creates the fixed publication
-on `public.outbox` and grants only SELECT; `publication.autocreate.mode` remains
-disabled. The ConfigMap and deployment
+always manages the passwordless NOLOGIN role `eci_cdc_outbox_reader`.
+Migration 0005 creates the fixed publication on `public.outbox` and grants only
+SELECT to that carrier. With CDC enabled, CNPG manages `eci_cdc` as its member
+with LOGIN+REPLICATION but without superuser, createdb, createrole or bypassrls.
+This ordering also supports enabling CDC after migration 0005 was applied while
+the connector was disabled; no migration is replayed.
+`publication.autocreate.mode` remains disabled. The ConfigMap and deployment
 logs never contain the password. Registration must fail if the table or
 connector plugin is absent, and readiness of the worker alone must not be
 reported as an active CDC stream.

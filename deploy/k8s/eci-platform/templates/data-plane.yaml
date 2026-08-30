@@ -16,9 +16,21 @@ spec:
       database: eci
       owner: eci
       secret: {name: {{ .Values.global.existingSecret }}}
-  {{- if .Values.cdc.enabled }}
   managed:
     roles:
+      # Keep the passwordless privilege carrier present independently from the
+      # CDC workload. Migration 0005 grants this role once; enabling CDC later
+      # only adds the login role as a member and cannot lose the table grant.
+      - name: eci_cdc_outbox_reader
+        ensure: present
+        login: false
+        replication: false
+        superuser: false
+        createdb: false
+        createrole: false
+        bypassrls: false
+        disablePassword: true
+      {{- if .Values.cdc.enabled }}
       - name: eci_cdc
         ensure: present
         login: true
@@ -27,8 +39,9 @@ spec:
         createdb: false
         createrole: false
         bypassrls: false
+        inRoles: [eci_cdc_outbox_reader]
         passwordSecret: {name: {{ .Values.cdc.postgresSecret }}}
-  {{- end }}
+      {{- end }}
   storage:
     size: {{ .Values.dataPlane.postgres.storage }}
     {{- if .Values.global.storageClass }}

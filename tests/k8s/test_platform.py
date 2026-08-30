@@ -164,12 +164,21 @@ class PlatformChartTests(unittest.TestCase):
         self.assertEqual(postgres["spec"]["postgresql"]["parameters"]["wal_level"], "logical")
         self.assertEqual(
             postgres["spec"]["managed"]["roles"],
-            [{
-                "name": "eci_cdc", "ensure": "present", "login": True,
-                "replication": True, "superuser": False, "createdb": False,
-                "createrole": False, "bypassrls": False,
-                "passwordSecret": {"name": "eci-postgres-cdc"},
-            }],
+            [
+                {
+                    "name": "eci_cdc_outbox_reader", "ensure": "present",
+                    "login": False, "replication": False, "superuser": False,
+                    "createdb": False, "createrole": False, "bypassrls": False,
+                    "disablePassword": True,
+                },
+                {
+                    "name": "eci_cdc", "ensure": "present", "login": True,
+                    "replication": True, "superuser": False, "createdb": False,
+                    "createrole": False, "bypassrls": False,
+                    "inRoles": ["eci_cdc_outbox_reader"],
+                    "passwordSecret": {"name": "eci-postgres-cdc"},
+                },
+            ],
         )
         self.assertEqual(opensearch["apiVersion"], "opensearch.opster.io/v1")
         self.assertEqual(
@@ -1045,11 +1054,18 @@ spec:
         self.assertNotIn(("Deployment", "data-plane", "kafka-connect"), rendered)
         self.assertNotIn(("ConfigMap", "data-plane", "eci-debezium-connector"), rendered)
         postgres = rendered[("Cluster", "data-plane", "eci-postgres")]
-        self.assertNotIn(
-            "managed",
-            postgres["spec"],
-            "cdc.enabled=false must not require the CDC-only PostgreSQL Secret",
+        self.assertEqual(
+            postgres["spec"]["managed"]["roles"],
+            [{
+                "name": "eci_cdc_outbox_reader", "ensure": "present",
+                "login": False, "replication": False, "superuser": False,
+                "createdb": False, "createrole": False, "bypassrls": False,
+                "disablePassword": True,
+            }],
+            "cdc.enabled=false must preserve the passwordless privilege role "
+            "without requiring the CDC login Secret",
         )
+        self.assertNotIn("eci-postgres-cdc", output)
         self.assertFalse(
             any(
                 obj.get("kind") == "NetworkPolicy"
