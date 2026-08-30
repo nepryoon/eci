@@ -1,5 +1,5 @@
 # SPEC-073 — Tombstone idempotenti nel sink Neo4j
-Stato: approved
+Stato: implemented
 Task-tree: T7.1a · Servizio: services/sink-graph · ADD: Modulo 1 §2.2.3–§2.2.4, Modulo 2 §1.2
 Contratti: contracts/jsonschema/outbox-event.json, contracts/cypher/schema.cypher
 
@@ -82,13 +82,17 @@ o header; operation e outcome sono valori chiusi. Nessun tombstone viene loggato
 
 ## 9. Criteri di accettazione
 
-- [ ] Test nuovi osservati rossi contro consumer UPSERT-only.
-- [ ] `go test ./internal/consumer/...`
-- [ ] `go vet ./...`
+- [x] Test nuovi osservati rossi contro consumer UPSERT-only.
+- [x] `go test ./internal/consumer/...`
+- [x] `go vet ./...`
 - [ ] integration test compilato e verde con Docker, ripetuto due volte.
-- [ ] `task build && task lint && task test && task test:security`
+- [x] `task build && task lint && task test && task test:security`
 - [ ] `task test:integration`
-- [ ] Review scope/replay/marker/lock/injection/cancel completata.
+- [x] Review scope/replay/marker/lock/injection/cancel completata.
+
+Il binario integration con i nuovi scenari compila con tag `integration`. La
+suite reale Neo4j/PostgreSQL resta non eseguita per assenza del daemon Docker;
+la SPEC non viene quindi promossa a `verified`.
 
 ## 10. Review avversariale pre-implementazione
 
