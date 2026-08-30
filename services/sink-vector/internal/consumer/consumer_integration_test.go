@@ -64,6 +64,12 @@ func TestSinkVectorConsumer(t *testing.T) {
 	t.Run("Review_FailedQdrantWriteDoesNotMarkProcessed", func(t *testing.T) {
 		reviewFailedQdrantWriteDoesNotMarkProcessed(t, ctx, st)
 	})
+	t.Run("SPEC075_DeletePointScopeSafeAndIdempotent", func(t *testing.T) {
+		spec075DeletePointScopeSafeAndIdempotent(t, ctx, st)
+	})
+	t.Run("SPEC075_FailedDeleteDoesNotMarkProcessed", func(t *testing.T) {
+		spec075FailedDeleteDoesNotMarkProcessed(t, ctx, st)
+	})
 }
 
 func reviewFailedQdrantWriteDoesNotMarkProcessed(t *testing.T, ctx context.Context, st *stack) {
@@ -84,7 +90,7 @@ func reviewFailedQdrantWriteDoesNotMarkProcessed(t *testing.T, ctx context.Conte
 		consumer.Deps{DB: st.db, Qdrant: unreachable, Logf: t.Logf},
 		consumer.TopicCodeEmbedding,
 		payload,
-		[]kafka.Header{{Key: "event_id", Value: []byte(eventID)}},
+		eventHeaders(eventID, "UPSERT"),
 	)
 	if err == nil {
 		t.Fatal("expected unreachable Qdrant write to fail")
@@ -98,6 +104,117 @@ func reviewFailedQdrantWriteDoesNotMarkProcessed(t *testing.T, ctx context.Conte
 	}
 	if count != 0 {
 		t.Fatalf("processed marker count after failed Qdrant write = %d, want 0", count)
+	}
+}
+
+func spec075DeletePointScopeSafeAndIdempotent(t *testing.T, ctx context.Context, st *stack) {
+	deps := newDeps(st)
+	embeddingID := uuid.NewString()
+	entityID := "entity-delete"
+	pointID := consumer.DerivePointID(embeddingID)
+
+	upsertEventID := uuid.NewString()
+	upsertPayload := codeEmbeddingPayload(
+		embeddingID, uuid.NewString(), entityID, syntheticVector(75), "test-model",
+		map[string]any{"path": "delete.go"},
+	)
+	outcome, err := consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeEmbedding, upsertPayload,
+		eventHeaders(upsertEventID, "UPSERT"),
+	)
+	if err != nil || outcome != consumer.OutcomeStored {
+		t.Fatalf("seed upsert outcome=%v err=%v", outcome, err)
+	}
+	if n := countPoints(t, ctx, st.qdrant, pointID); n != 1 {
+		t.Fatalf("seed point count=%d want=1", n)
+	}
+
+	wrongScopeEventID := uuid.NewString()
+	wrongScope := codeEmbeddingTombstone(embeddingID, entityID, "admins", "delete.go")
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeEmbedding, wrongScope,
+		eventHeaders(wrongScopeEventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("cross-scope delete outcome=%v err=%v", outcome, err)
+	}
+	if n := countPoints(t, ctx, st.qdrant, pointID); n != 1 {
+		t.Fatalf("cross-scope delete point count=%d want=1", n)
+	}
+	assertProcessedEvent(t, ctx, st.db, wrongScopeEventID)
+
+	deleteEventID := uuid.NewString()
+	deletePayload := codeEmbeddingTombstone(embeddingID, entityID, "developers", "delete.go")
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeEmbedding, deletePayload,
+		eventHeaders(deleteEventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("delete outcome=%v err=%v", outcome, err)
+	}
+	if n := countPoints(t, ctx, st.qdrant, pointID); n != 0 {
+		t.Fatalf("deleted point count=%d want=0", n)
+	}
+	assertProcessedEvent(t, ctx, st.db, deleteEventID)
+
+	// Simulate a crash after the durable Qdrant effect but before the marker.
+	if _, err := st.db.ExecContext(ctx,
+		"DELETE FROM processed_events WHERE event_id = $1 AND consumer_name = $2",
+		deleteEventID, consumer.ConsumerName,
+	); err != nil {
+		t.Fatalf("remove marker for failure-window replay: %v", err)
+	}
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeEmbedding, deletePayload,
+		eventHeaders(deleteEventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("absent-point replay outcome=%v err=%v", outcome, err)
+	}
+	if n := countPoints(t, ctx, st.qdrant, pointID); n != 0 {
+		t.Fatalf("replayed delete point count=%d want=0", n)
+	}
+	assertProcessedEvent(t, ctx, st.db, deleteEventID)
+
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeEmbedding, deletePayload,
+		eventHeaders(deleteEventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDuplicate {
+		t.Fatalf("marked replay outcome=%v err=%v", outcome, err)
+	}
+}
+
+func spec075FailedDeleteDoesNotMarkProcessed(t *testing.T, ctx context.Context, st *stack) {
+	unreachable, err := qdrant.NewClient(&qdrant.Config{Host: "127.0.0.1", Port: 1})
+	if err != nil {
+		t.Fatalf("qdrant NewClient: %v", err)
+	}
+	defer unreachable.Close()
+
+	eventID := uuid.NewString()
+	deletePayload := codeEmbeddingTombstone(uuid.NewString(), "entity-delete-failure", "developers", "delete.go")
+	deleteCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_, err = consumer.ProcessMessage(
+		deleteCtx,
+		consumer.Deps{DB: st.db, Qdrant: unreachable, Logf: t.Logf},
+		consumer.TopicCodeEmbedding,
+		deletePayload,
+		eventHeaders(eventID, "DELETE"),
+	)
+	if err == nil {
+		t.Fatal("expected unreachable Qdrant delete to fail")
+	}
+	var count int
+	if err := st.db.QueryRowContext(ctx,
+		"SELECT count(*) FROM processed_events WHERE event_id = $1 AND consumer_name = $2",
+		eventID, consumer.ConsumerName,
+	).Scan(&count); err != nil {
+		t.Fatalf("query processed marker: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("processed marker count after failed Qdrant delete=%d want=0", count)
 	}
 }
 
@@ -493,7 +610,7 @@ func newDeps(st *stack) consumer.Deps {
 
 func produce(t *testing.T, ctx context.Context, brokers []string, topic, key string, value []byte, eventID string) {
 	t.Helper()
-	headers := []kafka.Header{{Key: "event_id", Value: []byte(eventID)}}
+	headers := eventHeaders(eventID, "UPSERT")
 	w := &kafka.Writer{
 		Addr:                   kafka.TCP(brokers...),
 		Topic:                  topic,
@@ -502,6 +619,13 @@ func produce(t *testing.T, ctx context.Context, brokers []string, topic, key str
 	defer w.Close()
 	if err := w.WriteMessages(ctx, kafka.Message{Key: []byte(key), Value: value, Headers: headers}); err != nil {
 		t.Fatalf("produzione messaggio sintetico su %s: %v", topic, err)
+	}
+}
+
+func eventHeaders(eventID, operation string) []kafka.Header {
+	return []kafka.Header{
+		{Key: "event_id", Value: []byte(eventID)},
+		{Key: "event_type", Value: []byte(operation)},
 	}
 }
 
@@ -572,6 +696,20 @@ func codeEmbeddingPayloadWithoutProvenance(id, chunkID, entityID string, vector 
 		"vector": vector, "model_id": modelID, "embedding_dim": len(vector),
 	}
 	out, _ := json.Marshal(m)
+	return out
+}
+
+func codeEmbeddingTombstone(id, entityID, aclGroup, path string) []byte {
+	out, _ := json.Marshal(map[string]any{
+		"id":        id,
+		"entity_id": entityID,
+		"provenance": map[string]any{
+			"tenant_id": "tenant-test",
+			"repo":      "sample-repo",
+			"acl_group": aclGroup,
+			"path":      path,
+		},
+	})
 	return out
 }
 
