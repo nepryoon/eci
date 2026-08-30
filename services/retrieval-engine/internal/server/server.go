@@ -1,8 +1,7 @@
 // Package server implementa RetrievalEngineServer (SPEC-016, T1.4): la
-// sola gamba grafo (GetNode, ExpandNeighbors, HybridSearch, Health) contro
-// Neo4j. ImpactAnalysis resta Unimplemented (ereditato da
-// UnimplementedRetrievalEngineServer, embedded — esplicitamente fuori
-// scope SPEC-016 §2).
+// RPC di retrieval contro le viste autorizzate Neo4j, Qdrant e OpenSearch.
+// Lo scaffold embedded preserva la compatibilita' forward per eventuali RPC
+// future; ImpactAnalysis e' implementata da SPEC-042/SPEC-069.
 package server
 
 import (
@@ -54,7 +53,7 @@ var edgeTypeOrder = []string{
 
 // Server implementa retrievalv1.RetrievalEngineServer. UnimplementedRetrievalEngineServer
 // embedded by value (non puntatore, per compatibilità forward-only del
-// codice generato) copre ImpactAnalysis con codes.Unimplemented.
+// codice generato) copre soltanto eventuali RPC future.
 //
 // Qdrant/Embedder (SPEC-041, T4.1) sono opzionali: restano nil per un
 // Server usato SOLO per GetNode/ExpandNeighbors/Health o per HybridSearch

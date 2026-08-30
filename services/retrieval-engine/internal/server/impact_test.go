@@ -1,9 +1,15 @@
 package server
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"testing"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/eci-project/eci/libs/go/eci/accessscope"
 	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
@@ -12,6 +18,22 @@ import (
 
 func impactScope() accessscope.Scope {
 	return accessscope.Scope{TenantID: "tenant", UserID: "user", AllowedRepos: []string{"repo-a", "repo-b"}, ACLGroups: []string{"dev"}}
+}
+
+func TestImpactStatusErrorPreservesCancellationSemantics(t *testing.T) {
+	tests := []struct {
+		err  error
+		code codes.Code
+	}{
+		{fmt.Errorf("wrapped: %w", context.Canceled), codes.Canceled},
+		{fmt.Errorf("wrapped: %w", context.DeadlineExceeded), codes.DeadlineExceeded},
+		{errors.New("neo4j unavailable"), codes.Unavailable},
+	}
+	for _, test := range tests {
+		if got := status.Code(impactStatusError(test.err)); got != test.code {
+			t.Errorf("error %v mapped to %v, want %v", test.err, got, test.code)
+		}
+	}
 }
 
 func TestValidatedImpactOptionsAppliesDefaultsAndRestrictsRepos(t *testing.T) {
@@ -31,6 +53,17 @@ func TestValidatedImpactOptionsAppliesDefaultsAndRestrictsRepos(t *testing.T) {
 	}
 	if !reflect.DeepEqual(opts.Repos, []string{"repo-b"}) {
 		t.Fatalf("repos = %v, want authenticated intersection", opts.Repos)
+	}
+}
+
+func TestValidatedImpactOptionsReturnsEmptyWithoutExpandingUnauthorizedRepo(t *testing.T) {
+	req := &retrievalv1.ImpactAnalysisRequest{EntryNodeId: "seed", MaxNodes: 20, Repos: []string{"repo-x"}}
+	opts, empty, err := validatedImpactOptions(impactScope(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !empty || len(opts.Repos) != 0 {
+		t.Fatalf("empty=%v repos=%v, want explicit empty intersection", empty, opts.Repos)
 	}
 }
 

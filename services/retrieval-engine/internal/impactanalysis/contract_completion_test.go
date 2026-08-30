@@ -4,12 +4,31 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
 type scriptedLevelFetcher struct {
 	results []levelFetchResult
 	calls   [][]string
+}
+
+func TestLevelCypherUsesOnlyWhitelistedDirectionAndBounds(t *testing.T) {
+	query, err := levelCypher([]string{"CALLS", "IMPORTS"}, "FORWARD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"(n)-[r:CALLS|IMPORTS]->(dep:CodeNode)", "LIMIT $fanout_probe", "dep.repo IN $allowed_repos", "dep.acl_group IN $acl_groups", "dep.impact_score, 0.0) >= $min_impact_score"} {
+		if !strings.Contains(query, fragment) {
+			t.Errorf("query missing %q", fragment)
+		}
+	}
+	if _, err := levelCypher([]string{"CALLS]-(x) DELETE x //"}, "REVERSE"); err == nil {
+		t.Fatal("non-whitelisted relationship reached query builder")
+	}
+	if _, err := levelCypher([]string{"CALLS"}, "BOTH"); err == nil {
+		t.Fatal("non-whitelisted direction reached query builder")
+	}
 }
 
 func (f *scriptedLevelFetcher) fetch(_ context.Context, frontier []string, _ map[string]struct{}) (levelFetchResult, error) {
@@ -55,7 +74,7 @@ func TestRunBFSCompletePathAndDeterministicKind(t *testing.T) {
 func TestRunBFSReportsIndependentTruncationReasons(t *testing.T) {
 	t.Run("fanout", func(t *testing.T) {
 		fetch := &scriptedLevelFetcher{results: []levelFetchResult{{
-			Nodes:              []fetchedNode{{ParentID: "seed", NodeID: "n1"}},
+			Nodes:           []fetchedNode{{ParentID: "seed", NodeID: "n1"}},
 			FanoutTruncated: true,
 		}}}
 		var events []ImpactEvent

@@ -89,7 +89,7 @@ type chunkHit struct {
 	Text       string `json:"text"`
 }
 
-// hydrateSourceText popola RetrievedNode.SourceText leggendo i chunk da
+// HydrateSourceText popola RetrievedNode.SourceText leggendo i chunk da
 // OpenSearch (code_chunks, SPEC-034) per l'intero set di nodi in UNA sola
 // query batch (`terms` su entity_id — stesso principio "batch, non N
 // separate" già stabilito per hydrateNames), poi concatena i chunk di
@@ -99,7 +99,7 @@ type chunkHit struct {
 // errore) — solo un fallimento della QUERY stessa (OpenSearch
 // irraggiungibile) è un errore esplicito (SPEC-045 §4: richiesto
 // esplicitamente dal client via include_source_text=true).
-func hydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes []RetrievedNode) error {
+func HydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes []RetrievedNode) error {
 	ctx, observe := securityfilter.Observe(ctx, "opensearch")
 	outcome := "error"
 	defer func() { observe(outcome) }()
@@ -121,7 +121,8 @@ func hydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes 
 	}
 
 	query := map[string]any{
-		"query": securityfilter.OpenSearchFilter(scope, ids),
+		"query":            securityfilter.OpenSearchFilter(scope, ids),
+		"track_total_hits": true,
 		// Limite esplicito generoso: il default OpenSearch (10 risultati)
 		// troncherebbe silenziosamente un'entità con molti chunk o un
 		// candidate set con molte entità — scelta dichiarata, non presunta
@@ -136,6 +137,16 @@ func hydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes 
 	})
 	if err != nil {
 		return fmt.Errorf("ricerca batch code_chunks: %w", err)
+	}
+	inspect := resp.Inspect()
+	if inspect.Response == nil || inspect.Response.StatusCode < 200 || inspect.Response.StatusCode >= 300 {
+		return fmt.Errorf("ricerca batch code_chunks: risposta OpenSearch non valida")
+	}
+	if resp.Timeout || resp.Errors {
+		return fmt.Errorf("ricerca batch code_chunks: risposta parziale")
+	}
+	if resp.Hits.Total.Value > len(resp.Hits.Hits) {
+		return fmt.Errorf("ricerca batch code_chunks: %d chunk superano il limite bounded %d", resp.Hits.Total.Value, len(resp.Hits.Hits))
 	}
 
 	byEntity := make(map[string][]chunkHit)

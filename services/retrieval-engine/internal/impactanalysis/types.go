@@ -22,20 +22,28 @@ type Provenance struct {
 // del percorso più breve verso questo nodo (SPEC-042 §2, "impact_kind":
 // CALLS/IMPLEMENTS/EXTENDS/OVERRIDES/DEPENDS_ON/IMPORTS).
 type ImpactNode struct {
-	NodeID      string
-	Domain      string
-	HopDistance int
-	EdgeType    string
-	Provenance  *Provenance
+	NodeID, Domain, NodeType, Name, Signature, SourceText, ASTHash string
+	HopDistance                                                    int
+	ImpactScore                                                    float64
+	PathEdgeTypes                                                  []string
+	ImpactKind                                                     string
+	// EdgeType is the final hop retained for compatibility with SPEC-042
+	// package consumers; PathEdgeTypes is the authoritative full path.
+	EdgeType   string
+	Provenance *Provenance
 }
 
 // ImpactProgress riassume l'esplorazione di UN livello di profondità
 // completato (SPEC-042 §2).
 type ImpactProgress struct {
-	NodesExplored int // totale cumulativo su TUTTA la traversata finora
-	FrontierSize  int // nodi scoperti in QUESTO livello
-	CurrentDepth  int
-	Truncated     bool // true se max_nodes è stato raggiunto in questo livello
+	NodesExplored     int
+	FrontierSize      int
+	CurrentDepth      int
+	TruncatedByFanout bool
+	TruncatedByDepth  bool
+	TruncatedByNodes  bool
+	// Truncated is the legacy aggregate node-cap signal used by SPEC-042.
+	Truncated bool
 }
 
 // ImpactEvent è l'evento emesso da StreamImpact via `emit` — esattamente
@@ -50,13 +58,28 @@ type ImpactEvent struct {
 // livello — prodotta sia dal fetcher Neo4j reale (stream.go) sia dai fake
 // fetcher usati nei test unitari puri (SPEC-042 §7).
 type fetchedNode struct {
-	NodeID     string
-	Domain     string
-	EdgeType   string
-	Provenance *Provenance
+	ParentID, NodeID, Domain, NodeType, Name, Signature, ASTHash string
+	EdgeType                                                     string
+	ImpactScore                                                  float64
+	Provenance                                                   *Provenance
+}
+
+type levelFetchResult struct {
+	Nodes           []fetchedNode
+	FanoutTruncated bool
+}
+
+// Options carries only validated, server-bounded traversal inputs.
+type Options struct {
+	MaxDepth, MaxNodes, FanoutCap int
+	EdgeTypes, Repos              []string
+	Direction                     string
+	MinImpactScore                float64
+	Domain                        *string
+	HydrateLevel                  func(context.Context, []*ImpactNode) error
 }
 
 // levelFetchFunc recupera UN livello di espansione: i vicini (via reverse
 // reachability) dei nodi in frontierIDs, esclusi quelli già in visited.
 // Iniettata per rendere runBFS testabile senza Neo4j reale (SPEC-042 §7).
-type levelFetchFunc func(ctx context.Context, frontierIDs []string, visited map[string]struct{}) ([]fetchedNode, error)
+type levelFetchFunc func(ctx context.Context, frontierIDs []string, visited map[string]struct{}) (levelFetchResult, error)

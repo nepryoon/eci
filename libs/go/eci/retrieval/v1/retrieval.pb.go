@@ -967,11 +967,11 @@ type ImpactAnalysisRequest struct {
 	IncludeSourceText bool                   `protobuf:"varint,8,opt,name=include_source_text,json=includeSourceText,proto3" json:"include_source_text,omitempty"`
 	// Estensione additiva T4.2 (SPEC-042, ADR-0008): cap sul numero TOTALE di
 	// nodi esplorati sull'INTERA traversata (concetto diverso da
-	// fanout_cap_per_hop, che resta non implementato da T4.2). <= 0 -> errore
+	// fanout_cap_per_hop). <= 0 -> errore
 	// esplicito, nessun default silenzioso (SPEC-042 §3 scenario 6).
 	MaxNodes      int32    `protobuf:"varint,9,opt,name=max_nodes,json=maxNodes,proto3" json:"max_nodes,omitempty"`
 	Domain        Domain   `protobuf:"varint,10,opt,name=domain,proto3,enum=eci.retrieval.v1.Domain" json:"domain,omitempty"` // filtro dominio; UNSPECIFIED = nessun filtro
-	Repos         []string `protobuf:"bytes,11,rep,name=repos,proto3" json:"repos,omitempty"`                                 // filtro repo (T4.2 usa solo il primo, se presente)
+	Repos         []string `protobuf:"bytes,11,rep,name=repos,proto3" json:"repos,omitempty"`                                 // filtro repo, intersecato con lo scope autenticato
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1161,8 +1161,11 @@ type ImpactProgress struct {
 	CurrentDepth         uint32                 `protobuf:"varint,3,opt,name=current_depth,json=currentDepth,proto3" json:"current_depth,omitempty"`
 	TruncatedByFanoutCap bool                   `protobuf:"varint,4,opt,name=truncated_by_fanout_cap,json=truncatedByFanoutCap,proto3" json:"truncated_by_fanout_cap,omitempty"`
 	TruncatedByDepth     bool                   `protobuf:"varint,5,opt,name=truncated_by_depth,json=truncatedByDepth,proto3" json:"truncated_by_depth,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// Estensione additiva SPEC-069 / ADR-0024: distingue il cap totale
+	// max_nodes dal cap per-node fanout_cap_per_hop.
+	TruncatedByNodeCap bool `protobuf:"varint,6,opt,name=truncated_by_node_cap,json=truncatedByNodeCap,proto3" json:"truncated_by_node_cap,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *ImpactProgress) Reset() {
@@ -1226,6 +1229,13 @@ func (x *ImpactProgress) GetTruncatedByFanoutCap() bool {
 func (x *ImpactProgress) GetTruncatedByDepth() bool {
 	if x != nil {
 		return x.TruncatedByDepth
+	}
+	return false
+}
+
+func (x *ImpactProgress) GetTruncatedByNodeCap() bool {
+	if x != nil {
+		return x.TruncatedByNodeCap
 	}
 	return false
 }
@@ -1750,13 +1760,14 @@ const file_eci_retrieval_v1_retrieval_proto_rawDesc = "" +
 	"\vimpact_kind\x18\x02 \x01(\x0e2\x1c.eci.retrieval.v1.ImpactKindR\n" +
 	"impactKind\x12B\n" +
 	"\x0fpath_edge_types\x18\x03 \x03(\x0e2\x1a.eci.retrieval.v1.EdgeTypeR\rpathEdgeTypes\x12\x14\n" +
-	"\x05depth\x18\x04 \x01(\rR\x05depth\"\xe4\x01\n" +
+	"\x05depth\x18\x04 \x01(\rR\x05depth\"\x97\x02\n" +
 	"\x0eImpactProgress\x12#\n" +
 	"\rnodes_emitted\x18\x01 \x01(\rR\fnodesEmitted\x12#\n" +
 	"\rfrontier_size\x18\x02 \x01(\rR\ffrontierSize\x12#\n" +
 	"\rcurrent_depth\x18\x03 \x01(\rR\fcurrentDepth\x125\n" +
 	"\x17truncated_by_fanout_cap\x18\x04 \x01(\bR\x14truncatedByFanoutCap\x12,\n" +
-	"\x12truncated_by_depth\x18\x05 \x01(\bR\x10truncatedByDepth\"\x94\x01\n" +
+	"\x12truncated_by_depth\x18\x05 \x01(\bR\x10truncatedByDepth\x121\n" +
+	"\x15truncated_by_node_cap\x18\x06 \x01(\bR\x12truncatedByNodeCap\"\x94\x01\n" +
 	"\x13ImpactAnalysisEvent\x124\n" +
 	"\x04node\x18\x01 \x01(\v2\x1e.eci.retrieval.v1.ImpactedNodeH\x00R\x04node\x12>\n" +
 	"\bprogress\x18\x02 \x01(\v2 .eci.retrieval.v1.ImpactProgressH\x00R\bprogressB\a\n" +
