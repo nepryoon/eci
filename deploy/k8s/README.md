@@ -60,6 +60,10 @@ Its `/ready` pings Redis through the configured authenticated client; a stale
 password or unavailable Redis therefore blocks startup/readiness without
 leaking backend details. Liveness remains local. Missing keys or CA files
 remain a fail-closed rollout failure.
+Retrieval Engine similarly becomes Ready only when authenticated Neo4j
+connectivity, the exact Qdrant collection, the exact OpenSearch index, and the
+native TEI `/health` endpoints for embedder and reranker all succeed. These
+checks are concurrent and bounded; TEI health does not enqueue inference.
 The standalone Redis Service has exactly one PVC-backed StatefulSet backend
 with AOF `everysec`; the chart does not claim replication by load-balancing
 independent caches. The bundled dev Keycloak

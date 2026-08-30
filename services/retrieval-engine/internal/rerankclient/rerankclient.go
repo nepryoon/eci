@@ -30,6 +30,26 @@ func New(baseURL string) *Client {
 	return &Client{BaseURL: baseURL, HTTPClient: http.DefaultClient}
 }
 
+// Health calls TEI's native model health endpoint without running reranking.
+// Readiness therefore does not create recurring GPU inference load.
+func (c *Client) Health(ctx context.Context) error {
+	url := c.BaseURL + "/health"
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("rerankclient: costruzione health GET %s: %w", url, err)
+	}
+	response, err := c.HTTPClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("rerankclient: health GET %s: %w", url, err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("rerankclient: health GET %s: status %d", url, response.StatusCode)
+	}
+	return nil
+}
+
 // Result è UN elemento della risposta /rerank: l'indice del testo in
 // ingresso (posizione nella lista `texts` della richiesta) e il suo
 // punteggio.

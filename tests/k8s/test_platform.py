@@ -545,6 +545,15 @@ class PlatformChartTests(unittest.TestCase):
             )
         self.assertEqual(semantic_cache_container["livenessProbe"]["tcpSocket"], {"port": "service"})
 
+        retrieval = self.by_key[("Deployment", "query-plane", "retrieval-engine")]
+        retrieval_container = retrieval["spec"]["template"]["spec"]["containers"][0]
+        for probe_name in ("startupProbe", "readinessProbe"):
+            self.assertEqual(
+                retrieval_container[probe_name]["httpGet"],
+                {"path": "/ready", "port": "metrics", "scheme": "HTTP"},
+            )
+        self.assertEqual(retrieval_container["livenessProbe"]["tcpSocket"], {"port": "service"})
+
         # A ClusterIP must never load-balance one logical cache across
         # independent standalone Redis processes.
         redis = self.by_key[("StatefulSet", "data-plane", "redis")]

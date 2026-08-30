@@ -7,6 +7,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -34,6 +36,8 @@ import (
 )
 
 const defaultMetricsPort = "9105"
+const retrievalCollectionName = "code_embeddings"
+const retrievalIndexName = "code_chunks"
 
 func newMetricsHandler(gatherer prometheus.Gatherer) http.Handler {
 	return promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{})
@@ -60,12 +64,6 @@ func main() {
 		log.Fatalf("retrieval-engine: inizializzazione OPA: %v", err)
 	}
 	metricsAddr := ":" + config.EnvOrDefault("METRICS_PORT", defaultMetricsPort)
-	go func() {
-		if err := http.ListenAndServe(metricsAddr, newMetricsHandler(prometheus.DefaultGatherer)); err != nil {
-			log.Printf("retrieval-engine: server HTTP metriche (%s) non avviato: %v", metricsAddr, err)
-		}
-	}()
-
 	neo4jURI := config.EnvOrDefault("NEO4J_URI", "bolt://localhost:7687")
 	neo4jUser := config.EnvOrDefault("NEO4J_USER", "neo4j")
 	neo4jPassword := config.EnvOrDefault("NEO4J_PASSWORD", "eci-dev-only")
@@ -130,6 +128,44 @@ func main() {
 	if err != nil {
 		log.Fatalf("retrieval-engine: net.Listen(%s): %v", addr, err)
 	}
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", newMetricsHandler(prometheus.DefaultGatherer))
+		mux.Handle("/ready", newDependencyReadinessHandler(
+			driver.VerifyConnectivity,
+			func(ctx context.Context) error {
+				exists, err := qdrantClient.CollectionExists(ctx, retrievalCollectionName)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					return fmt.Errorf("Qdrant collection %q is missing", retrievalCollectionName)
+				}
+				return nil
+			},
+			func(ctx context.Context) error {
+				response, err := openSearchClient.Indices.Exists(ctx, opensearchapi.IndicesExistsReq{
+					Indices: []string{retrievalIndexName},
+				})
+				if response != nil {
+					defer response.Body.Close()
+					_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+				}
+				if err != nil {
+					return err
+				}
+				if response == nil || response.StatusCode != http.StatusOK {
+					return fmt.Errorf("OpenSearch index %q is unavailable", retrievalIndexName)
+				}
+				return nil
+			},
+			embedder.Health,
+			reranker.Health,
+		))
+		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
+			log.Printf("retrieval-engine: server HTTP metriche/readiness (%s) non avviato: %v", metricsAddr, err)
+		}
+	}()
 
 	srv := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(

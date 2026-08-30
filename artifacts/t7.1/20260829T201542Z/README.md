@@ -41,6 +41,10 @@ Results:
 - Semantic Cache authenticated Redis readiness returns closed 503 without
   backend detail on a failed PING, and startup/readiness use that endpoint:
   PASS (deterministic unit/render evidence; first-party image not deployed);
+- Retrieval readiness requires authenticated Neo4j, exact Qdrant collection,
+  exact OpenSearch index and both native TEI health paths concurrently, bounded
+  and without inference or response detail: PASS (deterministic unit/render
+  evidence; first-party image not deployed);
 - dedicated CNPG-managed `eci_cdc` role, fixed outbox publication, SELECT-only
   table grant, logical slot and live Debezium connector/task: PASS;
 - migration 0006 consumer-scoped `processed_events` key applied live; a

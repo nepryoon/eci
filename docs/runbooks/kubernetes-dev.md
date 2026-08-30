@@ -188,6 +188,13 @@ metadata, discover the configured group coordinator and fetch that group's
 offsets. TLS, topic or group authorization failures return 503 without broker
 details. The liveness probe remains a local TCP check so broker recovery is not
 amplified into pod restart churn.
+Retrieval Engine exposes the same low-detail 204/503 contract on its metrics
+listener. Its bounded concurrent check verifies Neo4j credentials and
+connectivity, existence/access of Qdrant `code_embeddings` and OpenSearch
+`code_chunks`, plus the native TEI `/health` endpoints of embedder and
+reranker. The TEI checks do not run embeddings or reranking, so Kubernetes
+probing does not create periodic GPU inference load. Retrieval liveness remains
+local TCP.
 
 The default-deny boundary is complemented by per-workload NetworkPolicy pairs:
 the egress side selects the calling pod and the ingress side selects the exact
