@@ -36,7 +36,8 @@ Results:
 - Kafka Connect single-replica invariant and complete omission with the managed
   data plane disabled: PASS (deterministic render; no external backend claimed);
 - embedding-worker mTLS identity consumed its retry topic and accessed its exact
-  consumer-group offsets; shared worker readiness rejects TLS/topic/group
+  consumer-group offsets; shared worker readiness now also performs a
+  non-consuming log-end Fetch that requires Topic Read and rejects TLS/topic/group
   failures with 503 and leaks no broker detail: PASS;
 - Semantic Cache authenticated Redis readiness returns closed 503 without
   backend detail on a failed PING, and startup/readiness use that endpoint:
@@ -45,6 +46,9 @@ Results:
   exact OpenSearch index and both native TEI health paths concurrently, bounded
   and without inference or response detail: PASS (deterministic unit/render
   evidence; first-party image not deployed);
+- LLM Gateway readiness requires every configured vLLM `/health` path with a
+  bounded, non-inference request and returns an empty 503 on failure: PASS
+  (deterministic unit/render evidence; first-party image not deployed);
 - dedicated CNPG-managed `eci_cdc` role, passwordless
   `eci_cdc_outbox_reader` carrier membership, inherited SELECT-only table
   grant, fixed outbox publication, logical slot and live Debezium

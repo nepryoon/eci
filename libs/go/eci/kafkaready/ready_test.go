@@ -17,6 +17,8 @@ type fakeClient struct {
 	coordErr    error
 	offsets     *kafka.OffsetFetchResponse
 	offsetsErr  error
+	fetch       *kafka.FetchResponse
+	fetchErr    error
 }
 
 func (f fakeClient) Metadata(context.Context, *kafka.MetadataRequest) (*kafka.MetadataResponse, error) {
@@ -31,21 +33,26 @@ func (f fakeClient) OffsetFetch(context.Context, *kafka.OffsetFetchRequest) (*ka
 	return f.offsets, f.offsetsErr
 }
 
+func (f fakeClient) Fetch(context.Context, *kafka.FetchRequest) (*kafka.FetchResponse, error) {
+	return f.fetch, f.fetchErr
+}
+
 func TestCheckerRequiresTopicAndGroupAuthorization(t *testing.T) {
-	validMetadata := &kafka.MetadataResponse{Topics: []kafka.Topic{{Name: "events", Partitions: []kafka.Partition{{ID: 0}}}}}
+	validMetadata := &kafka.MetadataResponse{Topics: []kafka.Topic{{Name: "events", Partitions: []kafka.Partition{{ID: 0, Leader: kafka.Broker{Host: "broker", Port: 9093}}}}}}
 	validCoordinator := &kafka.FindCoordinatorResponse{
 		Coordinator: &kafka.FindCoordinatorResponseCoordinator{NodeID: 1, Host: "broker", Port: 9093},
 	}
 	validOffsets := &kafka.OffsetFetchResponse{Topics: map[string][]kafka.OffsetFetchPartition{
 		"events": {{Partition: 0, CommittedOffset: -1}},
 	}}
+	validFetch := &kafka.FetchResponse{Topic: "events", Partition: 0, Records: kafka.NewRecordReader()}
 
 	tests := []struct {
 		name   string
 		client fakeClient
 		ok     bool
 	}{
-		{name: "authorized", client: fakeClient{metadata: validMetadata, coordinator: validCoordinator, offsets: validOffsets}, ok: true},
+		{name: "authorized", client: fakeClient{metadata: validMetadata, coordinator: validCoordinator, offsets: validOffsets, fetch: validFetch}, ok: true},
 		{name: "transport failure", client: fakeClient{metadataErr: errors.New("tls failed")}},
 		{name: "topic denied", client: fakeClient{metadata: &kafka.MetadataResponse{Topics: []kafka.Topic{{Name: "events", Error: errors.New("topic authorization failed")}}}, coordinator: validCoordinator, offsets: validOffsets}},
 		{name: "group coordinator denied", client: fakeClient{metadata: validMetadata, coordinator: &kafka.FindCoordinatorResponse{Error: errors.New("group authorization failed")}, offsets: validOffsets}},
@@ -53,6 +60,8 @@ func TestCheckerRequiresTopicAndGroupAuthorization(t *testing.T) {
 		{name: "group offsets denied", client: fakeClient{metadata: validMetadata, coordinator: validCoordinator, offsets: &kafka.OffsetFetchResponse{Error: errors.New("group authorization failed")}}},
 		{name: "partition offset denied", client: fakeClient{metadata: validMetadata, coordinator: validCoordinator, offsets: &kafka.OffsetFetchResponse{Topics: map[string][]kafka.OffsetFetchPartition{"events": {{Partition: 0, Error: errors.New("group authorization failed")}}}}}},
 		{name: "incomplete offsets", client: fakeClient{metadata: validMetadata, coordinator: validCoordinator, offsets: &kafka.OffsetFetchResponse{Topics: map[string][]kafka.OffsetFetchPartition{"events": {}}}}},
+		{name: "topic read denied", client: fakeClient{metadata: validMetadata, coordinator: validCoordinator, offsets: validOffsets, fetchErr: errors.New("topic read authorization failed")}},
+		{name: "topic read response denied", client: fakeClient{metadata: validMetadata, coordinator: validCoordinator, offsets: validOffsets, fetch: &kafka.FetchResponse{Topic: "events", Partition: 0, Error: errors.New("topic read authorization failed")}}},
 	}
 
 	for _, test := range tests {

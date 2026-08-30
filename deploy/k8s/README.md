@@ -132,9 +132,14 @@ read the primary and their own retry topic, but cannot write any primary topic;
 Kafka Connect remains the sole primary-event producer. DLQ names remain
 `{primary}.DLQ`. ADR-0019 records the compatibility and rollout boundary.
 Each worker's `/ready` performs authenticated metadata checks for all input
-topics and group-coordinator/offset access using the same Kafka transport as
+topics, group-coordinator/offset access, and a non-consuming Fetch at the log
+end that exercises the actual Topic Read ACL, using the same Kafka transport as
 the consume loop. Kubernetes startup/readiness use that endpoint; liveness
 remains local so a broker outage does not create a restart storm.
+LLM Gateway similarly exposes `/ready` on its service port and requires every
+configured vLLM upstream's native `/health` to return 2xx within two seconds.
+The check sends no prompt and performs no inference; liveness remains the local
+TCP listener.
 
 The OPA ConfigMap is checked byte-for-byte against the canonical Compose Rego
 policy. MinIO uses a four-member distributed StatefulSet with PVCs in the

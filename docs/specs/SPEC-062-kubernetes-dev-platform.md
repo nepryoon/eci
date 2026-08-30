@@ -151,7 +151,8 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    observability non riceve accesso generale alle API dati.
    Startup/readiness dei quattro worker Kafka chiama `/ready`, che usa lo
    stesso transport del consumer e verifica metadata di ogni topic,
-   coordinator e offset access del gruppo. Errori TLS/topic/group rispondono
+   coordinator, offset access del gruppo e una Fetch non-consumante al log end
+   che esercita realmente la Topic Read ACL. Errori TLS/topic/group rispondono
    503 senza dettagli; liveness resta locale per evitare restart storm durante
    un outage recuperabile del broker. Semantic Cache applica lo stesso
    principio: `/ready` esegue PING Redis con il client autenticato e risponde
@@ -160,6 +161,9 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    `code_embeddings`, indice OpenSearch `code_chunks` e `/health` nativo TEI
    per embedder/reranker. La verifica TEI non esegue inferenza. Anche qui il
    body HTTP resta vuoto e liveness resta locale.
+   LLM Gateway applica lo stesso confine: `/ready` richiede `/health` 2xx da
+   ogni upstream vLLM configurato entro due secondi, senza prompt/inferenza;
+   liveness resta il socket locale.
 5. **Overlay dev onesto.** Given `values-dev.yaml`, When il bootstrap gira su
    kind, Then usa repliche/storage/resource ridotti e Neo4j Community come
    previsto dagli ADR dev esistenti. I workload ECI senza immagini pubblicate
@@ -349,10 +353,10 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
 - [x] Kafka Connect loopback-only è vincolato a una replica ed è omesso con il
       data plane; quando CDC è disabilitato il login role CNPG `eci_cdc` e il
       relativo Secret reference sono omessi, mentre resta soltanto il carrier
-      NOLOGIN senza password necessario al grant upgrade-safe; i quattro worker sono Ready solo dopo topic+group access via
+      NOLOGIN senza password necessario al grant upgrade-safe; i quattro worker sono Ready solo dopo topic Read+group access via
       il transport Kafka autenticato; Semantic Cache è Ready solo dopo PING
       Redis autenticato; Retrieval Engine richiede tutti i cinque backend
-      reali, mentre le liveness restano locali.
+      reali e LLM Gateway richiede la health vLLM, mentre le liveness restano locali.
 - [x] Redis standalone usa un solo backend StatefulSet con AOF/PVC e restart
       persistence verificata; porte service/metriche
       coincidenti non producono duplicati Kubernetes; Keycloak dev espone

@@ -22,6 +22,7 @@ type kafkaClient interface {
 	Metadata(context.Context, *kafka.MetadataRequest) (*kafka.MetadataResponse, error)
 	FindCoordinator(context.Context, *kafka.FindCoordinatorRequest) (*kafka.FindCoordinatorResponse, error)
 	OffsetFetch(context.Context, *kafka.OffsetFetchRequest) (*kafka.OffsetFetchResponse, error)
+	Fetch(context.Context, *kafka.FetchRequest) (*kafka.FetchResponse, error)
 }
 
 // Checker verifies the exact topic and consumer-group capabilities used by a
@@ -131,6 +132,45 @@ func (c *Checker) Check(ctx context.Context) error {
 	for topic, requested := range partitions {
 		if len(offsets.Topics[topic]) != len(requested) {
 			return fmt.Errorf("kafkaready: group offsets for topic %q incomplete", topic)
+		}
+	}
+
+	// Metadata and OffsetFetch require Describe and group access, but neither
+	// exercises the Topic Read ACL used by Reader.FetchMessages. Fetch at the
+	// current log end is non-consuming (no group offset or application record is
+	// advanced) while still forcing the broker to authorize the real Fetch API.
+	firstPartitions := make(map[string]kafka.Partition, len(metadata.Topics))
+	for _, topic := range metadata.Topics {
+		firstPartitions[topic.Name] = topic.Partitions[0]
+	}
+	for _, topic := range c.topics {
+		partition := firstPartitions[topic]
+		if partition.Error != nil {
+			return fmt.Errorf("kafkaready: partition for %q unavailable: %w", topic, partition.Error)
+		}
+		if partition.Leader.Host == "" || partition.Leader.Port <= 0 {
+			return fmt.Errorf("kafkaready: partition leader for %q missing", topic)
+		}
+		fetched, fetchErr := c.client.Fetch(ctx, &kafka.FetchRequest{
+			Addr:      kafka.TCP(net.JoinHostPort(partition.Leader.Host, strconv.Itoa(partition.Leader.Port))),
+			Topic:     topic,
+			Partition: partition.ID,
+			Offset:    kafka.LastOffset,
+			MinBytes:  0,
+			MaxBytes:  1,
+			MaxWait:   100 * time.Millisecond,
+		})
+		if fetchErr != nil {
+			return fmt.Errorf("kafkaready: topic read check for %q failed: %w", topic, fetchErr)
+		}
+		if fetched == nil {
+			return fmt.Errorf("kafkaready: topic read response for %q missing", topic)
+		}
+		if fetched.Error != nil {
+			return fmt.Errorf("kafkaready: topic read for %q denied: %w", topic, fetched.Error)
+		}
+		if fetched.Topic != topic || fetched.Partition != partition.ID {
+			return fmt.Errorf("kafkaready: topic read response for %q mismatched", topic)
 		}
 	}
 	return nil

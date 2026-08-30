@@ -564,6 +564,15 @@ class PlatformChartTests(unittest.TestCase):
             )
         self.assertEqual(retrieval_container["livenessProbe"]["tcpSocket"], {"port": "service"})
 
+        llm_gateway = self.by_key[("Deployment", "query-plane", "llm-gateway")]
+        llm_gateway_container = llm_gateway["spec"]["template"]["spec"]["containers"][0]
+        for probe_name in ("startupProbe", "readinessProbe"):
+            self.assertEqual(
+                llm_gateway_container[probe_name]["httpGet"],
+                {"path": "/ready", "port": "service", "scheme": "HTTP"},
+            )
+        self.assertEqual(llm_gateway_container["livenessProbe"]["tcpSocket"], {"port": "service"})
+
         # A ClusterIP must never load-balance one logical cache across
         # independent standalone Redis processes.
         redis = self.by_key[("StatefulSet", "data-plane", "redis")]

@@ -193,9 +193,17 @@ simultaneous backends.
 The four Kafka consumers expose `/ready` on their metrics listener. The check
 uses their exact TLS/mTLS transport to request every subscribed topic's
 metadata, discover the configured group coordinator and fetch that group's
-offsets. TLS, topic or group authorization failures return 503 without broker
-details. The liveness probe remains a local TCP check so broker recovery is not
-amplified into pod restart churn.
+offsets, then sends a bounded Fetch at the current log end. That Fetch changes
+no consumer-group offset and returns no historical application record, but it
+does require the same Topic Read ACL as the consume loop. TLS, Describe, Read,
+or group authorization failures return 503 without broker details. The
+liveness probe remains a local TCP check so broker recovery is not amplified
+into pod restart churn.
+LLM Gateway startup/readiness calls its own `/ready`, which checks each unique
+configured vLLM `/health` path through the same HTTP client within two seconds.
+This does not enqueue inference or include backend details in the response.
+The local TCP liveness remains independent so a recoverable GPU outage does not
+create gateway restart churn.
 Retrieval Engine exposes the same low-detail 204/503 contract on its metrics
 listener. Its bounded concurrent check verifies Neo4j credentials and
 connectivity, existence/access of Qdrant `code_embeddings` and OpenSearch

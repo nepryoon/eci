@@ -76,6 +76,11 @@ func TestInvalidAndDefault(t *testing.T) {
 	if r.Code != 405 {
 		t.Fatal(r.Code)
 	}
+	r = httptest.NewRecorder()
+	h.ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if r.Code != http.StatusServiceUnavailable || r.Body.Len() != 0 {
+		t.Fatalf("unconfigured readiness = %d body=%q", r.Code, r.Body.String())
+	}
 }
 func TestFourXXDoesNotOpenBreaker(t *testing.T) {
 	u := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "bad", 422) }))
@@ -211,5 +216,38 @@ func TestTimeoutHealthAndLimit(t *testing.T) {
 	h.ServeHTTP(r, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(huge)))
 	if r.Code != 413 {
 		t.Fatal(r.Code)
+	}
+}
+
+func TestReadinessExercisesConfiguredUpstreamHealth(t *testing.T) {
+	var status atomic.Int64
+	status.Store(http.StatusNoContent)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/health" {
+			t.Fatalf("unexpected readiness request %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(int(status.Load()))
+	}))
+	defer upstream.Close()
+
+	h, err := NewHandler(
+		Config{DefaultRoute: route(upstream.URL, "m"), Timeout: time.Second, FailureThreshold: 2, OpenDuration: time.Second},
+		upstream.Client(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := func() *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/ready", nil))
+		return response
+	}
+
+	if response := ready(); response.Code != http.StatusNoContent || response.Body.Len() != 0 {
+		t.Fatalf("healthy upstream readiness = %d body=%q", response.Code, response.Body.String())
+	}
+	status.Store(http.StatusServiceUnavailable)
+	if response := ready(); response.Code != http.StatusServiceUnavailable || response.Body.Len() != 0 {
+		t.Fatalf("unhealthy upstream readiness = %d body=%q", response.Code, response.Body.String())
 	}
 }
