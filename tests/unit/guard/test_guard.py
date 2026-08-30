@@ -3,9 +3,9 @@
 Builds throwaway git repos under a temp dir and exercises guard.sh against
 synthetic commits: no protected touch, protected touch without ADR, protected
 touch with ADR, plus the edge cases from SPEC-001 §4 (unresolved BASE_REF,
-renamed file under contracts/). The ADR requirement only applies to modified
-(M) or deleted (D) files under contracts/ or docs/add/ — adding a brand new
-file (A) there does not require an ADR.
+renamed file under contracts/). The ADR requirement applies to modified or
+deleted files under contracts/, docs/add/, and the consolidated ADD; adding a
+brand new file under a protected directory does not require an ADR.
 """
 
 import os

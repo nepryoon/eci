@@ -1,5 +1,5 @@
 # SPEC-068 — Superficie di verifica completa del monorepo
-Stato: approved
+Stato: implemented
 Task-tree: cross-cutting T0.1/T7.5 · Servizio: scripts, Taskfile e CI · ADD: registro D1–D9; Modulo 4 §§2–3
 Contratti: nessuna modifica; protezione di `contracts/` e `docs/ADD_Enterprise_Code_Intelligence_consolidato.md`
 
@@ -71,11 +71,18 @@ Nessuna nuova operazione runtime. Gli aggregati stampano il path/modulo prima di
 
 ## 9. Criteri di accettazione
 
-- [ ] Test di inventario prima rosso sui moduli oggi omessi.
-- [ ] Test guard prima rosso sul vero ADD consolidato.
-- [ ] `task build`, `task lint` e `task test` verdi senza daemon Docker.
-- [ ] `task test:integration` conserva tutte le suite Docker-backed ed è eseguito in CI.
-- [ ] Fake, E2E, interop e security hanno target e CI espliciti.
-- [ ] `task verify:generated` verde e senza diff.
-- [ ] `task k8s:validate` verde.
-- [ ] `task guard` verde sul diff accompagnato da questa SPEC e senza modifiche al contenuto dell'ADD.
+- [x] Test di inventario prima rosso sui moduli oggi omessi.
+- [x] Test guard prima rosso sul vero ADD consolidato.
+- [x] `task build`, `task lint` e `task test` verdi senza daemon Docker.
+- [ ] `task test:integration` conserva tutte le suite Docker-backed ed è eseguito in CI (wiring completo; esecuzione locale bloccata dal daemon assente).
+- [x] Fake, E2E, interop e security hanno target e CI espliciti.
+- [x] `task verify:generated` verde e senza diff.
+- [x] `task k8s:validate` verde.
+- [x] `task guard` verde sul diff accompagnato da questa SPEC e senza modifiche al contenuto dell'ADD.
+
+## 10. Evidenza di implementazione
+
+- Fail-first osservato: 1 fallimento guard e 4 fallimenti inventario/Taskfile/CI.
+- `task build`, `task lint`, `task test`, `task test:fakes`, `task test:security`, `bash scripts/task-interop.sh`, `task verify:generated`, `task guard` e `task k8s:validate`: exit 0.
+- L'inventario ora copre 13 moduli Go, 2 Rust e 7 Python, inclusi i tre fake, `eci-common`, `gc-postgres` e `reconcile`.
+- `task test:integration` e `task test:e2e` falliscono subito e chiaramente quando Docker non è disponibile; nessun test viene convertito in skip. Il job CI completo è presente ma non viene dichiarato verde senza un'esecuzione remota osservata.

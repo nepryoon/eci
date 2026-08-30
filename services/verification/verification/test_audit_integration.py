@@ -16,10 +16,13 @@ from verification.audit import (
     canonical_event_bytes,
 )
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("ECI_RUN_MINIO_INTEGRATION") != "1",
-    reason="set ECI_RUN_MINIO_INTEGRATION=1 with MinIO at ECI_MINIO_ENDPOINT",
-)
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        os.getenv("ECI_RUN_MINIO_INTEGRATION") != "1",
+        reason="set ECI_RUN_MINIO_INTEGRATION=1 with MinIO at ECI_MINIO_ENDPOINT",
+    ),
+]
 
 
 def test_minio_compliance_object_is_versioned_immutable_and_readable():
@@ -71,4 +74,3 @@ def test_minio_compliance_object_is_versioned_immutable_and_readable():
     finally:
         response.close()
         response.release_conn()
-

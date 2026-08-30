@@ -17,46 +17,46 @@ tasks:
       - bash deploy/compose/verify.sh
 
   build:
-    desc: Compila ogni modulo Go/Rust/Python popolato in services/
+    desc: Compila ogni modulo Go/Rust/Python di produzione tracciato
     cmds:
       - bash scripts/task-build.sh
 
   lint:
-    desc: go vet / cargo clippy / ruff check su ogni modulo popolato in services/
+    desc: go vet / cargo clippy -D warnings / ruff su ogni modulo tracciato
     cmds:
       - bash scripts/task-lint.sh
-      - cd tools/migrate-neo4j && go vet ./...
-      - cd tests/integration/postgres_ddl && go vet ./... && go vet -tags=integration ./...
-      - cd tests/integration/outbox_cdc && go vet -tags=integration ./...
-      - cd services/ingestion && cargo clippy --test persist_integration_test
 
   test:
-    desc: go test / cargo test / pytest su ogni modulo, più i test di scripts/guard.sh
+    desc: Test CPU/unitari di ogni modulo e dei gate repository; non richiede Docker
     cmds:
       - bash scripts/task-test.sh
-      - cd tools/migrate-neo4j && go test ./...
-      - cd tests/integration/postgres_ddl && go test ./...
 
   test:integration:
-    desc: Test di integrazione con testcontainers (richiede docker)
+    desc: Tutti i test di integrazione Docker-backed, inclusi tool e runtime
     cmds:
-      - cd tools/migrate-neo4j && go test -tags=integration ./...
-      - cd tests/integration/postgres_ddl && go test -tags=integration ./...
-      - cd tests/integration/outbox_cdc && go test -tags=integration ./...
-      - cd libs/go && go test -tags=integration ./eci/resilience/... -run TestWithRetryAndDLQ -v
-      - cd services/ingestion && cargo test --test persist_integration_test -- --ignored --test-threads=1
-      - cd services/ingestion && cargo test --test chunk_persist_integration_test -- --ignored --test-threads=1
-      - cd services/ingestion && cargo test --test worker_runtime_test -- --ignored --test-threads=1
-      - cd services/sink-graph && go test -tags=integration ./internal/consumer -run TestSinkGraphConsumer -v
-      - cd services/embedding-worker && go test -tags=integration ./internal/consumer -run TestEmbeddingWorkerConsumer -v
-      - cd services/sink-vector && go test -tags=integration ./internal/consumer -run TestSinkVectorConsumer -v
-      - cd services/sink-search && go test -tags=integration ./internal/consumer -run TestSinkSearchConsumer -v
-      - cd services/retrieval-engine && go test -tags=integration ./internal/server -run TestRetrievalEngineServer -v
-      - cd services/retrieval-engine && go test -tags=integration ./internal/hybridsearch -run 'TestHybridSearchIntegration|TestHybridGraphVectorSearchContentHydration' -v
-      - cd services/semantic-cache && go test -tags=integration ./internal/server -run TestSemanticCacheServer -v
-      - cd tools/gds-impact && go test -tags=integration ./internal/gdsimpact/... -run TestGDSImpact -v
-      - cd services/retrieval-engine && go test -tags=integration ./internal/rerank -run TestRerankIntegration -v
-      - bash scripts/test-minio-worm.sh
+      - bash scripts/task-integration.sh
+
+  test:e2e:
+    desc: Pipeline end-to-end reale su fixture e golden dataset (richiede Docker)
+    cmds:
+      - bash scripts/task-e2e.sh
+
+  test:interop:
+    desc: Interoperabilità Go/Python di SecurityContext e trace context
+    deps: [build]
+    cmds:
+      - bash scripts/task-interop.sh
+
+  test:fakes:
+    desc: Suite esplicita dei fake deterministici
+    cmds:
+      - bash scripts/task-fakes.sh
+
+  test:security:
+    desc: Suite avversariale security CPU; le prove datastore sono in test:integration
+    deps: [build]
+    cmds:
+      - bash scripts/task-security.sh
 
   proto:gen:
     desc: Codegen Go (buf generate) + Python (grpc_tools.protoc) da retrieval.proto
@@ -141,6 +141,31 @@ tasks:
     cmds:
       - bash scripts/task-schema-gen.sh
 
+  verify:generated:
+    desc: Rigenera proto, schema ed Envoy e richiede output tracciati invariati
+    cmds:
+      - task proto:gen
+      - git diff --exit-code -- libs/go/eci/retrieval libs/py/eci_core/retrieval
+      - task schema:gen
+      - git diff --exit-code -- libs/py/eci_core/models.py libs/py/eci_core/outbox.py
+      - task envoy:descriptor
+      - git diff --exit-code -- deploy/envoy/retrieval.pb
+
+  verify:ci:
+    desc: Superficie CPU completa equivalente ai gate CI non-Docker
+    cmds:
+      - task build
+      - task lint
+      - task test
+      - task test:fakes
+      - task test:interop
+      - task test:security
+      - task guard
+      - task proto:lint
+      - task proto:breaking
+      - task verify:generated
+      - task k8s:validate
+
   db:migrate:
     desc: Applica le migration Postgres
     cmds:
@@ -162,7 +187,7 @@ tasks:
       - cd tools/migrate-neo4j && go run . ../../contracts/cypher/schema.cypher
 
   guard:
-    desc: Fallisce se contracts/ o docs/add/ sono toccati senza un ADR nello stesso commit
+    desc: Fallisce se contracts/ o l'ADD consolidato sono toccati senza un ADR nello stesso commit
     cmds:
       - bash scripts/guard.sh
 

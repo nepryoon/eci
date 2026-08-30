@@ -13,17 +13,17 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.26.5'
 
-      - name: rustup component add clippy
-        run: rustup component add clippy
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install ruff
-        run: pip install ruff
+        run: pip install ruff==0.16.1
 
       - name: Install go-task
         run: |
@@ -40,6 +40,15 @@ jobs:
       - name: task test
         run: task test
 
+      - name: task test:fakes
+        run: task test:fakes
+
+      - name: task test:interop
+        run: task test:interop
+
+      - name: task test:security
+        run: task test:security
+
   # guard + i controlli sui contratti proto (SPEC-002) condividono lo stesso
   # checkout con fetch-depth:0 richiesto da entrambi (BASE_REF/buf breaking
   # devono poter risolvere origin/main): un solo job, non duplicato.
@@ -53,7 +62,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.26.5'
 
       - uses: actions/setup-python@v5
         with:
@@ -85,12 +94,42 @@ jobs:
       - name: Set up .venv-tools (grpc_tools)
         run: |
           python3 -m venv .venv-tools
-          .venv-tools/bin/pip install grpcio-tools==1.83.0
+          .venv-tools/bin/pip install grpcio-tools==1.83.0 datamodel-code-generator==0.75.1
 
-      - name: task proto:gen (verifica determinismo)
+      - name: task verify:generated
+        run: task verify:generated
+
+  complete-integration-and-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.5'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
+
+      - name: Install pinned task and migration tools
         run: |
-          task proto:gen
-          git diff --exit-code -- libs/go libs/py
+          curl -fsSL https://github.com/go-task/task/releases/download/v3.53.1/task_linux_amd64.tar.gz -o /tmp/task.tar.gz
+          echo 'a54a408f6861ff921f6e87774180db31bacd8c1e7c944ca696db9fea49a82fc7  /tmp/task.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/task.tar.gz -C /usr/local/bin task
+          go install -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.19.1
+
+      - name: Build runtime and test environments
+        run: task build
+
+      - name: task test:integration
+        run: task test:integration
+
+      - name: task test:e2e
+        run: task test:e2e
 
   datastore-security-integration:
     runs-on: ubuntu-latest
@@ -99,7 +138,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25.9'
+          go-version: '1.26.5'
 
       - name: Install golang-migrate
         run: go install -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.19.1
@@ -149,7 +188,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25.9'
+          go-version: '1.26.5'
 
       - name: Install go-task and buf
         run: |
