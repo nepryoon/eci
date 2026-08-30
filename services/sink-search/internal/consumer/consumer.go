@@ -8,6 +8,7 @@
 package consumer
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -20,6 +21,7 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4/opensearchutil"
 	kafka "github.com/segmentio/kafka-go"
 
+	"github.com/eci-project/eci/libs/go/eci/outboxmeta"
 	"github.com/eci-project/eci/libs/go/eci/securitylabels"
 )
 
@@ -35,10 +37,6 @@ const ConsumerName = "sink-search"
 // SPEC). Nessuna catena di prerequisiti: a differenza di CodeEmbedding
 // (T3.1), questo topic esiste ed è popolato dal 2026-08-14.
 const TopicCodeChunk = "outbox.event.CodeChunk"
-
-// eventIDHeaderKey — stesso header promosso dal connector Debezium già
-// consumato da sink-graph/embedding-worker/sink-vector.
-const eventIDHeaderKey = "event_id"
 
 // IndexName è il nome dichiarato dell'indice OpenSearch (SPEC-034 §2).
 const IndexName = "code_chunks"
@@ -143,6 +141,7 @@ type Outcome int
 
 const (
 	OutcomeStored Outcome = iota
+	OutcomeDeleted
 	OutcomeDuplicate
 	OutcomeInvalidSkipped
 )
@@ -167,6 +166,13 @@ type securityProvenance struct {
 	TenantID string `json:"tenant_id"`
 	Repo     string `json:"repo"`
 	ACLGroup string `json:"acl_group"`
+	Path     string `json:"path"`
+}
+
+type codeChunkTombstone struct {
+	ID       string             `json:"id"`
+	EntityID string             `json:"entity_id"`
+	Security securityProvenance `json:"provenance"`
 }
 
 // ProcessMessage elabora UN messaggio Kafka già fetchato (SPEC-034 §2/§3):
@@ -182,15 +188,20 @@ type securityProvenance struct {
 // ritorna (OutcomeInvalidSkipped, nil) — il chiamante committa comunque
 // l'offset, stesso principio di sink-graph (SPEC-015 §3 scenario 5).
 func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, headers []kafka.Header) (Outcome, error) {
-	eventID, ok := eventIDFromHeaders(headers)
-	if !ok {
-		deps.Logf("sink-search: messaggio su %s senza header %q valido, scartato (offset committato)", topic, eventIDHeaderKey)
+	metadata, metadataErr := outboxmeta.Parse(headers)
+	if metadataErr != nil {
+		deps.Logf("sink-search: metadata outbox non valida, scartata")
 		return OutcomeInvalidSkipped, nil
 	}
 
 	if topic != TopicCodeChunk {
-		deps.Logf("sink-search: topic sconosciuto %q (event_id=%s), scartato", topic, eventID)
+		deps.Logf("sink-search: topic sconosciuto, scartato")
 		return OutcomeInvalidSkipped, nil
+	}
+	eventID := metadata.EventID
+
+	if metadata.Operation == outboxmeta.OperationDelete {
+		return processDelete(ctx, deps, value, eventID)
 	}
 
 	var chunk codeChunkPayload
@@ -234,6 +245,42 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	return OutcomeStored, nil
 }
 
+func processDelete(ctx context.Context, deps Deps, value []byte, eventID string) (Outcome, error) {
+	var tombstone codeChunkTombstone
+	if err := json.Unmarshal(value, &tombstone); err != nil || tombstone.ID == "" || tombstone.EntityID == "" || tombstone.Security.Path == "" {
+		deps.Logf("sink-search: tombstone CodeChunk non valido, scartato")
+		return OutcomeInvalidSkipped, nil
+	}
+	if !securitylabels.Valid(tombstone.Security.TenantID, tombstone.Security.Repo, tombstone.Security.ACLGroup) {
+		securitylabels.Observe(ConsumerName, "rejected")
+		deps.Logf("sink-search: tombstone CodeChunk senza security labels valide, scartato")
+		return OutcomeInvalidSkipped, nil
+	}
+	securitylabels.Observe(ConsumerName, "accepted")
+
+	processed, err := isProcessed(ctx, deps.DB, eventID)
+	if err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("check tombstone completion: %w", err)
+	}
+	if processed {
+		deps.Logf("sink-search: tombstone CodeChunk gia' completato")
+		return OutcomeDuplicate, nil
+	}
+
+	if err := deleteDocument(ctx, deps.OpenSearch, tombstone); err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("delete OpenSearch projection: %w", err)
+	}
+	completed, err := markProcessed(ctx, deps.DB, eventID)
+	if err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("complete tombstone after OpenSearch delete: %w", err)
+	}
+	if !completed {
+		deps.Logf("sink-search: tombstone CodeChunk completato concorrentemente")
+		return OutcomeDuplicate, nil
+	}
+	return OutcomeDeleted, nil
+}
+
 func isProcessed(ctx context.Context, db *sql.DB, eventID string) (bool, error) {
 	var processed bool
 	err := db.QueryRowContext(ctx,
@@ -243,20 +290,6 @@ func isProcessed(ctx context.Context, db *sql.DB, eventID string) (bool, error) 
 		eventID, ConsumerName,
 	).Scan(&processed)
 	return processed, err
-}
-
-// eventIDFromHeaders — stessa logica di sink-graph (SPEC-015 §2 punto 1).
-func eventIDFromHeaders(headers []kafka.Header) (string, bool) {
-	for _, h := range headers {
-		if h.Key != eventIDHeaderKey {
-			continue
-		}
-		if len(h.Value) == 0 {
-			return "", false
-		}
-		return string(h.Value), true
-	}
-	return "", false
 }
 
 // markProcessed — stesso identico dedup atomico di sink-graph (SPEC-015 §2
@@ -313,4 +346,62 @@ func indexDocument(ctx context.Context, client *opensearchapi.Client, chunk code
 		Body:       opensearchutil.NewJSONReader(body),
 	})
 	return err
+}
+
+func deleteDocument(ctx context.Context, client *opensearchapi.Client, tombstone codeChunkTombstone) error {
+	request, err := buildDeleteRequest(tombstone)
+	if err != nil {
+		return err
+	}
+	response, err := client.Document.DeleteByQuery(ctx, request)
+	if err != nil {
+		return err
+	}
+	return validateDeleteResponse(response)
+}
+
+// buildDeleteRequest performs authorization and deletion as one server-side
+// operation. A preliminary GET followed by DELETE-by-ID would introduce a
+// time-of-check/time-of-use gap and is intentionally not used.
+func buildDeleteRequest(tombstone codeChunkTombstone) (opensearchapi.DocumentDeleteByQueryReq, error) {
+	body, err := json.Marshal(map[string]any{
+		"query": map[string]any{
+			"bool": map[string]any{
+				"filter": []any{
+					map[string]any{"ids": map[string]any{"values": []string{tombstone.ID}}},
+					map[string]any{"term": map[string]any{"tenant_id": tombstone.Security.TenantID}},
+					map[string]any{"term": map[string]any{"repo": tombstone.Security.Repo}},
+					map[string]any{"term": map[string]any{"acl_group": tombstone.Security.ACLGroup}},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return opensearchapi.DocumentDeleteByQueryReq{}, fmt.Errorf("build delete query: %w", err)
+	}
+	refresh, waitForCompletion, allowNoIndices := true, true, false
+	maxDocs := 1
+	return opensearchapi.DocumentDeleteByQueryReq{
+		Indices: []string{IndexName},
+		Body:    bytes.NewReader(body),
+		Params: opensearchapi.DocumentDeleteByQueryParams{
+			AllowNoIndices:    &allowNoIndices,
+			MaxDocs:           &maxDocs,
+			Refresh:           &refresh,
+			WaitForCompletion: &waitForCompletion,
+		},
+	}, nil
+}
+
+func validateDeleteResponse(response *opensearchapi.DocumentDeleteByQueryResp) error {
+	if response == nil {
+		return fmt.Errorf("OpenSearch returned no delete result")
+	}
+	if response.TimedOut || response.VersionConflicts != 0 || len(response.Failures) != 0 {
+		return fmt.Errorf("OpenSearch delete did not complete")
+	}
+	if response.Total < 0 || response.Total > 1 || response.Deleted < 0 || response.Deleted != response.Total {
+		return fmt.Errorf("OpenSearch delete returned inconsistent counts")
+	}
+	return nil
 }
