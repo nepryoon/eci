@@ -158,6 +158,18 @@ spec:
             --bootstrap-server eci-kafka-kafka-bootstrap.data-plane.svc:9093 \
             --command-config /tmp/client.properties --topic outbox.event.CodeChunk.retry.embedding-worker \
             --num-records 1 --record-size 22 --throughput -1
+          bin/kafka-console-consumer.sh \
+            --bootstrap-server eci-kafka-kafka-bootstrap.data-plane.svc:9093 \
+            --consumer.config /tmp/client.properties --topic outbox.event.CodeChunk.retry.embedding-worker \
+            --group embedding-worker --from-beginning --max-messages 1 --timeout-ms 30000 \
+            >/tmp/consumed.log 2>/tmp/consumer.log
+          test "\$(wc -c </tmp/consumed.log)" -ge 22
+          grep -q 'Processed a total of 1 messages' /tmp/consumer.log
+          bin/kafka-consumer-groups.sh \
+            --bootstrap-server eci-kafka-kafka-bootstrap.data-plane.svc:9093 \
+            --command-config /tmp/client.properties --group embedding-worker --describe \
+            | grep -q 'outbox.event.CodeChunk.retry.embedding-worker'
+          echo 'Kafka mTLS topic metadata, consume and group authorization: PASS'
           set +e
           bin/kafka-producer-perf-test.sh \
             --bootstrap-server eci-kafka-kafka-bootstrap.data-plane.svc:9093 \

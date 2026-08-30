@@ -114,6 +114,7 @@ spec:
         - podSelector:
             matchLabels: {app.kubernetes.io/name: qdrant}
       ports: [{protocol: TCP, port: 6333}]
+{{- if and .Values.dataPlane.enabled .Values.cdc.enabled }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -203,6 +204,7 @@ spec:
         - podSelector:
             matchLabels: {app.kubernetes.io/name: kafka-connect}
       ports: [{protocol: TCP, port: 5432}]
+{{- end }}
 {{- $apiClients := list
   (dict "name" "strimzi" "selector" (dict "name" "strimzi-cluster-operator"))
   (dict "name" "strimzi-entity" "selector" (dict "app.kubernetes.io/name" "entity-operator"))

@@ -125,7 +125,11 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    `KafkaUser` distinto; topic e consumer group sono ACL literal senza
    wildcard. Connect è l'unico writer dei topic primari; ogni consumer può
    scrivere soltanto `{primary}.retry.{consumer}` e `{primary}.DLQ`. La REST
-   Connect è loopback-only e priva di Service. Ogni consumer monta soltanto la CA pubblica del broker, il proprio `user.crt` e
+   Connect è loopback-only e priva di Service; finché questo confine resta in
+   vigore il worker distribuito è obbligatoriamente a replica singola, perché
+   un follower non può raggiungere la REST advertised del leader. Disabilitare
+   il data plane omette anche Connect, connector config e policy dedicate.
+   Ogni consumer monta soltanto la CA pubblica del broker, il proprio `user.crt` e
    `user.key`; reader e writer falliscono se trust o identità mancano. Retrieval e
    sink-search richiedono CA HTTP e credenziali OpenSearch, mentre Semantic
    Cache riceve esplicitamente la password del Redis `requirepass`. Nessuna CA
@@ -142,6 +146,11 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    stesso namespace non conferisce accesso ai datastore. Il probe dev gira nel
    data-plane e ottiene solo due eccezioni esplicite verso OPA/Keycloak;
    observability non riceve accesso generale alle API dati.
+   Startup/readiness dei quattro worker Kafka chiama `/ready`, che usa lo
+   stesso transport del consumer e verifica metadata di ogni topic,
+   coordinator e offset access del gruppo. Errori TLS/topic/group rispondono
+   503 senza dettagli; liveness resta locale per evitare restart storm durante
+   un outage recuperabile del broker.
 5. **Overlay dev onesto.** Given `values-dev.yaml`, When il bootstrap gira su
    kind, Then usa repliche/storage/resource ridotti e Neo4j Community come
    previsto dagli ADR dev esistenti. I workload ECI senza immagini pubblicate
@@ -323,6 +332,9 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       per topic/group; Connect è il solo writer primario, retry per-consumer e
       REST Connect loopback-only sono verificati; OpenSearch usa HTTPS+CA+Basic Auth;
       Redis `requirepass` è propagato esplicitamente, con unit test fail-closed.
+- [x] Kafka Connect loopback-only è vincolato a una replica ed è omesso con il
+      data plane; i quattro worker sono Ready solo dopo topic+group access via
+      il transport Kafka autenticato, mentre liveness resta locale.
 - [x] Redis standalone usa un solo backend StatefulSet con AOF/PVC e restart
       persistence verificata; porte service/metriche
       coincidenti non producono duplicati Kubernetes; Keycloak dev espone

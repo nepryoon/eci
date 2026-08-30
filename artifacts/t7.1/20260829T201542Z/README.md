@@ -33,6 +33,11 @@ Results:
   denied: PASS;
 - Kafka Connect REST reachable on loopback only, absent as a Service and denied
   on the pod IP; plugin discovery through administrative exec: PASS;
+- Kafka Connect single-replica invariant and complete omission with the managed
+  data plane disabled: PASS (deterministic render; no external backend claimed);
+- embedding-worker mTLS identity consumed its retry topic and accessed its exact
+  consumer-group offsets; shared worker readiness rejects TLS/topic/group
+  failures with 503 and leaks no broker detail: PASS;
 - dedicated CNPG-managed `eci_cdc` role, fixed outbox publication, SELECT-only
   table grant, logical slot and live Debezium connector/task: PASS;
 - migration 0006 consumer-scoped `processed_events` key applied live; a

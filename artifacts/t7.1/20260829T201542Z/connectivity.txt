@@ -7,6 +7,7 @@ postgres-logical-slot=PASS (eci_outbox_slot/pgoutput/eci)
 eci-kafka-kafka-bootstrap.data-plane.svc:9093=PASS (mTLS listener)
 kafka-mtls-client-identity=PASS
 kafka-own-retry-topic-publish=PASS
+kafka-topic-consume-and-group-offset-access=PASS (embedding-worker mTLS identity and exact group)
 kafka-primary-topic-publish=DENIED (PASS; Connect-only provenance)
 kafka-connect-service=ABSENT (PASS)
 kafka-connect-rest-loopback=PASS

@@ -1,2 +1,2 @@
-a15953560c0e874fb590afe9feeaec098538dbdb3cd87e8ffc533490cfaa5f0a  standard-infrastructure.yaml
+ed947127dac0a7ed32cf946786817315f6b69fdfac36b6f091e28cde7a91a62b  standard-infrastructure.yaml
 714ef9c96a265e9ad28f96dcdd01e9f7fa5bd943861a45e0f2094cc02172a9c3  dev.yaml

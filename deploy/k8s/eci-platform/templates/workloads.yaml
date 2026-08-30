@@ -103,12 +103,20 @@ spec:
             {{- end }}
           {{- end }}
           readinessProbe:
+            {{- if eq $workload.namespace "ingestion-plane" }}
+            httpGet: {path: /ready, port: service, scheme: HTTP}
+            {{- else }}
             tcpSocket: {port: service}
+            {{- end }}
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 6
           startupProbe:
+            {{- if eq $workload.namespace "ingestion-plane" }}
+            httpGet: {path: /ready, port: service, scheme: HTTP}
+            {{- else }}
             tcpSocket: {port: service}
+            {{- end }}
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 180

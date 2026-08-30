@@ -19,6 +19,7 @@ import (
 
 	"github.com/eci-project/eci/libs/go/eci/config"
 	"github.com/eci-project/eci/libs/go/eci/kafkaconfig"
+	"github.com/eci-project/eci/libs/go/eci/kafkaready"
 	"github.com/eci-project/eci/libs/go/eci/metrics"
 	"github.com/eci-project/eci/libs/go/eci/observability"
 	"github.com/eci-project/eci/libs/go/eci/resilience"
@@ -86,18 +87,23 @@ func main() {
 		log.Fatalf("sink-graph: configurazione Kafka: %v", err)
 	}
 	retryTopicSuffix := ".retry." + consumer.ConsumerName
+	topics := []string{
+		consumer.TopicCodeNode,
+		consumer.TopicCodeRelation,
+		resilience.RetryTopic(consumer.TopicCodeNode, retryTopicSuffix),
+		resilience.RetryTopic(consumer.TopicCodeRelation, retryTopicSuffix),
+	}
 	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers: brokers,
-		GroupID: consumer.ConsumerName,
-		GroupTopics: []string{
-			consumer.TopicCodeNode,
-			consumer.TopicCodeRelation,
-			resilience.RetryTopic(consumer.TopicCodeNode, retryTopicSuffix),
-			resilience.RetryTopic(consumer.TopicCodeRelation, retryTopicSuffix),
-		},
-		Dialer: kafkaTransport.Dialer,
+		Brokers:     brokers,
+		GroupID:     consumer.ConsumerName,
+		GroupTopics: topics,
+		Dialer:      kafkaTransport.Dialer,
 	})
 	defer reader.Close()
+	readiness, err := kafkaready.New(brokers, kafkaTransport.Transport, consumer.ConsumerName, topics)
+	if err != nil {
+		log.Fatalf("sink-graph: configurazione readiness Kafka: %v", err)
+	}
 
 	deps := consumer.Deps{
 		DB:    db,
@@ -136,6 +142,7 @@ func main() {
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", metrics.Handler())
+		mux.Handle("/ready", kafkaready.Handler(readiness.Check))
 		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
 			log.Printf("sink-graph: server HTTP metriche (%s) non avviato: %v (consume-loop non impattato)", metricsAddr, err)
 		}

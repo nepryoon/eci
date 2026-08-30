@@ -93,6 +93,11 @@ configuration is stored separately in `eci-debezium-connector`, uses the
 Kafka environment config provider for the PostgreSQL password, and is not
 submitted before the `public.outbox` migration exists. See the runbook for the
 post-migration registration boundary.
+The loopback REST boundary also fixes Kafka Connect at exactly one replica:
+distributed workers require a mutually reachable advertised REST address, so
+Helm rejects any larger `cdc.replicas` value instead of rendering a broken
+cluster. Setting `dataPlane.enabled=false` omits Connect, its connector config
+and its dedicated policies together.
 Its PostgreSQL identity is the CNPG-managed `eci_cdc` role, sourced from the
 separate `eci-postgres-cdc` Secret. Migration 0005 pre-creates the fixed outbox
 publication and grants only SELECT on `public.outbox`; Connect never receives
@@ -102,6 +107,10 @@ Each Kafka consumer retries on `{primary}.retry.{consumer}`. Consumers can
 read the primary and their own retry topic, but cannot write any primary topic;
 Kafka Connect remains the sole primary-event producer. DLQ names remain
 `{primary}.DLQ`. ADR-0019 records the compatibility and rollout boundary.
+Each worker's `/ready` performs authenticated metadata checks for all input
+topics and group-coordinator/offset access using the same Kafka transport as
+the consume loop. Kubernetes startup/readiness use that endpoint; liveness
+remains local so a broker outage does not create a restart storm.
 
 The OPA ConfigMap is checked byte-for-byte against the canonical Compose Rego
 policy. MinIO uses a four-member distributed StatefulSet with PVCs in the

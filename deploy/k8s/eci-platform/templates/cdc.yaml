@@ -1,4 +1,7 @@
-{{- if .Values.cdc.enabled }}
+{{- if and .Values.dataPlane.enabled .Values.cdc.enabled }}
+{{- if ne (int .Values.cdc.replicas) 1 }}
+{{- fail "cdc.replicas must be 1 while Kafka Connect REST is loopback-only" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

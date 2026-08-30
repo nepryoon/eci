@@ -177,6 +177,12 @@ degradation; a replicated Redis topology is not claimed by T7.1. During an
 upgrade from the former Deployment, the Service selector moves directly to
 the `redis-stateful` component so old and new independent stores are never
 simultaneous backends.
+The four Kafka consumers expose `/ready` on their metrics listener. The check
+uses their exact TLS/mTLS transport to request every subscribed topic's
+metadata, discover the configured group coordinator and fetch that group's
+offsets. TLS, topic or group authorization failures return 503 without broker
+details. The liveness probe remains a local TCP check so broker recovery is not
+amplified into pod restart churn.
 
 The default-deny boundary is complemented by per-workload NetworkPolicy pairs:
 the egress side selects the calling pod and the ingress side selects the exact
@@ -242,7 +248,10 @@ output topics—never a wildcard. Consumer identities can write only their own
 retry/DLQ topics, never the primary outbox topics. Kafka Connect REST binds
 only `127.0.0.1:8083`, has no Kubernetes Service and is excluded from the
 general data-plane policy; only its Kafka and PostgreSQL data paths are
-allowed. Kafka Connect is Ready before application migrations by design, but the
+allowed. This loopback design is intentionally single-replica: Helm rejects
+`cdc.replicas != 1`, because followers could not reach the leader's advertised
+REST endpoint. `dataPlane.enabled=false` omits Connect, its connector ConfigMap
+and its dedicated policies. Kafka Connect is Ready before application migrations by design, but the
 `eci-outbox-connector` is not registered automatically against an empty
 database. After the checked-in SQL migrations have created `public.outbox`, a
 platform deployment step must submit the config-only JSON stored in ConfigMap

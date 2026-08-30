@@ -187,6 +187,7 @@ class PlatformChartTests(unittest.TestCase):
         self.assertTrue(opensearch["spec"]["security"]["tls"]["transport"]["generate"])
 
         connect = self.by_key[("Deployment", "data-plane", "kafka-connect")]
+        self.assertEqual(connect["spec"]["replicas"], 1)
         connect_container = connect["spec"]["template"]["spec"]["containers"][0]
         env = {item["name"]: item for item in connect_container["env"]}
         self.assertEqual(env["CONNECT_SECURITY_PROTOCOL"]["value"], "SSL")
@@ -526,6 +527,14 @@ class PlatformChartTests(unittest.TestCase):
                 [{"name": "service", "containerPort": service["spec"]["ports"][0]["port"]}],
             )
             self.assertEqual(len(service["spec"]["ports"]), 1)
+            if namespace == "ingestion-plane":
+                container = deployment["spec"]["template"]["spec"]["containers"][0]
+                for probe_name in ("startupProbe", "readinessProbe"):
+                    self.assertEqual(
+                        container[probe_name]["httpGet"],
+                        {"path": "/ready", "port": "service", "scheme": "HTTP"},
+                    )
+                self.assertEqual(container["livenessProbe"]["tcpSocket"], {"port": "service"})
 
         # A ClusterIP must never load-balance one logical cache across
         # independent standalone Redis processes.
@@ -985,6 +994,12 @@ spec:
         self.assertFalse(
             any(obj.get("metadata", {}).get("name") == "redis" for obj in objects),
             "dataPlane.enabled=false must omit every Redis resource",
+        )
+        self.assertNotIn(("Deployment", "data-plane", "kafka-connect"), keyed(objects))
+        self.assertNotIn(("ConfigMap", "data-plane", "eci-debezium-connector"), keyed(objects))
+        self.assertFalse(
+            any("kafka-connect" in obj.get("metadata", {}).get("name", "") for obj in objects),
+            "dataPlane.enabled=false must omit Kafka Connect policies and workloads",
         )
 
     def test_review_application_enablement_requires_real_release_digests(self) -> None:
