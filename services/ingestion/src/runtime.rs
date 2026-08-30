@@ -586,6 +586,30 @@ async fn poll_during_backoff(
                         return BackoffOutcome::Shutdown;
                     }
                 }
+                message = consumer.recv() => {
+                    match message {
+                        Ok(message) => {
+                            // The assignment is paused before entering backoff, but
+                            // librdkafka can still expose records fetched before the
+                            // pause. Polling remains mandatory for group liveness.
+                            // Rewind the one record we had to drain so the bounded
+                            // application buffer never drops or acknowledges it.
+                            if consumer
+                                .seek(
+                                    message.topic(),
+                                    message.partition(),
+                                    Offset::Offset(message.offset()),
+                                    Duration::from_millis(100),
+                                )
+                                .is_err()
+                            {
+                                health.set_dependency("kafka", false);
+                                return BackoffOutcome::Shutdown;
+                            }
+                        }
+                        Err(_) => health.set_dependency("kafka", false),
+                    }
+                }
             }
             continue;
         }
@@ -944,7 +968,7 @@ async fn probe_dependencies(
         let ca_pem = config.postgres_ca_pem.clone();
         let postgres_ready =
             tokio::task::block_in_place(|| match connect_postgres_with_deadlines(&dsn, &ca_pem) {
-                Ok(mut client) => client.simple_query("SELECT 1").is_ok(),
+                Ok(mut client) => postgres_runtime_schema_ready(&mut client),
                 Err(()) => false,
             });
         health.set_dependency("postgres", postgres_ready);
@@ -966,6 +990,32 @@ async fn probe_dependencies(
             _ = shutdown.changed() => break,
         }
     }
+}
+
+/// Readiness means that the runtime role can execute every table operation in
+/// the atomic ingestion transaction, not merely that PostgreSQL accepts a TCP
+/// connection. `to_regclass` keeps a missing migration a normal false result.
+pub fn postgres_runtime_schema_ready(client: &mut postgres::Client) -> bool {
+    client
+        .query_one(
+            "SELECT COALESCE(\
+                has_table_privilege(current_user, to_regclass('ingestion_command_receipt'), 'SELECT')\
+                AND has_table_privilege(current_user, to_regclass('ingestion_command_receipt'), 'INSERT')\
+                AND has_table_privilege(current_user, to_regclass('code_node'), 'INSERT')\
+                AND has_table_privilege(current_user, to_regclass('code_node'), 'UPDATE')\
+                AND has_table_privilege(current_user, to_regclass('code_relation'), 'SELECT')\
+                AND has_table_privilege(current_user, to_regclass('code_relation'), 'INSERT')\
+                AND has_table_privilege(current_user, to_regclass('code_relation'), 'DELETE')\
+                AND has_table_privilege(current_user, to_regclass('code_chunk'), 'SELECT')\
+                AND has_table_privilege(current_user, to_regclass('code_chunk'), 'INSERT')\
+                AND has_table_privilege(current_user, to_regclass('code_chunk'), 'DELETE')\
+                AND has_table_privilege(current_user, to_regclass('outbox'), 'INSERT'),\
+                false\
+            )",
+            &[],
+        )
+        .and_then(|row| row.try_get::<_, bool>(0))
+        .unwrap_or(false)
 }
 
 async fn live(State(state): State<HealthState>) -> StatusCode {

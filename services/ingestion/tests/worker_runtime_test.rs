@@ -3,6 +3,7 @@
 //! target and is executed explicitly by `task test:integration` once Docker is
 //! available.
 
+use ingestion::runtime::postgres_runtime_schema_ready;
 use ingestion::worker::{
     command_message_key, command_message_key_matches, parse_authenticated_command,
     source_object_key, CommandErrorKind,
@@ -185,7 +186,7 @@ fn object_key_and_partition_key_are_deterministic_and_non_disclosing() {
 #[test]
 #[ignore = "requires Docker and the migrate CLI; run through task test:integration"]
 fn command_receipt_is_atomic_idempotent_and_conflict_closed() {
-    let (_container, mut client) = start_migrated_postgres();
+    let (_container, mut client, runtime_dsn) = start_migrated_postgres();
     let (scope, command) =
         parse_authenticated_command(&valid_payload(), &valid_headers(), 16 * 1024 * 1024).unwrap();
     let source = "package orders\n\nfunc Process() {}\n";
@@ -254,6 +255,28 @@ fn command_receipt_is_atomic_idempotent_and_conflict_closed() {
     assert_eq!(provenance["commit_sha"], command.commit_sha());
     assert_eq!(provenance["path"], command.path());
     assert!(provenance["ingested_at"].as_str().unwrap().ends_with('Z'));
+
+    client
+        .batch_execute(
+            "CREATE ROLE ingestion_runtime_probe LOGIN PASSWORD 'probe-test-password';
+             GRANT CONNECT ON DATABASE eci TO ingestion_runtime_probe;
+             GRANT USAGE ON SCHEMA public TO ingestion_runtime_probe;
+             GRANT SELECT, INSERT ON ingestion_command_receipt TO ingestion_runtime_probe;
+             GRANT INSERT, UPDATE ON code_node TO ingestion_runtime_probe;
+             GRANT SELECT, INSERT, DELETE ON code_relation, code_chunk TO ingestion_runtime_probe;
+             GRANT INSERT ON outbox TO ingestion_runtime_probe;",
+        )
+        .expect("create least-privilege runtime probe role");
+    let probe_dsn = runtime_dsn.replace(
+        "eci:eci-test-password-1234@",
+        "ingestion_runtime_probe:probe-test-password@",
+    );
+    let mut probe = Client::connect(&probe_dsn, NoTls).expect("connect runtime probe role");
+    assert!(postgres_runtime_schema_ready(&mut probe));
+    client
+        .batch_execute("REVOKE SELECT ON ingestion_command_receipt FROM ingestion_runtime_probe")
+        .expect("revoke required receipt permission");
+    assert!(!postgres_runtime_schema_ready(&mut probe));
 }
 
 fn canonical_counts(client: &mut Client) -> (i64, i64, i64, i64, i64) {
@@ -272,7 +295,7 @@ fn canonical_counts(client: &mut Client) -> (i64, i64, i64, i64, i64) {
     )
 }
 
-fn start_migrated_postgres() -> (Container<PostgresImage>, Client) {
+fn start_migrated_postgres() -> (Container<PostgresImage>, Client, String) {
     let container = PostgresImage::default()
         .with_db_name("eci")
         .with_user("eci")
@@ -297,5 +320,5 @@ fn start_migrated_postgres() -> (Container<PostgresImage>, Client) {
         String::from_utf8_lossy(&output.stderr)
     );
     let client = Client::connect(&dsn, NoTls).expect("connect migrated postgres");
-    (container, client)
+    (container, client, dsn)
 }
