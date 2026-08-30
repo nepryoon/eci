@@ -859,14 +859,27 @@ async fn process_message<M: Message>(
         }
         Err(CommandPersistenceError::Conflict) => unreachable!("receipt lookup is read-only"),
     };
-    let source_span = tracing::info_span!("ingestion.source.fetch", storage.system = "s3");
+    let source_span = tracing::info_span!(
+        "ingestion.source.fetch",
+        storage.system = "s3",
+        ingestion.outcome = tracing::field::Empty,
+        ingestion.source.bytes = tracing::field::Empty,
+    );
     let source = match fetch_source(config, minio, &scope, &command)
-        .instrument(source_span)
+        .instrument(source_span.clone())
         .await
     {
-        Ok(source) => source,
-        Err(SourceError::Permanent(reason)) => return ProcessAction::Dlq { reason },
+        Ok(source) => {
+            source_span.record("ingestion.outcome", "verified");
+            source_span.record("ingestion.source.bytes", source.len() as u64);
+            source
+        }
+        Err(SourceError::Permanent(reason)) => {
+            source_span.record("ingestion.outcome", "failed");
+            return ProcessAction::Dlq { reason };
+        }
         Err(SourceError::Transient) => {
+            source_span.record("ingestion.outcome", "retry");
             return ProcessAction::Retry {
                 dependency: "minio",
             }

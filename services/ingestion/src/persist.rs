@@ -229,10 +229,34 @@ pub fn persist_ingestion_command(
     relations: Vec<CodeRelation>,
     chunks: &[CodeChunk],
 ) -> Result<CommandOutcome, PersistError> {
+    let span = tracing::info_span!(
+        "ingestion.command.persist",
+        ingestion.outcome = tracing::field::Empty
+    );
+    let _entered = span.enter();
+    let result = persist_ingestion_command_inner(
+        client, scope, command, nodes, relations, chunks,
+    );
+    let outcome = match &result {
+        Ok(CommandOutcome::Applied(_)) => "applied",
+        Ok(CommandOutcome::Duplicate) => "duplicate",
+        Err(_) => "failed",
+    };
+    span.record("ingestion.outcome", outcome);
+    result
+}
+
+fn persist_ingestion_command_inner(
+    client: &mut postgres::Client,
+    scope: &crate::worker::AuthenticatedCommitScope,
+    command: &crate::worker::IngestionFileCommand,
+    nodes: Vec<CodeNode>,
+    relations: Vec<CodeRelation>,
+    chunks: &[CodeChunk],
+) -> Result<CommandOutcome, PersistError> {
     if nodes.iter().any(|node| node.file_path != command.path()) {
         return Err(PersistError(PersistErrorKind::InvalidCommandData));
     }
-    let _span = tracing::info_span!("ingestion.command.persist").entered();
     let trace_id = eci_common::observability::current_trace_id_hex();
     let fingerprint = crate::worker::command_fingerprint(scope, command);
     let command_id = command.command_id();
