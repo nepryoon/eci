@@ -4,6 +4,7 @@ import json
 import threading
 from concurrent import futures
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import ClassVar
 
 import grpc
 import pytest
@@ -20,8 +21,8 @@ from eci_core.retrieval.v1.retrieval_pb2 import SecurityContext
 
 
 class Authorizer:
-    def __init__(self, decision=Decision(True, "allow"), error=None):
-        self.decision = decision
+    def __init__(self, decision=None, error=None):
+        self.decision = decision or Decision(True, "allow")
         self.error = error
         self.calls = []
 
@@ -166,9 +167,9 @@ def test_deny_and_pdp_failure_are_fail_closed_and_non_disclosing(authorizer, cod
 
 
 class OPAHandler(BaseHTTPRequestHandler):
-    response_body = {"result": {"allow": True, "reason": "allow"}}
+    response_body: ClassVar = {"result": {"allow": True, "reason": "allow"}}
     response_status = 200
-    captured = []
+    captured: ClassVar[list] = []
 
     def do_GET(self):
         if self.path == "/health":
