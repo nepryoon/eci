@@ -47,7 +47,7 @@ spec:
             {{- include "eci.podSecurityContext" . | nindent 12 }}
           containers:
             - name: ingestion
-              image: {{ required "global.imageReferences.ingestion must be a registry-issued name@sha256 digest" (index .Values.global.imageReferences "ingestion") | quote }}
+              image: {{ include "eci.digestImage" (dict "field" "global.imageReferences.ingestion" "value" (index .Values.global.imageReferences "ingestion")) | quote }}
               args: [{{ required "batch.ingestion.sourcePath is required" $ingestion.sourcePath | quote }}]
               securityContext:
                 {{- include "eci.containerSecurityContext" . | nindent 16 }}
@@ -107,7 +107,7 @@ spec:
             {{- include "eci.podSecurityContext" $ | nindent 12 }}
           containers:
             - name: {{ $name }}
-              image: {{ required "global.imageReferences.gds-impact must be a registry-issued name@sha256 digest when GDS is enabled" (index $.Values.global.imageReferences "gds-impact") | quote }}
+              image: {{ include "eci.digestImage" (dict "field" "global.imageReferences.gds-impact" "value" (index $.Values.global.imageReferences "gds-impact")) | quote }}
               securityContext:
                 {{- include "eci.containerSecurityContext" $ | nindent 16 }}
               envFrom:

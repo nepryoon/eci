@@ -655,6 +655,39 @@ spec:
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("global.imageReferences.api-gateway", result.stderr)
 
+        base = [HELM, "template", "eci", str(CHART), "--set", "applications.enabled=true"]
+        for name in APPLICATION_IMAGES:
+            base.extend(
+                [
+                    "--set-string",
+                    f"global.imageReferences.{name}=registry.example.invalid/eci-test/{name}@sha256:{TEST_DIGEST}",
+                ]
+            )
+
+        mutable_reference = subprocess.run(
+            base
+            + [
+                "--set-string",
+                "global.imageReferences.api-gateway=registry.example.invalid/eci/api-gateway:v1.0.0",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(mutable_reference.returncode, 0)
+        self.assertIn("must match name@sha256", mutable_reference.stderr)
+
+        mutable_inline = subprocess.run(
+            base
+            + [
+                "--set-string",
+                "applications.workloads[0].image=registry.example.invalid/eci/api-gateway:v1.0.0",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(mutable_inline.returncode, 0)
+        self.assertIn("must match name@sha256", mutable_inline.stderr)
+
     def test_review_ci_installs_verified_task_release(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertNotIn("https://taskfile.dev/install.sh", workflow)
