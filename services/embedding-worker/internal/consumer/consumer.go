@@ -16,6 +16,9 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 
 	"github.com/eci-project/eci/libs/go/eci/kafkatrace"
+	"github.com/eci-project/eci/libs/go/eci/models"
+	"github.com/eci-project/eci/libs/go/eci/outboxmeta"
+	"github.com/eci-project/eci/libs/go/eci/securitylabels"
 	"github.com/eci-project/eci/services/embedding-worker/internal/embedclient"
 )
 
@@ -27,10 +30,6 @@ const ConsumerName = "embedding-worker"
 // aggregate_type='CodeChunk' (SPEC-029, verificato end-to-end in quella
 // SPEC: outbox.event.<aggregate_type>).
 const TopicCodeChunk = "outbox.event.CodeChunk"
-
-// eventIDHeaderKey — stesso header promosso dal connector Debezium già
-// consumato da sink-graph (SPEC-015 §2).
-const eventIDHeaderKey = "event_id"
 
 // Deps sono le dipendenze di ProcessMessage — iniettate esplicitamente
 // (nessuno stato globale), stesso principio di sink-graph (SPEC-015 §2).
@@ -51,6 +50,7 @@ type Outcome int
 
 const (
 	OutcomeStored Outcome = iota
+	OutcomeTombstoneAcknowledged
 	OutcomeDuplicate
 	OutcomeInvalidSkipped
 )
@@ -78,6 +78,12 @@ type codeChunkPayload struct {
 	Provenance json.RawMessage `json:"provenance"`
 }
 
+type codeChunkTombstone struct {
+	ID         string            `json:"id"`
+	EntityID   string            `json:"entity_id"`
+	Provenance models.Provenance `json:"provenance"`
+}
+
 // ProcessMessage elabora UN messaggio Kafka già fetchato (SPEC-030 §2/§3):
 //  1. estrae event_id dagli header;
 //  2. chiama il client di embedding per il testo del chunk — un errore qui
@@ -99,15 +105,37 @@ type codeChunkPayload struct {
 // ritorna (OutcomeInvalidSkipped, nil) — il chiamante committa comunque
 // l'offset, stesso principio di sink-graph (SPEC-015 §3 scenario 5).
 func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, headers []kafka.Header) (Outcome, error) {
-	eventID, ok := eventIDFromHeaders(headers)
-	if !ok {
-		deps.Logf("embedding-worker: messaggio su %s senza header %q valido, scartato (offset committato)", topic, eventIDHeaderKey)
+	metadata, metadataErr := outboxmeta.Parse(headers)
+	if metadataErr != nil {
+		deps.Logf("embedding-worker: metadata outbox non valida, scartata")
 		return OutcomeInvalidSkipped, nil
 	}
-
 	if topic != TopicCodeChunk {
-		deps.Logf("embedding-worker: topic sconosciuto %q (event_id=%s), scartato", topic, eventID)
+		deps.Logf("embedding-worker: topic sconosciuto, scartato")
 		return OutcomeInvalidSkipped, nil
+	}
+	eventID := metadata.EventID
+
+	if metadata.Operation == outboxmeta.OperationDelete {
+		var tombstone codeChunkTombstone
+		if err := json.Unmarshal(value, &tombstone); err != nil || tombstone.ID == "" || tombstone.EntityID == "" || tombstone.Provenance.Path == "" {
+			deps.Logf("embedding-worker: tombstone CodeChunk non valido, scartato")
+			return OutcomeInvalidSkipped, nil
+		}
+		if !securitylabels.Valid(tombstone.Provenance.TenantID, tombstone.Provenance.Repo, tombstone.Provenance.ACLGroup) {
+			securitylabels.Observe(ConsumerName, "rejected")
+			deps.Logf("embedding-worker: tombstone CodeChunk senza security labels valide, scartato")
+			return OutcomeInvalidSkipped, nil
+		}
+		securitylabels.Observe(ConsumerName, "accepted")
+		stored, err := acknowledgeTombstone(ctx, deps.DB, eventID)
+		if err != nil {
+			return OutcomeInvalidSkipped, fmt.Errorf("acknowledge CodeChunk tombstone: %w", err)
+		}
+		if !stored {
+			return OutcomeDuplicate, nil
+		}
+		return OutcomeTombstoneAcknowledged, nil
 	}
 
 	var chunk codeChunkPayload
@@ -139,18 +167,22 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	return OutcomeStored, nil
 }
 
-// eventIDFromHeaders — stessa logica di sink-graph (SPEC-015 §2 punto 1).
-func eventIDFromHeaders(headers []kafka.Header) (string, bool) {
-	for _, h := range headers {
-		if h.Key != eventIDHeaderKey {
-			continue
-		}
-		if len(h.Value) == 0 {
-			return "", false
-		}
-		return string(h.Value), true
+func acknowledgeTombstone(ctx context.Context, db *sql.DB, eventID string) (bool, error) {
+	var returned string
+	err := db.QueryRowContext(ctx,
+		`INSERT INTO processed_events (event_id, consumer_name)
+		 VALUES ($1, $2)
+		 ON CONFLICT (event_id, consumer_name) DO NOTHING
+		 RETURNING event_id`,
+		eventID, ConsumerName,
+	).Scan(&returned)
+	if err == sql.ErrNoRows {
+		return false, nil
 	}
-	return "", false
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // storeEmbedding esegue dedup + INSERT code_embedding + INSERT outbox in
