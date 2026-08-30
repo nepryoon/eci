@@ -23,8 +23,7 @@ fn run_oneshot(path: String) {
         .expect("one-shot persistence failed");
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     std::panic::set_hook(Box::new(|_| eprintln!("ingestion internal panic")));
     let _guard = eci_common::observability::init_tracing("ingestion");
     let mut args = std::env::args().skip(1);
@@ -40,7 +39,11 @@ async fn main() {
         }
         None => {}
     }
-    if let Err(error) = ingestion::runtime::run().await {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|_| panic!("Tokio runtime initialization failed"));
+    if let Err(error) = runtime.block_on(ingestion::runtime::run()) {
         eprintln!("{error}");
         std::process::exit(1);
     }

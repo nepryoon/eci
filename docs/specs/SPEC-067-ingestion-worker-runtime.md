@@ -87,7 +87,9 @@ pub fn persist_ingestion_command(
 2. **Replay idempotente.** Given lo stesso `command_id` e fingerprint consegnato
    due volte, When entrambe le delivery sono elaborate, Then la seconda e'
    `Duplicate`: code tables, outbox e receipt restano byte/conteggio invariati
-   e l'offset puo' avanzare.
+   e l'offset puo' avanzare. Il receipt preflight avviene prima del fetch
+   MinIO/parser: un comando gia' completato non dipende piu' dalla presenza del
+   blob; il lock transazionale resta il controllo autoritativo per concorrenza.
 3. **Conflitto fail-closed.** Given un `command_id` gia' completato, When cambia
    scope, commit, path o digest, Then nessuna mutazione canonica avviene, un
    reason code `command_id_conflict` raggiunge la DLQ e solo dopo si committa
@@ -137,8 +139,8 @@ pub fn persist_ingestion_command(
 | rebalance durante fetch/retry/persist | record invalidato dall'epoch; nessun offset commit se topic/partition non sono ancora assegnati |
 | PostgreSQL auth/connect/query/lock/commit stall | connect 5s, statement/TCP 10s e lock 5s; transient senza offset commit |
 | parse panic per input ostile | catturato al command boundary, permanent `parse_failed`; il processo resta vivo |
-| receipt esistente con fingerprint uguale | `Duplicate`, zero nuove righe outbox |
-| receipt esistente con fingerprint diverso | `command_id_conflict`, zero write canonici |
+| receipt esistente con fingerprint uguale | `Duplicate` prima di MinIO/parser, zero nuove righe outbox |
+| receipt esistente con fingerprint diverso | `command_id_conflict` prima di MinIO/parser, zero write canonici |
 | DLQ publish fallisce | original offset non committato |
 | TLS/CA/cert/key/Secret assente | startup fail-closed; nessun PLAINTEXT/default credential |
 | shutdown SIGTERM durante comando | stato shutdown durevole; termina dopo l'I/O bounded corrente, offset solo se commit completato |
@@ -227,7 +229,8 @@ separato emerso dall'audit di completezza.
 - [x] Source key derivata, fetch bounded e verifica size/SHA-256/UTF-8 prima del
       parser; nessun URL/bucket/key dal messaggio.
 - [x] Entita', outbox e receipt sono una transazione; replay identico produce
-      zero nuovi effetti e conflitto produce zero write.
+      zero nuovi effetti e conflitto produce zero write; receipt gia' durevoli
+      sono classificati prima di qualunque object fetch.
 - [x] Offset originale solo dopo DB commit o DLQ publish confermata; fault
       transienti conservano backlog e readiness 503; rebalance invalida i
       record revocati prima di una nuova elaborazione e del commit offset.
@@ -263,4 +266,7 @@ versionati; l'assenza del bucket mantiene readiness 503. Il passaggio a
 aggiunto deadline I/O complete, polling durante retry, shutdown durevole,
 privacy degli span parser, invalidazione per epoch/assignment al rebalance e
 TLS con CA verificata per PostgreSQL e MinIO; nessuna correzione modifica il
-contratto di scope o la semantica at-least-once.
+contratto di scope o la semantica at-least-once. Il runner E2E storico invoca
+ora esplicitamente `oneshot`; il runtime non reintroduce path positional
+ambigui. Il receipt preflight elimina dipendenza da MinIO per replay gia'
+completati, mentre la persistenza conserva advisory lock e verifica finale.

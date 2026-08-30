@@ -41,7 +41,10 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::worker::{command_message_key_matches, parse_authenticated_command, source_object_key};
-use crate::{parse_file_full_private, persist_ingestion_command};
+use crate::{
+    inspect_ingestion_command_receipt, parse_file_full_private, persist_ingestion_command,
+    CommandReceiptStatus,
+};
 
 const INPUT_TOPIC: &str = "eci.ingestion.file.v1";
 const DLQ_TOPIC: &str = "eci.ingestion.file.v1.DLQ";
@@ -680,6 +683,35 @@ async fn process_message<M: Message>(
             reason: "invalid_message_key",
         };
     }
+    let dsn = config.postgres_dsn.clone();
+    let ca_pem = config.postgres_ca_pem.clone();
+    let receipt = tokio::task::block_in_place(|| {
+        let mut client = connect_postgres_with_deadlines(&dsn, &ca_pem)
+            .map_err(|_| CommandPersistenceError::Transient)?;
+        let status = inspect_ingestion_command_receipt(&mut client, &scope, &command)
+            .map_err(|_| CommandPersistenceError::Transient)?;
+        Ok((status, client))
+    });
+    let mut postgres = match receipt {
+        Ok((CommandReceiptStatus::Duplicate, _)) => {
+            return ProcessAction::Commit {
+                outcome: "duplicate",
+                reason: "none",
+            }
+        }
+        Ok((CommandReceiptStatus::Conflict, _)) => {
+            return ProcessAction::Dlq {
+                reason: "command_id_conflict",
+            }
+        }
+        Ok((CommandReceiptStatus::New, client)) => client,
+        Err(CommandPersistenceError::Transient) => {
+            return ProcessAction::Retry {
+                dependency: "postgres",
+            }
+        }
+        Err(CommandPersistenceError::Conflict) => unreachable!("receipt lookup is read-only"),
+    };
     let source_span = tracing::info_span!("ingestion.source.fetch", storage.system = "s3");
     let source = match fetch_source(config, minio, &scope, &command)
         .instrument(source_span)
@@ -716,13 +748,9 @@ async fn process_message<M: Message>(
             }
         }
     };
-    let dsn = config.postgres_dsn.clone();
-    let ca_pem = config.postgres_ca_pem.clone();
     let persisted: Result<crate::CommandOutcome, CommandPersistenceError> =
         tokio::task::block_in_place(|| {
-            let mut client = connect_postgres_with_deadlines(&dsn, &ca_pem)
-                .map_err(|_| CommandPersistenceError::Transient)?;
-            persist_ingestion_command(&mut client, &scope, &command, nodes, relations, &chunks)
+            persist_ingestion_command(&mut postgres, &scope, &command, nodes, relations, &chunks)
                 .map_err(|error| {
                     if error.is_command_id_conflict() {
                         CommandPersistenceError::Conflict

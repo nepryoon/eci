@@ -7,7 +7,10 @@ use ingestion::worker::{
     command_message_key, command_message_key_matches, parse_authenticated_command,
     source_object_key, CommandErrorKind,
 };
-use ingestion::{parse_file_full, persist_ingestion_command, CommandOutcome};
+use ingestion::{
+    inspect_ingestion_command_receipt, parse_file_full, persist_ingestion_command, CommandOutcome,
+    CommandReceiptStatus,
+};
 use postgres::{Client, NoTls};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, ImageExt};
@@ -188,6 +191,12 @@ fn command_receipt_is_atomic_idempotent_and_conflict_closed() {
     let source = "package orders\n\nfunc Process() {}\n";
     let (nodes, relations, chunks) = parse_file_full(command.path(), source);
 
+    assert_eq!(
+        inspect_ingestion_command_receipt(&mut client, &scope, &command)
+            .expect("new command receipt lookup"),
+        CommandReceiptStatus::New
+    );
+
     let first = persist_ingestion_command(
         &mut client,
         &scope,
@@ -200,6 +209,11 @@ fn command_receipt_is_atomic_idempotent_and_conflict_closed() {
     assert!(matches!(first, CommandOutcome::Applied(_)));
     let counts = canonical_counts(&mut client);
     assert_eq!(counts.4, 1, "one receipt");
+    assert_eq!(
+        inspect_ingestion_command_receipt(&mut client, &scope, &command)
+            .expect("completed command receipt lookup"),
+        CommandReceiptStatus::Duplicate
+    );
 
     let replay = persist_ingestion_command(
         &mut client,
@@ -219,6 +233,11 @@ fn command_receipt_is_atomic_idempotent_and_conflict_closed() {
     let (_, conflicting) =
         parse_authenticated_command(conflicting.as_bytes(), &valid_headers(), 16 * 1024 * 1024)
             .unwrap();
+    assert_eq!(
+        inspect_ingestion_command_receipt(&mut client, &scope, &conflicting)
+            .expect("conflicting command receipt lookup"),
+        CommandReceiptStatus::Conflict
+    );
     let error =
         persist_ingestion_command(&mut client, &scope, &conflicting, nodes, relations, &chunks)
             .expect_err("same command id with a different fingerprint must fail");

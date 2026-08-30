@@ -148,6 +148,39 @@ pub enum CommandOutcome {
     Duplicate,
 }
 
+/// Read-only preflight for an already durable command receipt. This is an
+/// optimization and classification boundary before object I/O; the advisory
+/// lock in `persist_ingestion_command` remains the authoritative concurrency
+/// check for commands that are still new here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandReceiptStatus {
+    New,
+    Duplicate,
+    Conflict,
+}
+
+pub fn inspect_ingestion_command_receipt(
+    client: &mut postgres::Client,
+    scope: &crate::worker::AuthenticatedCommitScope,
+    command: &crate::worker::IngestionFileCommand,
+) -> Result<CommandReceiptStatus, PersistError> {
+    let row = client.query_opt(
+        "SELECT fingerprint FROM ingestion_command_receipt WHERE command_id = $1",
+        &[&command.command_id()],
+    )?;
+    Ok(match row {
+        None => CommandReceiptStatus::New,
+        Some(row) => {
+            let existing: String = row.get(0);
+            if existing == crate::worker::command_fingerprint(scope, command) {
+                CommandReceiptStatus::Duplicate
+            } else {
+                CommandReceiptStatus::Conflict
+            }
+        }
+    })
+}
+
 struct CommitProvenance<'a> {
     commit_sha: &'a str,
     path: &'a str,
