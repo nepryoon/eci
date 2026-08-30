@@ -52,6 +52,11 @@ spec:
     spec:
       serviceAccountName: {{ $workload.name }}
       automountServiceAccountToken: false
+      {{- if eq $workload.name "ingestion" }}
+      # Runtime command drain (20s) plus bounded blocking-pool teardown (5s)
+      # must complete before kubelet's hard termination boundary.
+      terminationGracePeriodSeconds: 30
+      {{- end }}
       securityContext:
         {{- include "eci.podSecurityContext" $ | nindent 8 }}
       topologySpreadConstraints:

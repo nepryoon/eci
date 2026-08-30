@@ -156,7 +156,7 @@ pub fn persist_ingestion_command(
 | receipt esistente con fingerprint diverso | `command_id_conflict` prima di MinIO/parser, zero write canonici |
 | DLQ publish fallisce | original offset non committato |
 | TLS/CA/cert/key/Secret assente | startup fail-closed; nessun PLAINTEXT/default credential |
-| shutdown SIGTERM durante comando | stato shutdown durevole; termina dopo l'I/O bounded corrente, offset solo se commit completato |
+| shutdown SIGTERM durante comando | stato shutdown durevole; drain massimo 20s, poi task abort e teardown blocking-pool massimo 5s entro la grace pod 30s; offset solo se commit completato |
 
 ## 5. Threat model e non-goals
 
@@ -304,3 +304,8 @@ Il parser CPU-bound usa `spawn_blocking`, così anche un runtime con un solo
 worker continua a servire Kafka e probe. Lo shutdown latched interrompe il
 backoff senza attendere un secondo segnale; `failed` viene registrato soltanto
 dopo publish DLQ e offset commit riusciti, altrimenti l'outcome e' `retry`.
+Metadata Kafka e readiness PostgreSQL sincrone sono isolate dal Tokio worker
+pool con deadline esterne; il commit offset sincrono conserva acknowledgement
+ma gira nel blocking pool con timeout broker 5s/deadline 6s. Il drain SIGTERM
+e' limitato a 20s e il runtime non attende task blocking oltre altri 5s, entro
+la `terminationGracePeriodSeconds: 30` verificata nel render Helm.

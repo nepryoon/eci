@@ -96,6 +96,7 @@ class PlatformChartTests(unittest.TestCase):
         ingestion = self.by_key[("Deployment", "ingestion-plane", "ingestion")]
         self.assertEqual(ingestion["spec"]["replicas"], 4)
         ingestion_pod = ingestion["spec"]["template"]["spec"]
+        self.assertEqual(ingestion_pod["terminationGracePeriodSeconds"], 30)
         self.assertEqual(
             {item["name"] for item in ingestion_pod["containers"][0]["env"]},
             {

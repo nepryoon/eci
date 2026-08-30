@@ -43,7 +43,12 @@ fn main() {
         .enable_all()
         .build()
         .unwrap_or_else(|_| panic!("Tokio runtime initialization failed"));
-    if let Err(error) = runtime.block_on(ingestion::runtime::run()) {
+    let result = runtime.block_on(ingestion::runtime::run());
+    // A parser already executing in Tokio's blocking pool cannot be cancelled.
+    // Bound runtime teardown so the process still exits within the pod's
+    // termination grace period after the command-drain deadline expires.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+    if let Err(error) = result {
         eprintln!("{error}");
         std::process::exit(1);
     }

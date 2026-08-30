@@ -51,6 +51,9 @@ const DLQ_TOPIC: &str = "eci.ingestion.file.v1.DLQ";
 const CONSUMER_GROUP: &str = "ingestion";
 const MAX_RETRY_BUFFERED_MESSAGES: usize = 64;
 const KAFKA_OFFSET_COMMIT_DEADLINE: Duration = Duration::from_secs(6);
+const KAFKA_METADATA_PROBE_DEADLINE: Duration = Duration::from_secs(3);
+const POSTGRES_PROBE_DEADLINE: Duration = Duration::from_secs(16);
+const SHUTDOWN_DRAIN_DEADLINE: Duration = Duration::from_secs(20);
 
 #[derive(Clone)]
 struct Config {
@@ -413,9 +416,12 @@ pub async fn run() -> Result<(), RuntimeError> {
                     },
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
-                            match processing.await {
-                                Ok(action) => break action,
-                                Err(_) => {
+                            match await_task_with_deadline(
+                                &mut processing,
+                                SHUTDOWN_DRAIN_DEADLINE,
+                            ).await {
+                                Some(action) => break action,
+                                None => {
                                     span.record("ingestion.outcome", "retry");
                                     break 'consume;
                                 }
@@ -608,6 +614,20 @@ where
         .await
         .ok()
         .and_then(Result::ok)
+}
+
+async fn await_task_with_deadline<T>(
+    task: &mut tokio::task::JoinHandle<T>,
+    deadline: Duration,
+) -> Option<T> {
+    match tokio::time::timeout(deadline, &mut *task).await {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(_)) => None,
+        Err(_) => {
+            task.abort();
+            None
+        }
+    }
 }
 
 fn record_is_owned<M: Message>(
@@ -1090,21 +1110,29 @@ async fn probe_dependencies(
     mut shutdown: watch::Receiver<bool>,
 ) {
     loop {
-        let kafka_ready = consumer
-            .fetch_metadata(Some(INPUT_TOPIC), Duration::from_secs(2))
-            .is_ok()
-            && consumer
-                .assignment()
-                .map(|a| a.count() > 0)
-                .unwrap_or(false);
+        let probe_consumer = consumer.clone();
+        let kafka_ready = run_blocking_with_deadline(KAFKA_METADATA_PROBE_DEADLINE, move || {
+            probe_consumer
+                .fetch_metadata(Some(INPUT_TOPIC), Duration::from_secs(2))
+                .is_ok()
+                && probe_consumer
+                    .assignment()
+                    .map(|assignment| assignment.count() > 0)
+                    .unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false);
         health.set_dependency("kafka", kafka_ready);
         let dsn = config.postgres_dsn.clone();
         let ca_pem = config.postgres_ca_pem.clone();
-        let postgres_ready =
-            tokio::task::block_in_place(|| match connect_postgres_with_deadlines(&dsn, &ca_pem) {
+        let postgres_ready = run_blocking_with_deadline(POSTGRES_PROBE_DEADLINE, move || {
+            match connect_postgres_with_deadlines(&dsn, &ca_pem) {
                 Ok(mut client) => postgres_runtime_schema_ready(&mut client),
                 Err(()) => false,
-            });
+            }
+        })
+        .await
+        .unwrap_or(false);
         health.set_dependency("postgres", postgres_ready);
         let minio_ready = tokio::time::timeout(Duration::from_secs(3), async {
             minio
@@ -1284,6 +1312,19 @@ mod tests {
         .await;
 
         assert!(result.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_drain_aborts_tasks_after_its_deadline() {
+        let mut task = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            42
+        });
+
+        let result = await_task_with_deadline(&mut task, Duration::from_millis(20)).await;
+
+        assert!(result.is_none());
+        assert!(task.await.unwrap_err().is_cancelled());
     }
 
     #[test]
