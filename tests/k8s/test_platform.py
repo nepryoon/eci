@@ -839,6 +839,15 @@ JSON
             up.index("templates/namespaces.yaml"),
         )
 
+        verify_script = (ROOT / "deploy/k8s/dev-verify.sh").read_text()
+        self.assertIn('source "$ROOT_DIR/deploy/k8s/lib/kind-cluster.sh"', verify_script)
+        self.assertIn('export KUBECONFIG="$ECI_VERIFY_TMP_DIR/kubeconfig"', verify_script)
+        self.assertNotIn("config current-context", verify_script)
+        self.assertLess(
+            verify_script.index('export KUBECONFIG="$ECI_VERIFY_TMP_DIR/kubeconfig"'),
+            verify_script.index("diagnostics()"),
+        )
+
     def test_review_qdrant_bootstrap_rejects_incompatible_vector_config(self) -> None:
         bootstrap = self.by_key[("Job", "data-plane", "qdrant-collection-bootstrap")]
         script = bootstrap["spec"]["template"]["spec"]["containers"][0]["args"][0]
@@ -1189,11 +1198,13 @@ spec:
         self.assertIn("qdrant-post-renderer.sh", installer)
         self.assertIn("opensearch-operator-post-renderer.sh", installer)
         dev_up = (ROOT / "deploy/k8s/dev-up.sh").read_text()
+        kind_policy = (ROOT / "deploy/k8s/lib/kind-cluster.sh").read_text()
         self.assertIn(
             "kindest/node@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a",
-            dev_up,
+            kind_policy,
         )
-        self.assertNotIn("kindest/node:v1.34.0", dev_up)
+        self.assertIn('--image "$ECI_KIND_NODE_IMAGE"', dev_up)
+        self.assertNotIn("kindest/node:v1.34.0", kind_policy)
         self.assertIn(
             "opensearchproject/opensearch@sha256:23297b8d8545e129dd58c254ed08d786dc552410ba772983ad2af31048d2f04b",
             dev_up,

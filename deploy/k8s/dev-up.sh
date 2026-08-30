@@ -8,8 +8,6 @@ HELM_BIN="${HELM_BIN:-helm}"
 KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
 KIND_BIN="${KIND_BIN:-kind}"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
-ECI_KIND_NODE_IMAGE="kindest/node@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a"
-ECI_KIND_KUBERNETES_VERSION="1.34.0"
 
 for executable in "$DOCKER_BIN" "$HELM_BIN" "$KUBECTL_BIN" "$KIND_BIN" openssl base64; do
   command -v "$executable" >/dev/null || { echo "required executable not found: $executable" >&2; exit 1; }

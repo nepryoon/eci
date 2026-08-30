@@ -3,6 +3,9 @@
 # Verify that a reusable eci-dev cluster is backed by the exact immutable node
 # image and Kubernetes release selected by SPEC-062. The caller supplies the
 # command paths so the policy remains deterministic and unit-testable.
+readonly ECI_KIND_NODE_IMAGE="kindest/node@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a"
+readonly ECI_KIND_KUBERNETES_VERSION="1.34.0"
+
 eci_verify_existing_kind_cluster() {
   local expected_image="$1"
   local expected_version="$2"

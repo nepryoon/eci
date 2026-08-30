@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT_DIR/deploy/k8s/lib/kind-cluster.sh"
 KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
-for executable in "$KUBECTL_BIN" openssl base64; do
+KIND_BIN="${KIND_BIN:-kind}"
+DOCKER_BIN="${DOCKER_BIN:-docker}"
+for executable in "$DOCKER_BIN" "$KUBECTL_BIN" "$KIND_BIN" openssl base64; do
   command -v "$executable" >/dev/null || { echo "required executable not found: $executable" >&2; exit 1; }
 done
-[[ "$($KUBECTL_BIN config current-context)" == kind-eci-dev ]] || { echo "refusing verification outside kind-eci-dev" >&2; exit 1; }
+"$DOCKER_BIN" info >/dev/null
+ECI_VERIFY_TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$ECI_VERIFY_TMP_DIR"' EXIT
+eci_verify_existing_kind_cluster "$ECI_KIND_NODE_IMAGE" "$ECI_KIND_KUBERNETES_VERSION" "$ECI_VERIFY_TMP_DIR/kubeconfig"
+export KUBECONFIG="$ECI_VERIFY_TMP_DIR/kubeconfig"
 
 diagnostics() {
   "$KUBECTL_BIN" get pods -A -o wide || true

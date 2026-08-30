@@ -222,7 +222,7 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
 | Helm/kubectl/kind assente | preflight fallisce con versione richiesta e link/script, nessuna mutazione |
 | Docker indisponibile | `k8s:validate` resta CPU-only; `k8s:dev:up` fallisce prima di creare cluster |
 | cluster `eci-dev` esistente con node digest o server Kubernetes diverso | bootstrap rifiuta il riuso prima di ogni mutazione; non elimina automaticamente il cluster |
-| kubeconfig corrente stale o ripuntato a un altro cluster | ignorato: kind esporta un kubeconfig temporaneo dal cluster ispezionato e tutte le mutazioni successive usano soltanto quello |
+| kubeconfig corrente stale o ripuntato a un altro cluster | ignorato: sia bootstrap sia verify esportano un kubeconfig temporaneo dal cluster ispezionato e tutte le letture/mutazioni successive usano soltanto quello |
 | secret runtime assente | pod fail-closed/non schedulato; bootstrap stampa solo nomi chiave, mai valori |
 | override password diverso su cluster dev esistente | bootstrap termina prima di riscrivere Secret; la rotazione credenziali deve aggiornare esplicitamente ruolo e consumer |
 | Secret di un sibling riusato o chiave non enumerata | non referenziato dal Pod; review/policy test non-zero |
@@ -485,9 +485,11 @@ container kind l'image ID Docker e richiede che i `RepoDigests` contengano
 l'esatto pin SPEC-062; esporta un kubeconfig temporaneo direttamente da quel
 cluster e interroga il server soltanto tramite tale file, richiedendo
 `v1.34.0`. Lo stesso kubeconfig diventa il solo target delle mutazioni
-successive. Il test comportamentale copre success, digest differente, versione
-differente e binding del kubeconfig; il gate è eseguito anche subito dopo una
-nuova creazione. Il bootstrap Qdrant valida inoltre la configurazione vettoriale
+successive. `dev-verify.sh` ripete autonomamente il gate prima della prima
+lettura e prima di creare/cancellare i pod smoke, quindi un context omonimo
+ripuntato non è una trust source. Il test comportamentale copre success, digest
+differente, versione differente e binding del kubeconfig; il gate è eseguito
+anche subito dopo una nuova creazione. Il bootstrap Qdrant valida inoltre la configurazione vettoriale
 esistente (`1536/Cosine`) oltre a shard e replica, con fixture deterministiche
 positive e negative; nessun mismatch causa ricreazione o modifica dei dati.
 

@@ -7,6 +7,7 @@ application_catalog_policy_kubeconform=PASS (193 valid, 0 invalid, 0 errors, 0 s
 application_without_managed_data_plane_rejected=PASS (external backend identity/egress is not implemented)
 existing_dev_password_override_mismatch_rejected=PASS (unit policy plus live kind existing-cluster attempt; exit 1 before Secret mutation; no credential disclosed/rotated)
 existing_kind_cluster_reuse_gate=PASS (every node RepoDigest exact; kubeconfig derived from inspected kind cluster; API server v1.34.0 exact; mismatch fail-closed; live match)
+dev_verify_kind_cluster_binding=PASS (independent node/digest/kubeconfig/server gate before reads and smoke-pod mutations; caller context ignored)
 qdrant_existing_collection_vector_contract=PASS (1536/Cosine plus shard/replica; wrong size/distance rejected without recreation; live matching config read)
 spec_062_unit_tests=PASS (22 tests)
 all_rendered_container_images_use_oci_sha256=PASS

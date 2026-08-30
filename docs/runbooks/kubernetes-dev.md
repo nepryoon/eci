@@ -37,8 +37,10 @@ through Docker to the exact pinned `kindest/node` repository digest and the
 live API server reports Kubernetes `v1.34.0`. The script first exports a
 temporary kubeconfig directly from that inspected kind cluster, validates the
 server through it, and exports it as `KUBECONFIG` for every later kubectl and
-Helm operation. A caller's current context is never trusted and a tag match is
-not sufficient.
+Helm operation. `task k8s:dev:verify` independently repeats the same
+node-digest, derived-kubeconfig and server-version gate before reading the
+cluster or creating either smoke pod. A caller's current context is never
+trusted and a tag match is not sufficient.
 Any missing metadata, different digest, or version mismatch fails before
 changing context, namespace, Secret, operator, or Helm release. Recreate the
 disposable cluster explicitly with `task k8s:dev:down` followed by

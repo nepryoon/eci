@@ -17,6 +17,9 @@ Results:
 - exact kind node repository digest, cluster-derived kubeconfig and Kubernetes
   server version reuse gate: PASS (deterministic mismatch/binding tests plus
   live match on `eci-dev`);
+- dev verification independently derives and binds the same inspected kind
+  cluster before any read or smoke-pod mutation: PASS (deterministic
+  source/order regression);
 - all pinned operator/chart releases deployed: PASS;
 - PostgreSQL, Kafka, Neo4j 5.26.30, Qdrant, OpenSearch, Redis, MinIO, OPA and
   Keycloak readiness: PASS;
