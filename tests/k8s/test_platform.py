@@ -598,6 +598,16 @@ class PlatformChartTests(unittest.TestCase):
         minio = self.by_key[("StatefulSet", "data-plane", "minio")]
         self.assertEqual(minio["spec"]["replicas"], 4)
         self.assertEqual(minio["spec"]["podManagementPolicy"], "Parallel")
+        self.assertEqual(
+            minio["spec"]["template"]["spec"]["securityContext"],
+            {
+                "runAsNonRoot": True,
+                "runAsUser": 65532,
+                "runAsGroup": 65532,
+                "fsGroup": 65532,
+                "seccompProfile": {"type": "RuntimeDefault"},
+            },
+        )
         self.assertEqual(minio["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"], "100Gi")
         minio_args = minio["spec"]["template"]["spec"]["containers"][0]["args"]
         self.assertIn("--certs-dir", minio_args)
