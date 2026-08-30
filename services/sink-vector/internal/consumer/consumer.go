@@ -16,6 +16,7 @@ import (
 	"github.com/qdrant/go-client/qdrant"
 	kafka "github.com/segmentio/kafka-go"
 
+	"github.com/eci-project/eci/libs/go/eci/outboxmeta"
 	"github.com/eci-project/eci/libs/go/eci/securitylabels"
 )
 
@@ -27,10 +28,6 @@ const ConsumerName = "sink-vector"
 // aggregate_type='CodeEmbedding' (SPEC-030, stesso meccanismo generico già
 // verificato end-to-end per CodeChunk in SPEC-029).
 const TopicCodeEmbedding = "outbox.event.CodeEmbedding"
-
-// eventIDHeaderKey — stesso header promosso dal connector Debezium già
-// consumato da sink-graph/embedding-worker.
-const eventIDHeaderKey = "event_id"
 
 // CollectionName è il nome dichiarato della collection Qdrant (SPEC-033 §2).
 const CollectionName = "code_embeddings"
@@ -137,6 +134,7 @@ type Outcome int
 
 const (
 	OutcomeStored Outcome = iota
+	OutcomeDeleted
 	OutcomeDuplicate
 	OutcomeInvalidSkipped
 )
@@ -160,6 +158,13 @@ type securityProvenance struct {
 	TenantID string `json:"tenant_id"`
 	Repo     string `json:"repo"`
 	ACLGroup string `json:"acl_group"`
+	Path     string `json:"path"`
+}
+
+type codeEmbeddingTombstone struct {
+	ID       string             `json:"id"`
+	EntityID string             `json:"entity_id"`
+	Security securityProvenance `json:"provenance"`
 }
 
 // ProcessMessage elabora UN messaggio Kafka già fetchato (SPEC-033 §2/§3):
@@ -175,15 +180,20 @@ type securityProvenance struct {
 // ritorna (OutcomeInvalidSkipped, nil) — il chiamante committa comunque
 // l'offset, stesso principio di sink-graph (SPEC-015 §3 scenario 5).
 func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, headers []kafka.Header) (Outcome, error) {
-	eventID, ok := eventIDFromHeaders(headers)
-	if !ok {
-		deps.Logf("sink-vector: messaggio su %s senza header %q valido, scartato (offset committato)", topic, eventIDHeaderKey)
+	metadata, metadataErr := outboxmeta.Parse(headers)
+	if metadataErr != nil {
+		deps.Logf("sink-vector: metadata outbox non valida, scartata")
 		return OutcomeInvalidSkipped, nil
 	}
 
 	if topic != TopicCodeEmbedding {
-		deps.Logf("sink-vector: topic sconosciuto %q (event_id=%s), scartato", topic, eventID)
+		deps.Logf("sink-vector: topic sconosciuto, scartato")
 		return OutcomeInvalidSkipped, nil
+	}
+	eventID := metadata.EventID
+
+	if metadata.Operation == outboxmeta.OperationDelete {
+		return processDelete(ctx, deps, value, eventID)
 	}
 
 	var msg codeEmbeddingPayload
@@ -227,6 +237,42 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	return OutcomeStored, nil
 }
 
+func processDelete(ctx context.Context, deps Deps, value []byte, eventID string) (Outcome, error) {
+	var tombstone codeEmbeddingTombstone
+	if err := json.Unmarshal(value, &tombstone); err != nil || tombstone.ID == "" || tombstone.EntityID == "" || tombstone.Security.Path == "" {
+		deps.Logf("sink-vector: tombstone CodeEmbedding non valido, scartato")
+		return OutcomeInvalidSkipped, nil
+	}
+	if !securitylabels.Valid(tombstone.Security.TenantID, tombstone.Security.Repo, tombstone.Security.ACLGroup) {
+		securitylabels.Observe(ConsumerName, "rejected")
+		deps.Logf("sink-vector: tombstone CodeEmbedding senza security labels valide, scartato")
+		return OutcomeInvalidSkipped, nil
+	}
+	securitylabels.Observe(ConsumerName, "accepted")
+
+	processed, err := isProcessed(ctx, deps.DB, eventID)
+	if err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("check tombstone completion: %w", err)
+	}
+	if processed {
+		deps.Logf("sink-vector: tombstone CodeEmbedding gia' completato")
+		return OutcomeDuplicate, nil
+	}
+
+	if err := deletePoint(ctx, deps.Qdrant, tombstone); err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("delete Qdrant projection: %w", err)
+	}
+	completed, err := markProcessed(ctx, deps.DB, eventID)
+	if err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("complete tombstone after Qdrant delete: %w", err)
+	}
+	if !completed {
+		deps.Logf("sink-vector: tombstone CodeEmbedding completato concorrentemente")
+		return OutcomeDuplicate, nil
+	}
+	return OutcomeDeleted, nil
+}
+
 func isProcessed(ctx context.Context, db *sql.DB, eventID string) (bool, error) {
 	var processed bool
 	err := db.QueryRowContext(ctx,
@@ -236,20 +282,6 @@ func isProcessed(ctx context.Context, db *sql.DB, eventID string) (bool, error) 
 		eventID, ConsumerName,
 	).Scan(&processed)
 	return processed, err
-}
-
-// eventIDFromHeaders — stessa logica di sink-graph (SPEC-015 §2 punto 1).
-func eventIDFromHeaders(headers []kafka.Header) (string, bool) {
-	for _, h := range headers {
-		if h.Key != eventIDHeaderKey {
-			continue
-		}
-		if len(h.Value) == 0 {
-			return "", false
-		}
-		return string(h.Value), true
-	}
-	return "", false
 }
 
 // markProcessed — stesso identico dedup atomico di sink-graph (SPEC-015 §2
@@ -291,6 +323,31 @@ func upsertPoint(ctx context.Context, client *qdrant.Client, msg codeEmbeddingPa
 		return err
 	}
 	return validateAppliedUpdate(result)
+}
+
+func deletePoint(ctx context.Context, client *qdrant.Client, msg codeEmbeddingTombstone) error {
+	result, err := client.Delete(ctx, buildDeleteRequest(msg))
+	if err != nil {
+		return err
+	}
+	return validateAppliedUpdate(result)
+}
+
+// buildDeleteRequest combines point identity with the complete canonical
+// scope. A point ID alone is never authority to remove another scope's data.
+func buildDeleteRequest(msg codeEmbeddingTombstone) *qdrant.DeletePoints {
+	wait := true
+	filter := &qdrant.Filter{Must: []*qdrant.Condition{
+		qdrant.NewHasID(qdrant.NewID(DerivePointID(msg.ID))),
+		qdrant.NewMatch("tenant_id", msg.Security.TenantID),
+		qdrant.NewMatch("repo", msg.Security.Repo),
+		qdrant.NewMatch("acl_group", msg.Security.ACLGroup),
+	}}
+	return &qdrant.DeletePoints{
+		CollectionName: CollectionName,
+		Wait:           &wait,
+		Points:         qdrant.NewPointsSelectorFilter(filter),
+	}
 }
 
 // buildUpsertRequest makes the durability boundary explicit: the external
@@ -335,10 +392,10 @@ func buildUpsertRequest(msg codeEmbeddingPayload) (*qdrant.UpsertPoints, error) 
 
 func validateAppliedUpdate(result *qdrant.UpdateResult) error {
 	if result == nil {
-		return fmt.Errorf("Qdrant upsert returned no update result")
+		return fmt.Errorf("Qdrant returned no update result")
 	}
 	if result.GetStatus() != qdrant.UpdateStatus_Completed {
-		return fmt.Errorf("Qdrant upsert not completed: status=%s", result.GetStatus())
+		return fmt.Errorf("Qdrant update not completed: status=%s", result.GetStatus())
 	}
 	return nil
 }
