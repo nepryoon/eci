@@ -300,3 +300,7 @@ Il bootstrap dev genera una CA MinIO separata e una leaf `CA:FALSE` con SAN ed
 EKU server, monta la CA nel trust store peer e distribuisce al worker soltanto
 la CA pubblica. Lo span consume resta vivo attraverso la classificazione e
 registra `ingestion.outcome=applied|duplicate|failed|retry` da enum chiuso.
+Il parser CPU-bound usa `spawn_blocking`, così anche un runtime con un solo
+worker continua a servire Kafka e probe. Lo shutdown latched interrompe il
+backoff senza attendere un secondo segnale; `failed` viene registrato soltanto
+dopo publish DLQ e offset commit riusciti, altrimenti l'outcome e' `retry`.

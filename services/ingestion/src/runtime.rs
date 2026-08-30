@@ -405,13 +405,19 @@ pub async fn run() -> Result<(), RuntimeError> {
                 tokio::select! {
                     result = &mut processing => match result {
                         Ok(action) => break action,
-                        Err(_) => break 'consume,
+                        Err(_) => {
+                            span.record("ingestion.outcome", "failed");
+                            break 'consume;
+                        }
                     },
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             match processing.await {
                                 Ok(action) => break action,
-                                Err(_) => break 'consume,
+                                Err(_) => {
+                                    span.record("ingestion.outcome", "failed");
+                                    break 'consume;
+                                }
                             }
                         }
                     }
@@ -424,6 +430,7 @@ pub async fn run() -> Result<(), RuntimeError> {
                                 &health,
                             ) {
                                 processing.abort();
+                                span.record("ingestion.outcome", "retry");
                                 break 'consume;
                             }
                         }
@@ -431,8 +438,8 @@ pub async fn run() -> Result<(), RuntimeError> {
                     }
                 }
             };
-            span.record("ingestion.outcome", action.trace_outcome());
             if !record_is_owned(&consumer, &message, message_epoch) {
+                span.record("ingestion.outcome", "retry");
                 retain_owned_records(&consumer, &mut buffered);
                 resume_if_buffer_empty(&consumer, &buffered, &health);
                 break;
@@ -440,6 +447,7 @@ pub async fn run() -> Result<(), RuntimeError> {
             let completed = match action {
                 ProcessAction::Commit { outcome, reason } => {
                     if commit_message_offset(&consumer, &message).is_ok() {
+                        span.record("ingestion.outcome", outcome);
                         health
                             .metrics
                             .commands
@@ -453,6 +461,7 @@ pub async fn run() -> Result<(), RuntimeError> {
                         backoff = Duration::from_millis(250);
                         true
                     } else {
+                        span.record("ingestion.outcome", "retry");
                         health.set_dependency("kafka", false);
                         false
                     }
@@ -465,11 +474,13 @@ pub async fn run() -> Result<(), RuntimeError> {
                             .with_label_values(&[reason, "published"])
                             .inc();
                         if !record_is_owned(&consumer, &message, message_epoch) {
+                            span.record("ingestion.outcome", "retry");
                             retain_owned_records(&consumer, &mut buffered);
                             resume_if_buffer_empty(&consumer, &buffered, &health);
                             break;
                         }
                         if commit_message_offset(&consumer, &message).is_ok() {
+                            span.record("ingestion.outcome", "failed");
                             health
                                 .metrics
                                 .commands
@@ -483,10 +494,12 @@ pub async fn run() -> Result<(), RuntimeError> {
                             backoff = Duration::from_millis(250);
                             true
                         } else {
+                            span.record("ingestion.outcome", "retry");
                             health.set_dependency("kafka", false);
                             false
                         }
                     } else {
+                        span.record("ingestion.outcome", "retry");
                         health
                             .metrics
                             .dlq
@@ -496,6 +509,7 @@ pub async fn run() -> Result<(), RuntimeError> {
                     }
                 }
                 ProcessAction::Retry { dependency } => {
+                    span.record("ingestion.outcome", "retry");
                     health.set_dependency(dependency, false);
                     false
                 }
@@ -667,6 +681,9 @@ async fn poll_during_backoff(
     buffered: &mut VecDeque<BufferedMessage>,
     health: &HealthState,
 ) -> BackoffOutcome {
+    if *shutdown.borrow() {
+        return BackoffOutcome::Shutdown;
+    }
     let delay = tokio::time::sleep(duration);
     tokio::pin!(delay);
     loop {
@@ -779,16 +796,6 @@ enum ProcessAction {
     },
 }
 
-impl ProcessAction {
-    fn trace_outcome(&self) -> &'static str {
-        match self {
-            Self::Commit { outcome, .. } => outcome,
-            Self::Dlq { .. } => "failed",
-            Self::Retry { .. } => "retry",
-        }
-    }
-}
-
 async fn process_message<M: Message>(
     config: &Config,
     minio: &MinioClient,
@@ -889,20 +896,23 @@ async fn process_message<M: Message>(
         .source_bytes
         .with_label_values(&["verified"])
         .inc_by(source.len() as u64);
-    let source_text = match std::str::from_utf8(&source) {
-        Ok(source) => source,
-        Err(_) => {
-            return ProcessAction::Dlq {
-                reason: "source_not_utf8",
-            }
-        }
-    };
-    let parsed = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        parse_file_full_private(command.path(), source_text)
-    }));
+    if std::str::from_utf8(&source).is_err() {
+        return ProcessAction::Dlq {
+            reason: "source_not_utf8",
+        };
+    }
+    let parse_path = command.path().to_owned();
+    let parsed = tokio::task::spawn_blocking(move || {
+        std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let source_text = std::str::from_utf8(&source)
+                .expect("source UTF-8 was validated before entering blocking parser");
+            parse_file_full_private(&parse_path, source_text)
+        }))
+    })
+    .await;
     let (nodes, relations, chunks) = match parsed {
-        Ok(value) => value,
-        Err(_) => {
+        Ok(Ok(value)) => value,
+        Ok(Err(_)) | Err(_) => {
             return ProcessAction::Dlq {
                 reason: "parse_failed",
             }
@@ -1302,39 +1312,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn consume_span_outcome_is_a_closed_bounded_enum() {
-        assert_eq!(
-            ProcessAction::Commit {
-                outcome: "applied",
-                reason: "none",
-            }
-            .trace_outcome(),
-            "applied"
-        );
-        assert_eq!(
-            ProcessAction::Commit {
-                outcome: "duplicate",
-                reason: "none",
-            }
-            .trace_outcome(),
-            "duplicate"
-        );
-        assert_eq!(
-            ProcessAction::Dlq {
-                reason: "invalid_payload",
-            }
-            .trace_outcome(),
-            "failed"
-        );
-        assert_eq!(
-            ProcessAction::Retry {
-                dependency: "postgres",
-            }
-            .trace_outcome(),
-            "retry"
-        );
-    }
 
     #[test]
     fn dlq_envelope_contains_only_bounded_coordinates_and_reason() {
