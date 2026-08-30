@@ -51,6 +51,8 @@ func TestCheckerRequiresTopicAndGroupAuthorization(t *testing.T) {
 		{name: "group coordinator denied", client: fakeClient{metadata: validMetadata, coordinator: &kafka.FindCoordinatorResponse{Error: errors.New("group authorization failed")}, offsets: validOffsets}},
 		{name: "missing coordinator", client: fakeClient{metadata: validMetadata, coordinator: &kafka.FindCoordinatorResponse{}, offsets: validOffsets}},
 		{name: "group offsets denied", client: fakeClient{metadata: validMetadata, coordinator: validCoordinator, offsets: &kafka.OffsetFetchResponse{Error: errors.New("group authorization failed")}}},
+		{name: "partition offset denied", client: fakeClient{metadata: validMetadata, coordinator: validCoordinator, offsets: &kafka.OffsetFetchResponse{Topics: map[string][]kafka.OffsetFetchPartition{"events": {{Partition: 0, Error: errors.New("group authorization failed")}}}}}},
+		{name: "incomplete offsets", client: fakeClient{metadata: validMetadata, coordinator: validCoordinator, offsets: &kafka.OffsetFetchResponse{Topics: map[string][]kafka.OffsetFetchPartition{"events": {}}}}},
 	}
 
 	for _, test := range tests {
