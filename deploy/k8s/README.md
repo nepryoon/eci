@@ -19,7 +19,11 @@ HA, Neo4j Enterprise RBAC, GPU or performance compliance. Application
 templates are opt-in: `applications.enabled=true` is accepted only when every
 first-party workload has a registry-issued `name@sha256:<digest>` in
 `global.imageReferences`. No unpublished or synthetic ECI image is a chart
-default.
+default. The current application routing and least-privilege egress contract
+targets the chart-managed stores, so application enablement also requires
+`dataPlane.enabled=true`. External backend identity, trust and egress wiring is
+not implemented; Helm rejects that value combination instead of rendering an
+unready rollout.
 
 The chart only references credentials. `dev-up.sh` creates ephemeral
 `eci-runtime`, `eci-opensearch-admin`, and

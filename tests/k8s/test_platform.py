@@ -1035,6 +1035,27 @@ spec:
             "dataPlane.enabled=false must omit Kafka Connect policies and workloads",
         )
 
+    def test_review_managed_applications_require_managed_data_plane(self) -> None:
+        result = subprocess.run(
+            [
+                HELM,
+                "template",
+                "eci",
+                str(CHART),
+                "--set",
+                "applications.enabled=true",
+                "--set",
+                "dataPlane.enabled=false",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "applications.enabled=true requires dataPlane.enabled=true",
+            result.stderr,
+        )
+
     def test_review_cdc_disablement_preserves_qdrant_bootstrap_network_path(self) -> None:
         command = [
             HELM,

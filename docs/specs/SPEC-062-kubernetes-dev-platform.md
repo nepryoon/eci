@@ -373,6 +373,9 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       espliciti fuori dal profilo dev; nel profilo dev il solo issuer è il
       Keycloak in-cluster selezionato per namespace/pod su 8443 e nessuna
       eccezione CIDR esterna viene renderizzata.
+- [x] Il catalogo applicativo non può essere abilitato senza il data plane
+      gestito: il chart rifiuta la combinazione anziché renderizzare workload
+      privi di identity/egress verso backend esterni non supportati.
 - [x] I sink graph/vector/search registrano `processed_events` soltanto dopo
       il write esterno idempotente riuscito; un write fallito resta ritentabile
       e non viene trasformato in falso duplicato. Qdrant richiede applicazione

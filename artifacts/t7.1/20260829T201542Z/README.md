@@ -186,3 +186,8 @@ login role afterward, and proves inherited SELECT. The live kind revision 24
 reconciled the same carrier membership, removed the legacy direct grant, and
 passed the complete dev verification without replaying or falsifying a
 migration.
+The closing render review rejects `applications.enabled=true` together with
+`dataPlane.enabled=false`: the current chart has no external-backend identity,
+trust, or egress contract and therefore cannot claim that topology. This is a
+deterministic fail-closed configuration check and does not alter the revision
+24 live-cluster evidence.

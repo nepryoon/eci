@@ -1,4 +1,7 @@
 {{- if .Values.applications.enabled }}
+{{- if not .Values.dataPlane.enabled }}
+{{- fail "applications.enabled=true requires dataPlane.enabled=true; external data-plane routing and egress are not implemented" }}
+{{- end }}
 {{- range $workload := .Values.applications.workloads }}
 {{- with $workload.secretEnv }}
 {{- $expectedSecret := printf "eci-runtime-%s" $workload.name }}
