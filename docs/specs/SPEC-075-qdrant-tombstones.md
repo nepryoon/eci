@@ -1,5 +1,5 @@
 # SPEC-075 — Tombstone scope-safe nel sink Qdrant
-Stato: approved
+Stato: implemented
 Task-tree: T7.1a · Servizio: services/sink-vector · ADD: Modulo 1 §2.2.3–§2.2.4, Modulo 2 §1.3
 Contratti: contracts/jsonschema/outbox-event.json, ADR-0025
 
@@ -73,13 +73,13 @@ log/error. Le metriche esistenti distinguono processed/retry/DLQ.
 
 ## 9. Criteri di accettazione
 
-- [ ] Test nuovi osservati rossi contro sink UPSERT-only.
-- [ ] `go test ./internal/consumer/...`
-- [ ] `go vet ./...`
+- [x] Test nuovi osservati rossi contro sink UPSERT-only.
+- [x] `go test ./internal/consumer/...`
+- [x] `go vet ./...`
 - [ ] integration Docker verde e ripetuta due volte.
-- [ ] `task build && task lint && task test && task test:security`
+- [x] `task build && task lint && task test && task test:security`
 - [ ] `task test:integration`
-- [ ] Review cross-scope/replay/wait/marker/cancel completata.
+- [x] Review cross-scope/replay/wait/marker/cancel completata.
 
 ## 10. Review avversariale pre-implementazione
 
@@ -87,3 +87,15 @@ Il point ID da solo identifica globalmente l'embedding ma non costituisce
 autorizzazione. Il filtro DELETE combina `has_id` con tenant, repo e ACL
 indicizzati, evitando confused-deputy cross-scope. `wait=true` e status
 Completed mantengono effect-before-marker anche nella failure window.
+
+## 11. Evidenza di implementazione
+
+- Test red iniziale: `8bf7435`; failure-window integration: `2f2a328`;
+  implementazione: `dc6dcbe`.
+- `go test ./internal/consumer/...`, `go test -race
+  ./internal/consumer/...`, `go vet ./...` e compilazione con
+  `-tags=integration -run '^$'` verdi.
+- Gli aggregate `task build`, `task lint`, `task test` e
+  `task test:security` sono verdi. `task test:integration` termina
+  esplicitamente prima delle suite per daemon Docker non raggiungibile;
+  pertanto lo stato non viene promosso a `verified`.
