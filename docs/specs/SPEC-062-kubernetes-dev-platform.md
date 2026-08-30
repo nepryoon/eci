@@ -232,6 +232,7 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
 | CA/certificato/chiave Kafka assente o invalido con mTLS abilitato | Connect/sink/worker terminano prima di usare il broker |
 | client Kafka tenta topic/gruppo sibling | broker nega tramite ACL literal; smoke e verifica falliscono se viene consentito |
 | CA o credenziali OpenSearch assenti su HTTPS | retrieval/sink-search terminano prima di servire/consumare |
+| due repliche sink-search creano insieme l'indice vuoto | il perdente accetta solo `resource_already_exists_exception` tipizzato e riconcilia il mapping; altri errori restano fatali |
 | password Redis assente con auth richiesta | semantic-cache termina prima di aprire il listener |
 | password Redis errata/stale o Redis indisponibile | startup/readiness resta 503 senza dettagli backend; liveness locale non causa restart storm |
 | credenziale/store/model backend Retrieval errato o indisponibile | `/ready` resta 503; controlli concorrenti bounded e nessun dettaglio backend o inferenza periodica |
@@ -350,6 +351,9 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       per topic/group; Connect è il solo writer primario, retry per-consumer e
       REST Connect loopback-only sono verificati; OpenSearch usa HTTPS+CA+Basic Auth;
       Redis `requirepass` è propagato esplicitamente, con unit test fail-closed.
+- [x] Il bootstrap OpenSearch di sink-search è race-safe per due repliche:
+      soltanto l'already-exists tipizzato è idempotente e il mapping security
+      viene comunque riconciliato.
 - [x] Kafka Connect loopback-only è vincolato a una replica ed è omesso con il
       data plane; quando CDC è disabilitato il login role CNPG `eci_cdc` e il
       relativo Secret reference sono omessi, mentre resta soltanto il carrier

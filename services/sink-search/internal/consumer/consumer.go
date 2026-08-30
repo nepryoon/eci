@@ -11,8 +11,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 
+	"github.com/opensearch-project/opensearch-go/v4"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchutil"
 	kafka "github.com/segmentio/kafka-go"
@@ -69,13 +72,7 @@ func EnsureIndex(ctx context.Context, client *opensearchapi.Client) error {
 	case existsResp == nil:
 		return fmt.Errorf("Indices.Exists(%s): %w", IndexName, err)
 	case existsResp.StatusCode == 200:
-		securityMapping := map[string]any{"properties": securityProperties()}
-		if _, err := client.Indices.Mapping.Put(ctx, opensearchapi.MappingPutReq{
-			Indices: []string{IndexName}, Body: opensearchutil.NewJSONReader(securityMapping),
-		}); err != nil {
-			return fmt.Errorf("Mapping.Put(%s): %w", IndexName, err)
-		}
-		return nil
+		return ensureSecurityMapping(ctx, client)
 	case existsResp.StatusCode != 404:
 		return fmt.Errorf("Indices.Exists(%s): status inatteso %d: %w", IndexName, existsResp.StatusCode, err)
 	}
@@ -94,7 +91,26 @@ func EnsureIndex(ctx context.Context, client *opensearchapi.Client) error {
 		Index: IndexName,
 		Body:  opensearchutil.NewJSONReader(mapping),
 	}); err != nil {
+		var createError *opensearch.StructError
+		if errors.As(err, &createError) &&
+			createError.Status == http.StatusBadRequest &&
+			createError.Err.Type == "resource_already_exists_exception" {
+			// Another identical replica won the 404 -> create race. Reconcile
+			// the required security fields so incompatible mappings still fail;
+			// do not suppress any other OpenSearch error.
+			return ensureSecurityMapping(ctx, client)
+		}
 		return fmt.Errorf("Indices.Create(%s): %w", IndexName, err)
+	}
+	return nil
+}
+
+func ensureSecurityMapping(ctx context.Context, client *opensearchapi.Client) error {
+	securityMapping := map[string]any{"properties": securityProperties()}
+	if _, err := client.Indices.Mapping.Put(ctx, opensearchapi.MappingPutReq{
+		Indices: []string{IndexName}, Body: opensearchutil.NewJSONReader(securityMapping),
+	}); err != nil {
+		return fmt.Errorf("Mapping.Put(%s): %w", IndexName, err)
 	}
 	return nil
 }

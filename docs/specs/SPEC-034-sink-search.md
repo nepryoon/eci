@@ -26,12 +26,17 @@ e non viene classificato come duplicato.
 3. **Dato** una query full-text semplice contro l'indice (es. cercare una parola presente nel testo di un chunk noto), **quando** eseguo la ricerca, **allora** il documento corretto compare tra i risultati — verifica diretta che l'indicizzazione full-text funzioni, non solo che il documento esista.
 4. **Dato** il servizio avviato per la prima volta senza l'indice `code_chunks`, **quando** parte, **allora** lo crea prima di iniziare a consumare; riavviato con l'indice già esistente, non tenta di ricrearlo.
 5. **Dato** lo STESSO messaggio `CodeChunk` consumato in parallelo sia da questo servizio sia da `embedding-worker` (entrambi attivi sullo stesso topic), **quando** ispeziono lo stato finale, **allora** ENTRAMBI hanno processato il messaggio in modo indipendente — verifica diretta del fan-out via consumer group distinti, non solo dichiarato.
+6. **Date** due repliche avviate insieme su cluster vuoto, **quando** entrambe
+   osservano 404 e tentano la creazione, **allora** una crea l'indice e l'altra
+   accetta esclusivamente `resource_already_exists_exception`, riconcilia il
+   mapping di sicurezza e prosegue; ogni altro errore resta fatale.
 
 ## 4. Errori & edge case
 
 | Condizione | Comportamento atteso |
 |---|---|
 | OpenSearch irraggiungibile all'avvio (setup indice) | Errore esplicito, il servizio non parte silenziosamente |
+| creazione indice concorrente | soltanto l'errore tipizzato `resource_already_exists_exception` è idempotente; mapping incompatibile o altro errore resta fatale |
 | Un messaggio `CodeChunk` con `text` vuoto (caso limite già ammesso da T2.2) | Documento comunque indicizzato con `text` vuoto — nessun caso speciale |
 
 ## 5. Non-goals
@@ -41,13 +46,13 @@ Nessuna integrazione con `retrieval-engine` (T1.4) — questa SPEC scrive l'indi
 Modulo 1: hybrid storage con una gamba full-text dedicata, distinta dal fulltext nativo limitato di Neo4j (T1.4, solo `name`) — questa SPEC la costruisce per la prima volta sul testo completo dei chunk.
 
 ## 7. Test plan
-Test di integrazione con Kafka+Postgres+OpenSearch reali (testcontainers) — scenario 3 in particolare richiede una query reale, non solo un `GetDocument` per id, per verificare che l'analisi full-text sia genuinamente configurata e funzionante.
+Test di integrazione con Kafka+Postgres+OpenSearch reali (testcontainers) — scenario 3 in particolare richiede una query reale, non solo un `GetDocument` per id, per verificare che l'analisi full-text sia genuinamente configurata e funzionante. Test HTTP deterministico a due goroutine per forzare entrambe le HEAD 404 prima delle due Create e provare la race dello scenario 6.
 
 ## 8. Osservabilità
 Stessa fondazione OTel già stabilita per i servizi Go del progetto.
 
 ## 9. Criteri di accettazione
-- [x] Scenari 1-5 verificati con evidenza diretta.
+- [x] Scenari 1-6 verificati con evidenza diretta.
 - [x] Edge case tabella §4 verificati esplicitamente.
 - [x] Versione/forma esatta dell'API `opensearch-go` verificata empiricamente, riportata nel report.
 - [x] Scrittura con id SHA-256 esadecimale confermata funzionante con una scrittura reale, non presunta dalla sola documentazione.
@@ -123,3 +128,10 @@ Stessa fondazione OTel già stabilita per i servizi Go del progetto.
    applicativa non è ciò che lo scenario 5 verifica — il fan-out Kafka è
    una proprietà del broker/consumer-group, non del codice applicativo a
    valle, ed è provata più direttamente così.
+6. **Bootstrap concorrente multi-replica**: il client v4 restituisce un
+   `*opensearch.StructError` tipizzato. `EnsureIndex` accetta soltanto status
+   400 con type esatto `resource_already_exists_exception`, poi applica il
+   mapping security richiesto; errori di rete, altri status/type e mapping
+   incompatibili restano fatali. Il test sincronizza due HEAD 404 prima delle
+   Create, quindi esercita deterministicamente la race anziché affidarsi al
+   timing del scheduler.

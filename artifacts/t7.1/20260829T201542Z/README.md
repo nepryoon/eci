@@ -49,6 +49,9 @@ Results:
 - LLM Gateway readiness requires every configured vLLM `/health` path with a
   bounded, non-inference request and returns an empty 503 on failure: PASS
   (deterministic unit/render evidence; first-party image not deployed);
+- concurrent `sink-search` index bootstrap forces two initial 404 observations,
+  accepts only the typed already-exists loser and reconciles security mapping:
+  PASS (deterministic unit plus real OpenSearch integration evidence);
 - dedicated CNPG-managed `eci_cdc` role, passwordless
   `eci_cdc_outbox_reader` carrier membership, inherited SELECT-only table
   grant, fixed outbox publication, logical slot and live Debezium

@@ -23,6 +23,7 @@ kafka_connect_single_replica_and_data_plane_guard_unit=PASS
 cdc_disabled_preserves_passwordless_carrier_and_omits_login_secret_reference=PASS
 kafka_worker_readiness_unit=PASS (same transport; topic Describe + non-consuming Fetch/Read + group coordinator/offset authorization; closed 503)
 llm_gateway_vllm_readiness_unit=PASS (all configured native /health paths; bounded non-inference check; closed empty 503; HTTP startup/readiness + local TCP liveness)
+sink_search_concurrent_index_bootstrap=PASS (two synchronized 404/Create attempts; typed already-exists only; security mapping reconciled; real OpenSearch integration green)
 semantic_cache_redis_readiness_unit=PASS (authenticated PING; closed 503; startup/readiness HTTP and local liveness)
 retrieval_backend_readiness_unit=PASS (Neo4j auth; Qdrant collection; OpenSearch index; native TEI health; concurrent bounded closed 503)
 postgres_cdc_role_unit=PASS (passwordless NOLOGIN carrier; separate login Secret; REPLICATION without admin attributes; no owner credential in Connect)

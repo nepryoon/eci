@@ -136,6 +136,10 @@ topics, group-coordinator/offset access, and a non-consuming Fetch at the log
 end that exercises the actual Topic Read ACL, using the same Kafka transport as
 the consume loop. Kubernetes startup/readiness use that endpoint; liveness
 remains local so a broker outage does not create a restart storm.
+The two default `sink-search` replicas may both observe a missing
+`code_chunks` index. Bootstrap accepts only the typed concurrent
+`resource_already_exists_exception` from the losing Create and then reconciles
+the required security mapping; every other create/mapping error remains fatal.
 LLM Gateway similarly exposes `/ready` on its service port and requires every
 configured vLLM upstream's native `/health` to return 2xx within two seconds.
 The check sends no prompt and performs no inference; liveness remains the local
