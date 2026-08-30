@@ -113,8 +113,10 @@ func mergeCodeNodeQuery(nodeType string) (string, error) {
 // mergeCodeRelationQuery costruisce la query di MERGE per una CodeRelation
 // (SPEC-015 §2): endpoint creati/riusati con la sola etichetta generica
 // :CodeNode (mai una label specifica — non è garantito sapere il tipo
-// reale a questo punto del consumo, vedi commento in §2), weight
-// aggregato con lo stesso pattern del Cypher di riferimento D3 (SPEC-004).
+// reale a questo punto del consumo, vedi commento in §2). Il payload contiene
+// il peso già aggregato dal parser: SET assoluto rende il MERGE idempotente
+// anche se un crash avviene dopo Neo4j ma prima del marker PostgreSQL
+// (ADR-0022).
 // Ogni mutazione della topologia incrementa inoltre la generation di entrambe
 // le partizioni endpoint: un singolo edge può cambiare lo score di qualunque
 // nodo della proiezione, non soltanto dei suoi estremi (ADR-0015).
@@ -148,8 +150,7 @@ func mergeCodeRelationQuery(relType string) (string, error) {
 		")\n" +
 		"WITH DISTINCT from, to\n" +
 		"MERGE (from)-[r:" + relType + "]->(to)\n" +
-		"ON CREATE SET r.weight = coalesce($weight, 1)\n" +
-		"ON MATCH SET r.weight = coalesce(r.weight, 0) + coalesce($weight, 1)"
+		"SET r.weight = coalesce($weight, 1)"
 
 	return query, nil
 }

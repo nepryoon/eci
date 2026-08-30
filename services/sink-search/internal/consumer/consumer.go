@@ -195,11 +195,11 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	}
 	securitylabels.Observe(ConsumerName, "accepted")
 
-	isNew, err := markProcessed(ctx, deps.DB, eventID)
+	processed, err := isProcessed(ctx, deps.DB, eventID)
 	if err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("dedup event_id=%s: %w", eventID, err)
 	}
-	if !isNew {
+	if processed {
 		deps.Logf("sink-search: event_id=%s già in processed_events, skip indicizzazione (redelivery)", eventID)
 		return OutcomeDuplicate, nil
 	}
@@ -207,7 +207,26 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	if err := indexDocument(ctx, deps.OpenSearch, chunk); err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("indicizzazione documento id=%s: %w", chunk.ID, err)
 	}
+	isNew, err := markProcessed(ctx, deps.DB, eventID)
+	if err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("complete dedup event_id=%s after OpenSearch index: %w", eventID, err)
+	}
+	if !isNew {
+		deps.Logf("sink-search: event_id=%s completato concorrentemente, indicizzazione idempotente già applicata", eventID)
+		return OutcomeDuplicate, nil
+	}
 	return OutcomeStored, nil
+}
+
+func isProcessed(ctx context.Context, db *sql.DB, eventID string) (bool, error) {
+	var processed bool
+	err := db.QueryRowContext(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM processed_events WHERE event_id = $1 AND consumer_name = $2
+		)`,
+		eventID, ConsumerName,
+	).Scan(&processed)
+	return processed, err
 }
 
 // eventIDFromHeaders — stessa logica di sink-graph (SPEC-015 §2 punto 1).

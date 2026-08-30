@@ -61,9 +61,9 @@ const (
 // ProcessMessage elabora UN messaggio Kafka già fetchato (SPEC-015 §2,
 // passi 1-3):
 //  1. estrae event_id dagli header;
-//  2. dedup atomico via processed_events (INSERT ... ON CONFLICT DO
-//     NOTHING RETURNING event_id);
-//  3. se nuovo, decodifica il payload e fa MERGE su Neo4j secondo il topic.
+//  2. verifica processed_events senza prenotare l'evento;
+//  3. se nuovo, decodifica il payload e fa MERGE idempotente su Neo4j;
+//  4. solo dopo il MERGE riuscito registra processed_events.
 //
 // Un errore ritornato (non-nil) significa "infrastruttura irraggiungibile,
 // NON committare l'offset" (SPEC-015 §4: Postgres/Neo4j persi a metà
@@ -80,24 +80,48 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 		return OutcomeInvalidSkipped, nil
 	}
 
-	isNew, err := markProcessed(ctx, deps.DB, eventID)
+	processed, err := isProcessed(ctx, deps.DB, eventID)
 	if err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("dedup event_id=%s: %w", eventID, err)
 	}
-	if !isNew {
+	if processed {
 		deps.Logf("sink-graph: event_id=%s già in processed_events, skip MERGE (redelivery)", eventID)
 		return OutcomeDuplicate, nil
 	}
 
+	var outcome Outcome
 	switch topic {
 	case TopicCodeNode:
-		return mergeCodeNode(ctx, deps, value, eventID)
+		outcome, err = mergeCodeNode(ctx, deps, value, eventID)
 	case TopicCodeRelation:
-		return mergeCodeRelation(ctx, deps, value, eventID)
+		outcome, err = mergeCodeRelation(ctx, deps, value, eventID)
 	default:
 		deps.Logf("sink-graph: topic sconosciuto %q (event_id=%s), scartato", topic, eventID)
 		return OutcomeInvalidSkipped, nil
 	}
+	if err != nil || outcome != OutcomeMerged {
+		return outcome, err
+	}
+	isNew, err := markProcessed(ctx, deps.DB, eventID)
+	if err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("complete dedup event_id=%s after MERGE: %w", eventID, err)
+	}
+	if !isNew {
+		deps.Logf("sink-graph: event_id=%s completato concorrentemente, MERGE idempotente già applicato", eventID)
+		return OutcomeDuplicate, nil
+	}
+	return outcome, nil
+}
+
+func isProcessed(ctx context.Context, db *sql.DB, eventID string) (bool, error) {
+	var processed bool
+	err := db.QueryRowContext(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM processed_events WHERE event_id = $1 AND consumer_name = $2
+		)`,
+		eventID, ConsumerName,
+	).Scan(&processed)
+	return processed, err
 }
 
 // eventIDFromHeaders estrae l'header event_id (SPEC-015 §2 punto 1). Un
@@ -116,7 +140,7 @@ func eventIDFromHeaders(headers []kafka.Header) (string, bool) {
 	return "", false
 }
 
-// markProcessed implementa il dedup atomico di SPEC-015 §2 punto 2.
+// markProcessed registra il completamento solo dopo il MERGE esterno.
 // isNew=false quando l'INSERT non ha inserito nulla (event_id già
 // presente): sql.ErrNoRows su una query con RETURNING è esattamente
 // questo, non un errore da propagare.

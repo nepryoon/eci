@@ -98,7 +98,7 @@ spec:
                     {{- include "eci.selectorLabels" (dict "name" "kafka-connect") | nindent 20 }}
       initContainers:
         - name: writable-config
-          image: {{ .Values.cdc.image | quote }}
+          image: {{ include "eci.digestImage" (dict "field" "cdc.image" "value" .Values.cdc.image) | quote }}
           command: ["/bin/bash", "-ec"]
           args: ["cp -R /kafka/config.orig/. /work-config/"]
           securityContext:
@@ -115,7 +115,7 @@ spec:
             - {name: config, mountPath: /work-config}
       containers:
         - name: kafka-connect
-          image: {{ .Values.cdc.image | quote }}
+          image: {{ include "eci.digestImage" (dict "field" "cdc.image" "value" .Values.cdc.image) | quote }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: {drop: ["ALL"]}

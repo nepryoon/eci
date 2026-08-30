@@ -75,6 +75,9 @@ trusted HTTPS issuer or controlled egress proxy. The chart rejects an empty
 list instead of opening broad Internet egress. The dev profile resolves its
 bundled Keycloak through namespace/pod selectors on port 8443 and renders no
 external issuer CIDR policy.
+Every value-based runtime image override is passed through the same strict
+`name@sha256:<64 lowercase hex>` validator, including CDC, Envoy, MinIO and
+CloudNativePG's PostgreSQL image.
 
 `install-operators.sh` downloads every pinned Helm archive from its canonical
 HTTPS release URL into a temporary directory and verifies its repository

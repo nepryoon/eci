@@ -15,6 +15,10 @@ Indicizzare su OpenSearch il testo dei chunk (SPEC-029) per ricerca full-text �
 
 **Consumer**: stesso scheletro Kafka-consumer+dedup già stabilito (`sink-graph`/`embedding-worker`/`sink-vector`) — consuma `outbox.event.CodeChunk` con un **consumer group id proprio e distinto** da quello di `embedding-worker` (necessario perché entrambi devono ricevere OGNI messaggio indipendentemente — due consumer group diversi sullo stesso topic, non uno condiviso), dedup via `processed_events` (stessa tabella condivisa, chiave `(event_id, consumer_name)` secondo ADR-0021, quindi un consumer non sopprime la copia legittima dell'altro).
 
+ADR-0022 precisa la sequenza fail-safe: check del marker, index idempotente per
+document ID, quindi marker di completamento. Un index fallito resta ritentabile
+e non viene classificato come duplicato.
+
 ## 3. Comportamento (scenari)
 
 1. **Dato** un messaggio `CodeChunk` reale, **quando** il servizio lo consuma, **allora** un documento esiste in OpenSearch con quell'id, `text` corrispondente, `entity_id`/`provenance` nei campi memorizzati.

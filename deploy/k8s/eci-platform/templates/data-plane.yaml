@@ -8,7 +8,7 @@ metadata:
     {{- include "eci.labels" . | nindent 4 }}
 spec:
   instances: {{ .Values.dataPlane.postgres.instances }}
-  imageName: {{ .Values.dataPlane.postgres.image }}
+  imageName: {{ include "eci.digestImage" (dict "field" "dataPlane.postgres.image" "value" .Values.dataPlane.postgres.image) | quote }}
   primaryUpdateStrategy: unsupervised
   enableSuperuserAccess: false
   bootstrap:

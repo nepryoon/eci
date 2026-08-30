@@ -61,7 +61,7 @@ spec:
                     {{- include "eci.selectorLabels" (dict "name" "envoy") | nindent 20 }}
       containers:
         - name: envoy
-          image: {{ .Values.edge.image | quote }}
+          image: {{ include "eci.digestImage" (dict "field" "edge.image" "value" .Values.edge.image) | quote }}
           imagePullPolicy: IfNotPresent
           args: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "eci-edge"]
           securityContext:

@@ -16,6 +16,10 @@ Consumare `outbox.event.CodeEmbedding` (ora completo di `node_id`/`domain`(impli
 
 **Consumer**: stesso scheletro di `sink-graph`/`embedding-worker` — consuma `outbox.event.CodeEmbedding`, dedup via `processed_events` (stessa tabella condivisa, stesso principio), per ciascun messaggio upsert di UN punto Qdrant con payload `{node_id: <entity_id del messaggio>, domain: "code", provenance: <provenance del messaggio, propagato invariato>}` — `domain` hardcoded qui (mai propagato attraverso la catena, per decisione già presa prima di SPEC-032: è sempre stata la costante `'code'`).
 
+ADR-0022 precisa la sequenza fail-safe: check del marker, upsert idempotente,
+quindi marker di completamento. Un upsert fallito non deve mai apparire come
+evento già processato al retry.
+
 ## 3. Comportamento (scenari)
 
 1. **Dato** un messaggio `CodeEmbedding` reale (prodotto dalla catena SPEC-029→032), **quando** il servizio lo consuma, **allora** un punto esiste in Qdrant con lo stesso vettore, e payload `node_id`/`domain`/`provenance` corretti.

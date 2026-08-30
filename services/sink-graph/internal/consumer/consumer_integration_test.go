@@ -87,6 +87,44 @@ func TestSinkGraphConsumer(t *testing.T) {
 	t.Run("T6_7_ConcurrentScopeReadsSerializeAfterEntityLocks", func(t *testing.T) {
 		t67ConcurrentScopeReadsSerializeAfterEntityLocks(t, ctx, st)
 	})
+	t.Run("Review_FailedNeo4jWriteDoesNotMarkProcessed", func(t *testing.T) {
+		reviewFailedNeo4jWriteDoesNotMarkProcessed(t, st)
+	})
+}
+
+func reviewFailedNeo4jWriteDoesNotMarkProcessed(t *testing.T, st *stack) {
+	eventID := uniqueEventID(t)
+	driver, err := neo4j.NewDriverWithContext(
+		"bolt://127.0.0.1:1",
+		neo4j.BasicAuth("neo4j", neo4jAdminPassword, ""),
+	)
+	if err != nil {
+		t.Fatalf("NewDriverWithContext: %v", err)
+	}
+	defer driver.Close(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = consumer.ProcessMessage(
+		ctx,
+		consumer.Deps{DB: st.db, Neo4j: driver, Logf: t.Logf},
+		consumer.TopicCodeNode,
+		codeNodePayload(uniqueID(t, "failed-write"), "FailedWrite", "Method", "go", "failed.go"),
+		[]kafka.Header{{Key: "event_id", Value: []byte(eventID)}},
+	)
+	if err == nil {
+		t.Fatal("expected unreachable Neo4j write to fail")
+	}
+	var count int
+	if err := st.db.QueryRowContext(context.Background(),
+		"SELECT count(*) FROM processed_events WHERE event_id = $1 AND consumer_name = $2",
+		eventID, consumer.ConsumerName,
+	).Scan(&count); err != nil {
+		t.Fatalf("query processed marker: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("processed marker count after failed Neo4j write = %d, want 0", count)
+	}
 }
 
 func t67GDSPartitionInvalidatedOnScopeAndTopologyMutation(t *testing.T, ctx context.Context, st *stack) {

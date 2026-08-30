@@ -94,7 +94,7 @@ spec:
                     {{- include "eci.selectorLabels" (dict "name" "minio") | nindent 20 }}
       containers:
         - name: minio
-          image: {{ .Values.dataPlane.minio.image | quote }}
+          image: {{ include "eci.digestImage" (dict "field" "dataPlane.minio.image" "value" .Values.dataPlane.minio.image) | quote }}
           args:
             - server
             {{- if gt (int .Values.dataPlane.minio.replicas) 1 }}

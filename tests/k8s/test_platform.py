@@ -1103,6 +1103,41 @@ spec:
         self.assertNotEqual(mutable_inline.returncode, 0)
         self.assertIn("must match name@sha256", mutable_inline.stderr)
 
+    def test_review_all_overridable_runtime_images_require_digests(self) -> None:
+        for field in (
+            "cdc.image",
+            "edge.image",
+            "dataPlane.minio.image",
+            "dataPlane.postgres.image",
+        ):
+            with self.subTest(field=field):
+                command = [
+                    HELM,
+                    "template",
+                    "eci",
+                    str(CHART),
+                    "--set",
+                    "applications.enabled=true",
+                    "--set-string",
+                    "routing.oidcIssuerEgressCIDRs[0]=192.0.2.10/32",
+                    "--set-string",
+                    f"{field}=registry.example.invalid/eci/mutable:latest",
+                ]
+                for name in APPLICATION_IMAGES:
+                    command.extend(
+                        [
+                            "--set-string",
+                            f"global.imageReferences.{name}=registry.example.invalid/eci-test/{name}@sha256:{TEST_DIGEST}",
+                        ]
+                    )
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(field, result.stderr)
+
     def test_review_ci_installs_verified_task_release(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertNotIn("https://taskfile.dev/install.sh", workflow)

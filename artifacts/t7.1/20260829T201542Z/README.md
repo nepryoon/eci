@@ -166,3 +166,11 @@ or authoritative datastore was affected. Revision 23 retained the existing
 ClusterIP, selected only the new `redis-stateful` pod, removed the old Deployment
 and passed the complete smoke. A bounded key survived an explicit Redis pod
 restart through its 1 GiB PVC and was then deleted.
+The final review hardening keeps the bundled dev issuer entirely on its
+namespace/pod-selected 8443 path, rejects mutable overrides for every
+value-driven runtime image, and changes all three materialization sinks to
+record `processed_events` only after a successful idempotent external write.
+Real Postgres-backed failure-path regressions prove that unreachable Neo4j,
+Qdrant and OpenSearch writes leave no processed marker and therefore remain
+retryable. These are CPU/Docker integration and deterministic render evidence;
+they do not rewrite the earlier live-cluster observations.

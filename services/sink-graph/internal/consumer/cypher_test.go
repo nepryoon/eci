@@ -25,6 +25,19 @@ func TestGDSInvalidationUsesPartitionGenerationWithoutPartitionScan(t *testing.T
 	}
 }
 
+func TestRelationWriteSetsAbsoluteWeightForRetryIdempotency(t *testing.T) {
+	query, err := mergeCodeRelationQuery("CALLS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(query, "SET r.weight = coalesce($weight, 1)") {
+		t.Fatal("relation MERGE must set the absolute payload weight")
+	}
+	if strings.Contains(query, "r.weight, 0) +") {
+		t.Fatal("relation redelivery must not add the payload weight again")
+	}
+}
+
 func TestGDSMutationLockOrderIsDeterministicAndScopeIsReadAfterEntityLock(t *testing.T) {
 	nodeQuery, err := mergeCodeNodeQuery("Function")
 	if err != nil {

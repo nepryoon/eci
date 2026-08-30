@@ -17,8 +17,15 @@ Popolare `services/sink-graph` con un consumer Kafka che legge da `outbox.event.
 
 Per ogni messaggio:
 1. Estrarre `event_id` (header, UUID) e `trace_id` (header, via `kafkatrace.TraceIDFromHeaders` già esistente).
-2. Dedup atomico: `INSERT INTO processed_events (event_id, consumer_name) VALUES ($1, 'sink-graph') ON CONFLICT (event_id, consumer_name) DO NOTHING RETURNING event_id` — se nessuna riga tornata, il messaggio è già stato processato **da questo consumer**: salta il MERGE, procedi comunque a fare il commit dell'offset Kafka. ADR-0021 corregge il vincolo globale originario senza cambiare la semantica di redelivery del singolo consumer.
-3. Se nuovo: parse del payload JSON (stessa forma prodotta da `persist.rs`, T1.2) e MERGE su Neo4j secondo il topic di origine.
+2. Verifica il marker `(event_id, consumer_name)`; se esiste il messaggio è già
+   stato completato **da questo consumer** e il MERGE viene saltato. ADR-0021
+   definisce lo scope per consumer.
+3. Se nuovo: parse del payload JSON (stessa forma prodotta da `persist.rs`,
+   T1.2) e MERGE idempotente su Neo4j secondo il topic di origine.
+4. Solo dopo il MERGE riuscito inserisce il marker con `INSERT ... ON CONFLICT
+   DO NOTHING RETURNING event_id`. ADR-0022 sostituisce esplicitamente
+   l'ordinamento storico marker-prima-del-write, che perdeva la
+   materializzazione quando Neo4j falliva prima del retry.
 
 **MERGE per `CodeNode`** (topic `outbox.event.CodeNode`): l'etichetta specifica (`node_type` da `payload.ext.node_type`) va validata contro un enum whitelist (`File`, `Class`, `Interface`, `Method`, `Function`) **prima** di essere interpolata nella stringa Cypher — Neo4j non supporta label parametrizzate, ma un valore validato contro un enum noto non è mai un rischio di injection.
 ```cypher
@@ -44,10 +51,15 @@ SET n:File, n.repo = $repo, n.path = $path
 MERGE (from:CodeNode {id: $from_id})
 MERGE (to:CodeNode {id: $to_id})
 MERGE (from)-[r:{RelType}]->(to)
-ON CREATE SET r.weight = coalesce($weight, 1)
-ON MATCH SET r.weight = coalesce(r.weight, 0) + coalesce($weight, 1)
+SET r.weight = coalesce($weight, 1)
 ```
-`{RelType}` (`CONTAINS` o `CALLS`) validato contro l'enum di `code_relation.rel_type` (stessa CHECK constraint di SPEC-005) prima dell'interpolazione — stesso principio di sicurezza della label. Pattern weight-aggregato identico al Cypher di riferimento D3 già eseguito in SPEC-004.
+`{RelType}` (`CONTAINS` o `CALLS`) validato contro l'enum di
+`code_relation.rel_type` (stessa CHECK constraint di SPEC-005) prima
+dell'interpolazione — stesso principio di sicurezza della label.
+
+Il peso del payload è già aggregato dal parser per quella relazione; il `SET`
+assoluto, introdotto da ADR-0022, evita che una redelivery sommi di nuovo lo
+stesso conteggio dopo un write Neo4j riuscito ma un marker PostgreSQL fallito.
 
 ## 3. Comportamento (scenari)
 
@@ -61,7 +73,7 @@ ON MATCH SET r.weight = coalesce(r.weight, 0) + coalesce($weight, 1)
 
 | Condizione | Comportamento atteso |
 |---|---|
-| Connessione a Neo4j o Postgres persa a metà elaborazione di un messaggio | Non fare il commit dell'offset Kafka — il messaggio verrà riconsegnato al riavvio, gestito correttamente da `processed_events` (scenario 2) |
+| Connessione a Neo4j o Postgres persa a metà elaborazione di un messaggio | Nessun marker prima del successo esterno; il wrapper retry/DLQ gestisce la riconsegna e il MERGE idempotente rende sicura una ripetizione dopo write riuscito ma marker fallito (ADR-0022) |
 | `node_type`/`rel_type` fuori enum (edge case tabella, scenario 5) | Log esplicito, messaggio scartato senza scrivere Neo4j, offset comunque committato (non bloccare la coda su un messaggio permanentemente malformato — non c'è ancora una DLQ in questa SPEC, vedi §5) |
 | Lo stesso `event_id` genuinamente diverso da quello già in `processed_events` ma stesso `aggregate_id` (es. un nodo aggiornato due volte, due righe outbox distinte) | Comportamento corretto per design: due `event_id` distinti, entrambi processati, il secondo `MERGE`/`SET` sovrascrive correttamente le proprietà — non un caso di dedup, un aggiornamento legittimo |
 

@@ -80,6 +80,41 @@ func TestSinkSearchConsumer(t *testing.T) {
 	t.Run("EdgeCase_EmptyTextChunkStillIndexed", func(t *testing.T) {
 		edgeCaseEmptyTextChunkStillIndexed(t, ctx, st)
 	})
+	t.Run("Review_FailedOpenSearchWriteDoesNotMarkProcessed", func(t *testing.T) {
+		reviewFailedOpenSearchWriteDoesNotMarkProcessed(t, ctx, st)
+	})
+}
+
+func reviewFailedOpenSearchWriteDoesNotMarkProcessed(t *testing.T, ctx context.Context, st *stack) {
+	unreachable, err := opensearchapi.NewClient(opensearchapi.Config{
+		Client: opensearch.Config{Addresses: []string{"http://127.0.0.1:1"}},
+	})
+	if err != nil {
+		t.Fatalf("opensearchapi NewClient: %v", err)
+	}
+	eventID := uuid.NewString()
+	writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_, err = consumer.ProcessMessage(
+		writeCtx,
+		consumer.Deps{DB: st.db, OpenSearch: unreachable, Logf: t.Logf},
+		consumer.TopicCodeChunk,
+		codeChunkPayload(uuid.NewString(), "failed-write", 0, "failed write", nil),
+		[]kafka.Header{{Key: "event_id", Value: []byte(eventID)}},
+	)
+	if err == nil {
+		t.Fatal("expected unreachable OpenSearch write to fail")
+	}
+	var count int
+	if err := st.db.QueryRowContext(ctx,
+		"SELECT count(*) FROM processed_events WHERE event_id = $1 AND consumer_name = $2",
+		eventID, consumer.ConsumerName,
+	).Scan(&count); err != nil {
+		t.Fatalf("query processed marker: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("processed marker count after failed OpenSearch write = %d, want 0", count)
+	}
 }
 
 // ============================================================

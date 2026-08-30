@@ -333,7 +333,9 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
 - [x] Tutti i server stateless hanno rollout, PDB, due topology spread, risorse
       e probe reali; il CLI one-shot ha lifecycle Job, il profilo dev dichiara
       onestamente le riduzioni.
-- [x] Nessun Secret/credenziale/tag mutable versionato; Envoy monta config,
+- [x] Nessun Secret/credenziale/tag mutable versionato; ogni override immagine
+      runtime renderizzato (inclusi CDC, Envoy, MinIO e PostgreSQL) è validato
+      come `name@sha256`; Envoy monta config,
       descriptor e TLS esterni sulla porta 8080 reale; NetworkPolicy e pod
       security passano i check fail-closed.
 - [x] Kafka Connect e reader/writer usano identità mTLS distinte e ACL literal
@@ -363,7 +365,12 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       deviazione tracciata in ADR-0018/T7.1c. GDS è un template sospeso con
       scope/entry node provenienti dal Secret dedicato.
 - [x] API Gateway riceve un egress HTTPS soltanto verso CIDR issuer/proxy
-      espliciti; lista assente blocca il render applicativo.
+      espliciti fuori dal profilo dev; nel profilo dev il solo issuer è il
+      Keycloak in-cluster selezionato per namespace/pod su 8443 e nessuna
+      eccezione CIDR esterna viene renderizzata.
+- [x] I sink graph/vector/search registrano `processed_events` soltanto dopo
+      il write esterno idempotente riuscito; un write fallito resta ritentabile
+      e non viene trasformato in falso duplicato.
 - [x] Kubeconform valida built-in e CRD contro schemi pinned.
 - [x] Cluster dev realmente creato; operatori/store Ready e connettività
       in-cluster verificata, oppure eventuale limite esterno/risorse è riportato
