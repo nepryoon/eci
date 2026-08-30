@@ -270,3 +270,12 @@ def test_opa_invalid_and_oversized_responses_fail_closed(monkeypatch, opa_server
         OPAHandler.response_body = body
         with pytest.raises(AuthorizationUnavailable):
             client.decide(DeadlineContext(), valid_subject(), "/service/Ask")
+
+
+def test_opa_redirect_is_not_followed(monkeypatch, opa_server):
+    monkeypatch.setenv("OPA_URL", opa_server)
+    monkeypatch.setenv("OPA_ALLOW_INSECURE_HTTP", "true")
+    client = OPAClient.from_environment("orchestrator")
+    OPAHandler.response_status = 302
+    with pytest.raises(AuthorizationUnavailable):
+        client.preflight()
