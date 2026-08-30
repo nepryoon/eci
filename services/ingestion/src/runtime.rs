@@ -453,6 +453,10 @@ pub async fn run() -> Result<(), RuntimeError> {
             }
             let completed = match action {
                 ProcessAction::Commit { outcome, reason } => {
+                    if shutdown_requested(&shutdown_rx) {
+                        span.record("ingestion.outcome", "retry");
+                        break 'consume;
+                    }
                     if commit_message_offset(consumer.clone(), &message).await {
                         span.record("ingestion.outcome", outcome);
                         health
@@ -474,12 +478,20 @@ pub async fn run() -> Result<(), RuntimeError> {
                     }
                 }
                 ProcessAction::Dlq { reason } => {
+                    if shutdown_requested(&shutdown_rx) {
+                        span.record("ingestion.outcome", "retry");
+                        break 'consume;
+                    }
                     if publish_dlq(&producer, &message, reason).await {
                         health
                             .metrics
                             .dlq
                             .with_label_values(&[reason, "published"])
                             .inc();
+                        if shutdown_requested(&shutdown_rx) {
+                            span.record("ingestion.outcome", "retry");
+                            break 'consume;
+                        }
                         if !record_is_owned(&consumer, &message, message_epoch) {
                             span.record("ingestion.outcome", "retry");
                             retain_owned_records(&consumer, &mut buffered);
@@ -628,6 +640,10 @@ async fn await_task_with_deadline<T>(
             None
         }
     }
+}
+
+fn shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
+    *shutdown.borrow()
 }
 
 fn record_is_owned<M: Message>(
@@ -1325,6 +1341,16 @@ mod tests {
 
         assert!(result.is_none());
         assert!(task.await.unwrap_err().is_cancelled());
+    }
+
+    #[test]
+    fn latched_shutdown_blocks_record_finalization() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        assert!(!shutdown_requested(&shutdown_rx));
+
+        shutdown_tx.send(true).unwrap();
+
+        assert!(shutdown_requested(&shutdown_rx));
     }
 
     #[test]
