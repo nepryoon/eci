@@ -1,5 +1,5 @@
 # SPEC-072 — Metadata outbox fail-closed condivisi
-Stato: approved
+Stato: verified
 Task-tree: T7.1a · Servizio: libs/go/eci · ADD: Modulo 1 §2.2.2–§2.2.4
 Contratti: contracts/jsonschema/outbox-event.json, ADR-0025
 
@@ -72,11 +72,15 @@ mai valori degli header o ID evento.
 
 ## 9. Criteri di accettazione
 
-- [ ] Test nuovi osservati rossi per package assente.
-- [ ] `go test ./eci/outboxmeta`
-- [ ] `go vet ./eci/outboxmeta`
-- [ ] `task build && task lint && task test`
-- [ ] Nessun valore header compare in log/error restituito.
+- [x] Test nuovi osservati rossi per package assente.
+- [x] `go test ./eci/outboxmeta`
+- [x] `go vet ./eci/outboxmeta`
+- [x] `task build && task lint && task test`
+- [x] Nessun valore header compare in log/error restituito.
+
+Evidenza aggiuntiva: fuzz `FuzzParseNeverPanics` per 2 secondi, 263.053
+esecuzioni senza panic; errori pubblici ridotti alla sentinella costante
+`invalid outbox metadata`.
 
 ## 10. Review avversariale pre-implementazione
 
