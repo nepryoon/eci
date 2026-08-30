@@ -621,6 +621,14 @@ class PlatformChartTests(unittest.TestCase):
         )
         self.assertEqual(tls_volume["secret"]["secretName"], "eci-minio-tls")
         self.assertEqual(tls_volume["secret"]["defaultMode"], 0o440)
+        self.assertEqual(
+            tls_volume["secret"]["items"],
+            [
+                {"key": "tls.crt", "path": "public.crt"},
+                {"key": "tls.key", "path": "private.key"},
+                {"key": "ca.crt", "path": "CAs/ca.crt"},
+            ],
+        )
         dev_minio = keyed(self.dev)[("StatefulSet", "data-plane", "minio")]
         self.assertEqual(dev_minio["spec"]["replicas"], 1)
 
@@ -794,6 +802,9 @@ class PlatformChartTests(unittest.TestCase):
         self.assertNotIn("tls.key", keycloak_ca_copy)
         self.assertIn("create secret generic eci-minio-tls", up)
         self.assertIn("create secret generic eci-minio-ca", up)
+        self.assertIn("basicConstraints=critical,CA:FALSE", up)
+        self.assertIn("--from-file=ca.crt=\"$ECI_DEV_TMP_DIR/minio-ca.crt\"", up)
+        self.assertIn("openssl verify -CAfile", up)
         self.assertIn("create secret generic eci-postgres-ca", up)
         self.assertIn("--from-file=tls.key", up)
         self.assertIn("https://keycloak.ingress.svc:8443", verify)

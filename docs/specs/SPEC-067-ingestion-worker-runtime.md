@@ -296,3 +296,7 @@ equal jitter tra meta' e intero cap per desincronizzare le repliche.
 Fetch, parse e persistenza sono eseguiti in un task separato mentre il loop
 continua a pollare Kafka; il controllo epoch/ownership dopo il join resta il
 gate prima di qualunque offset commit.
+Il bootstrap dev genera una CA MinIO separata e una leaf `CA:FALSE` con SAN ed
+EKU server, monta la CA nel trust store peer e distribuisce al worker soltanto
+la CA pubblica. Lo span consume resta vivo attraverso la classificazione e
+registra `ingestion.outcome=applied|duplicate|failed|retry` da enum chiuso.

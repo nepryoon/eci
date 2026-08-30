@@ -51,10 +51,11 @@ MinIO object key from authenticated scope headers and persists canonical rows,
 outbox and command receipt atomically. Provision the `eci-sources` bucket and
 the enumerated `eci-runtime-ingestion` keys before enabling applications.
 MinIO and PostgreSQL are TLS-only: provision `eci-minio-tls` in `data-plane`
-and copy only the public CA into `eci-minio-ca` and `eci-postgres-ca` in
-`ingestion-plane`. Never copy a CA private key or MinIO server key to the
-worker. A missing dependency or trust anchor keeps startup/readiness failed
-closed. The distinct
+with `tls.crt`, `tls.key` and the signing `ca.crt` (the latter is mounted under
+MinIO's `CAs/` peer trust directory), and copy only public CAs into
+`eci-minio-ca` and `eci-postgres-ca` in `ingestion-plane`. Never copy a CA
+private key or MinIO server key to the worker. A missing dependency or trust
+anchor keeps startup/readiness failed closed. The distinct
 `eci-kafka-ingestion-commit-producer` identity is the only writer of the input
 topic. ADR-0023 supersedes the temporary Job boundary in ADR-0016. CPU scaling
 remains T7.2.

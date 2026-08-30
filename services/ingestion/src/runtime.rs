@@ -380,6 +380,7 @@ pub async fn run() -> Result<(), RuntimeError> {
                 messaging.system = "kafka",
                 messaging.destination.name = INPUT_TOPIC,
                 messaging.kafka.partition = message.partition(),
+                ingestion.outcome = tracing::field::Empty,
             );
             if let Some(link) = trace_link(&message) {
                 span.add_link(link);
@@ -398,7 +399,7 @@ pub async fn run() -> Result<(), RuntimeError> {
                     )
                     .await
                 }
-                .instrument(span),
+                .instrument(span.clone()),
             );
             let action = loop {
                 tokio::select! {
@@ -430,6 +431,7 @@ pub async fn run() -> Result<(), RuntimeError> {
                     }
                 }
             };
+            span.record("ingestion.outcome", action.trace_outcome());
             if !record_is_owned(&consumer, &message, message_epoch) {
                 retain_owned_records(&consumer, &mut buffered);
                 resume_if_buffer_empty(&consumer, &buffered, &health);
@@ -775,6 +777,16 @@ enum ProcessAction {
     Retry {
         dependency: &'static str,
     },
+}
+
+impl ProcessAction {
+    fn trace_outcome(&self) -> &'static str {
+        match self {
+            Self::Commit { outcome, .. } => outcome,
+            Self::Dlq { .. } => "failed",
+            Self::Retry { .. } => "retry",
+        }
+    }
 }
 
 async fn process_message<M: Message>(
@@ -1275,6 +1287,40 @@ mod tests {
                 assert!(delay <= cap);
             }
         }
+    }
+
+    #[test]
+    fn consume_span_outcome_is_a_closed_bounded_enum() {
+        assert_eq!(
+            ProcessAction::Commit {
+                outcome: "applied",
+                reason: "none",
+            }
+            .trace_outcome(),
+            "applied"
+        );
+        assert_eq!(
+            ProcessAction::Commit {
+                outcome: "duplicate",
+                reason: "none",
+            }
+            .trace_outcome(),
+            "duplicate"
+        );
+        assert_eq!(
+            ProcessAction::Dlq {
+                reason: "invalid_payload",
+            }
+            .trace_outcome(),
+            "failed"
+        );
+        assert_eq!(
+            ProcessAction::Retry {
+                dependency: "postgres",
+            }
+            .trace_outcome(),
+            "retry"
+        );
     }
 
     #[test]

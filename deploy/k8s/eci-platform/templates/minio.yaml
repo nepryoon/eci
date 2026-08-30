@@ -146,6 +146,7 @@ spec:
             items:
               - {key: tls.crt, path: public.crt}
               - {key: tls.key, path: private.key}
+              - {key: ca.crt, path: CAs/ca.crt}
   volumeClaimTemplates:
     - metadata: {name: data}
       spec:

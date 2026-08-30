@@ -61,8 +61,12 @@ ECI_MINIO_TLS_ROTATED=false
 if "$KUBECTL_BIN" -n data-plane get secret eci-minio-tls >/dev/null 2>&1; then
   "$KUBECTL_BIN" -n data-plane get secret eci-minio-tls \
     -o 'jsonpath={.data.tls\.crt}' | base64 --decode >"$ECI_DEV_TMP_DIR/minio.crt"
+  "$KUBECTL_BIN" -n data-plane get secret eci-minio-tls \
+    -o 'jsonpath={.data.ca\.crt}' | base64 --decode >"$ECI_DEV_TMP_DIR/minio-ca.crt"
   if ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio.crt" -checkend 86400 -noout >/dev/null 2>&1 || \
-     ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio.crt" -checkhost minio.data-plane.svc -noout >/dev/null 2>&1; then
+     ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio.crt" -checkhost minio.data-plane.svc -noout >/dev/null 2>&1 || \
+     ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio.crt" -noout -text | grep -q 'CA:FALSE' || \
+     ! openssl verify -CAfile "$ECI_DEV_TMP_DIR/minio-ca.crt" "$ECI_DEV_TMP_DIR/minio.crt" >/dev/null 2>&1; then
     ECI_MINIO_TLS_ROTATED=true
   fi
 else
@@ -70,18 +74,33 @@ else
 fi
 if [[ "$ECI_MINIO_TLS_ROTATED" == true ]]; then
   openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 365 \
+    -subj '/CN=eci-minio-dev-ca' \
+    -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' \
+    -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+    -keyout "$ECI_DEV_TMP_DIR/minio-ca.key" -out "$ECI_DEV_TMP_DIR/minio-ca.crt" >/dev/null 2>&1
+  openssl req -new -newkey rsa:2048 -sha256 -nodes \
     -subj '/CN=minio.data-plane.svc' \
-    -addext 'subjectAltName=DNS:minio,DNS:minio.data-plane.svc,DNS:minio.data-plane.svc.cluster.local,DNS:*.minio-headless.data-plane.svc.cluster.local' \
-    -addext 'basicConstraints=critical,CA:TRUE' \
-    -keyout "$ECI_DEV_TMP_DIR/minio.key" -out "$ECI_DEV_TMP_DIR/minio.crt" >/dev/null 2>&1
-  chmod 0600 "$ECI_DEV_TMP_DIR/minio.key" "$ECI_DEV_TMP_DIR/minio.crt"
+    -keyout "$ECI_DEV_TMP_DIR/minio.key" -out "$ECI_DEV_TMP_DIR/minio.csr" >/dev/null 2>&1
+  printf '%s\n' \
+    'basicConstraints=critical,CA:FALSE' \
+    'keyUsage=critical,digitalSignature,keyEncipherment' \
+    'extendedKeyUsage=serverAuth' \
+    'subjectAltName=DNS:minio,DNS:minio.data-plane.svc,DNS:minio.data-plane.svc.cluster.local,DNS:*.minio-headless.data-plane.svc.cluster.local' \
+    >"$ECI_DEV_TMP_DIR/minio-leaf.ext"
+  openssl x509 -req -in "$ECI_DEV_TMP_DIR/minio.csr" \
+    -CA "$ECI_DEV_TMP_DIR/minio-ca.crt" -CAkey "$ECI_DEV_TMP_DIR/minio-ca.key" \
+    -CAcreateserial -days 365 -sha256 -extfile "$ECI_DEV_TMP_DIR/minio-leaf.ext" \
+    -out "$ECI_DEV_TMP_DIR/minio.crt" >/dev/null 2>&1
+  chmod 0600 "$ECI_DEV_TMP_DIR/minio-ca.key" "$ECI_DEV_TMP_DIR/minio-ca.crt" \
+    "$ECI_DEV_TMP_DIR/minio.key" "$ECI_DEV_TMP_DIR/minio.crt"
   "$KUBECTL_BIN" -n data-plane create secret generic eci-minio-tls \
     --from-file=tls.crt="$ECI_DEV_TMP_DIR/minio.crt" \
     --from-file=tls.key="$ECI_DEV_TMP_DIR/minio.key" \
+    --from-file=ca.crt="$ECI_DEV_TMP_DIR/minio-ca.crt" \
     --dry-run=client -o yaml | "$KUBECTL_BIN" apply -f - >/dev/null
 fi
 "$KUBECTL_BIN" -n ingestion-plane create secret generic eci-minio-ca \
-  --from-file=ca.crt="$ECI_DEV_TMP_DIR/minio.crt" \
+  --from-file=ca.crt="$ECI_DEV_TMP_DIR/minio-ca.crt" \
   --dry-run=client -o yaml | "$KUBECTL_BIN" apply -f - >/dev/null
 
 # The in-cluster development issuer is HTTPS-only. Reuse a still-valid
