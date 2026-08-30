@@ -30,7 +30,8 @@ def render(values: str | None = None, *, application_catalog: bool = False) -> l
         command.extend(["--values", str(CHART / values)])
     if application_catalog:
         command.extend(["--set", "applications.enabled=true"])
-        command.extend(["--set-string", "routing.oidcIssuerEgressCIDRs[0]=192.0.2.10/32"])
+        if values != "values-dev.yaml":
+            command.extend(["--set-string", "routing.oidcIssuerEgressCIDRs[0]=192.0.2.10/32"])
         for name in APPLICATION_IMAGES:
             # Template-only fixture. It proves that every workload requires a
             # digest-shaped reference without pretending an ECI image exists.
@@ -625,6 +626,11 @@ class PlatformChartTests(unittest.TestCase):
         self.assertEqual(
             policies[("ingress", "allow-api-gateway-to-keycloak")]["spec"]["egress"][0]["ports"],
             [{"protocol": "TCP", "port": 8443}],
+        )
+        self.assertNotIn(
+            ("ingress", "allow-api-gateway-to-oidc-issuer"),
+            policies,
+            "the bundled dev issuer must not require or grant external CIDR egress",
         )
         self.assertEqual(
             keyed(self.dev)[("NetworkPolicy", "ingress", "allow-dev-connectivity-to-keycloak")]

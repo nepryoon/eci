@@ -164,7 +164,9 @@ routing:
   openSearchTLSSecret: eci-opensearch-client-ca
   vllmURL: http://vllm.gpu-plane.svc.cluster.local:8000/v1
   # Resolve the trusted external issuer or an egress proxy to explicit CIDRs.
-  # Applications fail to render when this list is empty.
+  # Applications outside the bundled dev profile fail to render when this list
+  # is empty. Dev reaches only its in-cluster Keycloak through a pod-selected
+  # NetworkPolicy and must not add an external CIDR exception.
   oidcIssuerEgressCIDRs: []
 
 resources:

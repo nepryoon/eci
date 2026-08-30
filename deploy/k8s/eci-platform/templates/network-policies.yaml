@@ -319,9 +319,10 @@ spec:
       ports: [{protocol: TCP, port: 8443}]
 {{- end }}
 {{- if .Values.applications.enabled }}
-{{- if not .Values.routing.oidcIssuerEgressCIDRs }}
-{{- fail "routing.oidcIssuerEgressCIDRs must contain explicit trusted issuer/proxy CIDRs when applications.enabled=true" }}
+{{- if and (ne .Values.global.profile "dev") (not .Values.routing.oidcIssuerEgressCIDRs) }}
+{{- fail "routing.oidcIssuerEgressCIDRs must contain explicit trusted issuer/proxy CIDRs when applications.enabled=true outside the bundled dev profile" }}
 {{- end }}
+{{- if .Values.routing.oidcIssuerEgressCIDRs }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -339,6 +340,7 @@ spec:
     - to: [{ipBlock: {cidr: {{ $cidr | quote }}}}]
       ports: [{protocol: TCP, port: 443}]
     {{- end }}
+{{- end }}
 {{- $flows := list
   (dict "name" "envoy-to-api-gateway" "sourceNamespace" "ingress" "source" "envoy" "destinationNamespace" "ingress" "destinationSelector" (dict "app.kubernetes.io/name" "api-gateway") "port" 8081)
   (dict "name" "envoy-to-retrieval" "sourceNamespace" "ingress" "source" "envoy" "destinationNamespace" "query-plane" "destinationSelector" (dict "app.kubernetes.io/name" "retrieval-engine") "port" 50053)

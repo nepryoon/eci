@@ -69,10 +69,12 @@ with AOF `everysec`; the chart does not claim replication by load-balancing
 independent caches. The bundled dev Keycloak
 Service exposes HTTPS 8443 with an ephemeral hostname-bound certificate created
 outside Helm; application pods receive only its public certificate.
-Application enablement also requires one or more explicit
-`routing.oidcIssuerEgressCIDRs`; they must resolve only the trusted HTTPS issuer
-or controlled egress proxy. The chart rejects an empty list instead of opening
-broad Internet egress.
+Outside the bundled dev profile, application enablement also requires one or
+more explicit `routing.oidcIssuerEgressCIDRs`; they must resolve only the
+trusted HTTPS issuer or controlled egress proxy. The chart rejects an empty
+list instead of opening broad Internet egress. The dev profile resolves its
+bundled Keycloak through namespace/pod selectors on port 8443 and renders no
+external issuer CIDR policy.
 
 `install-operators.sh` downloads every pinned Helm archive from its canonical
 HTTPS release URL into a temporary directory and verifies its repository
