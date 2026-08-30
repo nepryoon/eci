@@ -1,5 +1,5 @@
 # SPEC-067 — Runtime worker ingestion durabile e autenticato
-Stato: approved
+Stato: implemented
 Task-tree: T7.1a · Servizio: `services/ingestion` · ADD: Modulo 3 §1.1–§1.2, §2.1, D8
 Contratti: nuovo `contracts/jsonschema/ingestion-file-command.json`; `contracts/jsonschema/hybrid-graph.json`; nuova migration SQL receipt
 ADR: ADR-0023
@@ -204,22 +204,22 @@ separato emerso dall'audit di completezza.
 
 ## 9. Criteri di accettazione
 
-- [ ] Contratto JSON chiuso e migration receipt up/down aggiunti dopo ADR.
-- [ ] Scenari §3 scritti red-before-green e verdi CPU-only dove possibile.
-- [ ] Scope esclusivamente da header Kafka autenticati; body/LLM/source non
+- [x] Contratto JSON chiuso e migration receipt up/down aggiunti dopo ADR.
+- [x] Scenari §3 scritti red-before-green e verdi CPU-only dove possibile.
+- [x] Scope esclusivamente da header Kafka autenticati; body/LLM/source non
       possono modificarlo e Kafka ACL separa producer, worker e CDC.
-- [ ] Source key derivata, fetch bounded e verifica size/SHA-256/UTF-8 prima del
+- [x] Source key derivata, fetch bounded e verifica size/SHA-256/UTF-8 prima del
       parser; nessun URL/bucket/key dal messaggio.
-- [ ] Entita', outbox e receipt sono una transazione; replay identico produce
+- [x] Entita', outbox e receipt sono una transazione; replay identico produce
       zero nuovi effetti e conflitto produce zero write.
-- [ ] Offset originale solo dopo DB commit o DLQ publish confermata; fault
+- [x] Offset originale solo dopo DB commit o DLQ publish confermata; fault
       transienti conservano backlog e readiness 503.
-- [ ] Provenance soddisfa `repo/commit_sha/path/ingested_at` senza alterare i
+- [x] Provenance soddisfa `repo/commit_sha/path/ingested_at` senza alterare i
       contratti golden/eval storici.
-- [ ] `/live`, `/ready`, `/metrics` e shutdown sono reali e testati.
-- [ ] Helm rende Deployment ingestion standard=4, max dichiarato=40, identity,
+- [x] `/live`, `/ready`, `/metrics` e shutdown sono reali e testati.
+- [x] Helm rende Deployment ingestion standard=4, max dichiarato=40, identity,
       ACL, Secret e NetworkPolicy least-privilege; nessun CronJob ingestion.
-- [ ] Nessun secret, scope o sorgente in log, metriche, span o DLQ.
+- [x] Nessun secret, scope o sorgente in log, metriche, span o DLQ.
 - [ ] `task build`, `task lint`, `task test`, `task test:integration`,
       `task guard`, `task k8s:validate` verdi; CI verde.
 
@@ -229,5 +229,15 @@ Review avversariale completata il 2026-08-30: nessuna contraddizione con ADD,
 isolamento tenant, trust boundary LLM/body, source-of-truth/outbox,
 idempotenza, fail-closed, separazione deterministico/probabilistico, traversal
 bounded o deadline propagation. ADR-0023 rende esplicito il nuovo contratto;
-non esiste una decisione architetturale nascosta. Nessuna deviazione in stato
-`approved`.
+non esiste una decisione architetturale nascosta.
+
+Implementazione locale del 2026-08-30: i test red iniziali fallivano per il
+modulo `ingestion::worker` e il `Deployment/ingestion` assenti. La suite verde
+copre parsing/auth dello scope, key e limiti, probe/metriche, configurazione
+Kafka TLS+offset manuale, DLQ sanitizzata, render/ACL/NetworkPolicy e una
+integrazione PostgreSQL 17 reale con migration, replay identico e conflitto
+atomico. `task test:integration` ha inoltre completato l'intera suite Docker del
+repository. Il bucket `eci-sources`, il blob e le credenziali per-workload sono
+prerequisiti provisionati dall'operatore/produttore e non valori o Secret
+versionati; l'assenza del bucket mantiene readiness 503. Il passaggio a
+`verified` resta subordinato a CI e review della PR.

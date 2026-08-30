@@ -62,3 +62,12 @@ PostgreSQL o outbox. Non è consentito rimuovere `suspend`, riusare Secret di
 sibling, passare scope da testo utente/LLM o sostituire il PVC read-only con un
 fixture incorporato. Un futuro worker deve derivare il commit context soltanto
 da un canale system-to-system autenticato e fallire chiuso su scope mancante.
+
+## Superamento
+
+ADR-0023 e SPEC-067 hanno chiuso il boundary transitorio il 2026-08-30. Il
+runtime ingestion è ora un consumer Kafka long-running con identità mTLS,
+scope esclusivamente da header autenticati, sorgente MinIO a key derivata,
+receipt/outbox atomiche, offset manuali e probe reali. Il CronJob sospeso è
+stato rimosso dal chart. Questa ADR resta nel log storico per spiegare perché
+SPEC-062 non aveva in precedenza rappresentato un server inesistente.
