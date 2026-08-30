@@ -12,7 +12,7 @@ done
 docker info >/dev/null
 
 if ! "$KIND_BIN" get clusters | grep -qx eci-dev; then
-  "$KIND_BIN" create cluster --name eci-dev --config "$ROOT_DIR/deploy/k8s/kind-config.yaml" --image kindest/node:v1.34.0
+  "$KIND_BIN" create cluster --name eci-dev --config "$ROOT_DIR/deploy/k8s/kind-config.yaml" --image kindest/node@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a
 fi
 "$KUBECTL_BIN" config use-context kind-eci-dev >/dev/null
 

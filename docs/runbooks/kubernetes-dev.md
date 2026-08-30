@@ -296,6 +296,12 @@ Helm rollback does not roll back object data.
 The ADD requires Neo4j 5.x Enterprise. The pinned production-like layout uses
 three distinct Neo4j 5.26.30 Helm releases for the initial 128 GiB primaries,
 then one 256 GiB GDS release with `initial.server.mode_constraint=SECONDARY`.
+Build and publish `deploy/images/neo4j-gds` through the trusted release builder,
+then provide its immutable registry manifest as `NEO4J_GDS_IMAGE`. The image
+bundles GDS 2.13.12, the version selected by Neo4j's compatibility catalog for
+5.26.30; startup copies the checked artifact locally and requires no internet
+egress. The installer rejects tags, local image IDs and missing values. Neo4j,
+its operations helper and cleanup kubectl image are also registry-digest pinned.
 Before invoking the production-like installer, the platform owner must set
 `NEO4J_ACCEPT_LICENSE_AGREEMENT=yes` for an existing agreement or `eval` for an
 evaluation accepted by that owner. The script fails before installing Neo4j

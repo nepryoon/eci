@@ -12,6 +12,15 @@ require curl
 require sha256sum
 require python3
 
+require_digest_image() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "$value" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
+    echo "$name must be an immutable name@sha256:<64 lowercase hex> reference" >&2
+    exit 1
+  fi
+}
+
 CHART_DIR="$(mktemp -d)"
 trap 'rm -f "$CHART_DIR"/*.tgz; rmdir "$CHART_DIR"' EXIT
 
@@ -77,6 +86,8 @@ else
     yes|eval) ;;
     *) echo "production-like Neo4j requires NEO4J_ACCEPT_LICENSE_AGREEMENT=yes or eval" >&2; exit 1 ;;
   esac
+  : "${NEO4J_GDS_IMAGE:?production-like Neo4j requires a published NEO4J_GDS_IMAGE}"
+  require_digest_image NEO4J_GDS_IMAGE "$NEO4J_GDS_IMAGE"
   # The official chart models one Neo4j server per Helm release. Install all
   # three initial primaries before waiting, otherwise the first member cannot
   # satisfy minimumClusterSize=3. Readiness remains bounded below.
@@ -90,6 +101,7 @@ else
   done
   "$HELM_BIN" upgrade --install neo4j-gds "$CHART_DIR/neo4j-5.26.30.tgz" \
     --namespace data-plane -f "$ROOT_DIR/deploy/k8s/vendor-values/neo4j-gds.yaml" \
+    --set-string image.customImage="$NEO4J_GDS_IMAGE" \
     --set-string neo4j.acceptLicenseAgreement="$NEO4J_ACCEPT_LICENSE_AGREEMENT" \
     --wait --atomic --timeout 15m
   "$HELM_BIN" upgrade --install qdrant "$CHART_DIR/qdrant-1.19.0.tgz" \

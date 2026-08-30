@@ -9,6 +9,7 @@ neo4j:
     memory: 256Gi
   operations:
     enableServer: true
+    image: neo4j/helm-charts-operations@sha256:3b73609fa084906d2f36ca043d78609718c3ce5bdd3e7613db8a92a96b690687
   additionalJvmArguments:
     - -XX:+ExitOnOutOfMemoryError
 securityContext:
@@ -38,7 +39,16 @@ config:
   dbms.security.procedures.unrestricted: gds.*
   dbms.security.procedures.allowlist: gds.*
 env:
+  # The custom image rewrites this plugin's local source to a root-owned
+  # /opt/eci JAR, so the stock entrypoint applies defaults without egress.
   NEO4J_PLUGINS: '["graph-data-science"]'
 services:
   neo4j:
     spec: {type: ClusterIP}
+    cleanup:
+      image:
+        registry: registry.k8s.io
+        repository: kubectl
+        tag: v1.34.0
+        digest: sha256:497d298f891edb7608dfce9dae4bb08dffc4ddcd7f5d24a0512d4bbf33e04f26
+        imagePullPolicy: IfNotPresent

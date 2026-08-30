@@ -125,3 +125,11 @@ endpoint; the dev overlay remains on its real single `neo4j` release. A
 regression also proves that `dataPlane.enabled=false` renders no MinIO service,
 StatefulSet, PDB or PVC template. These corrections are deterministic render
 evidence; they do not claim a licensed Enterprise cluster runtime exercise.
+The dev bootstrap now resolves Kubernetes 1.34.0 through the recorded kind node
+manifest digest. Production-like Neo4j uses digest-pinned server, operations
+and cleanup images, and the GDS installer rejects any missing or mutable custom
+image reference. The checked Neo4j-GDS Dockerfile built locally and started on
+an internal-only Docker network; `gds.version()` returned `2.13.12`, logs showed
+the plugin copied from `/opt/eci`, and no URL resolution/download occurred.
+This is offline image-contract evidence, not publication or Enterprise cluster
+evidence; the release image still requires trusted registry publication.

@@ -288,12 +288,49 @@ class PlatformChartTests(unittest.TestCase):
         self.assertEqual(neo4j_core["neo4j"]["acceptLicenseAgreement"], "no")
         self.assertEqual(neo4j_gds["neo4j"]["resources"]["memory"], "256Gi")
         self.assertTrue(neo4j_gds["neo4j"]["operations"]["enableServer"])
+        self.assertEqual(neo4j_gds["env"]["NEO4J_PLUGINS"], '["graph-data-science"]')
+        self.assertNotIn(
+            "NEO4J_PLUGINS",
+            yaml.safe_load((ROOT / "deploy/k8s/vendor-values/neo4j-dev.yaml").read_text()).get("env", {}),
+        )
+        self.assertEqual(
+            neo4j_core["image"]["customImage"],
+            "neo4j@sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f9ce11602f6f9538e17e02c74d",
+        )
+        self.assertEqual(
+            neo4j_core["neo4j"]["operations"]["image"],
+            "neo4j/helm-charts-operations@sha256:3b73609fa084906d2f36ca043d78609718c3ce5bdd3e7613db8a92a96b690687",
+        )
+        cleanup_image = neo4j_core["services"]["neo4j"]["cleanup"]["image"]
+        self.assertEqual(cleanup_image["repository"], "kubectl")
+        self.assertEqual(cleanup_image["tag"], "v1.34.0")
+        self.assertEqual(
+            cleanup_image["digest"],
+            "sha256:497d298f891edb7608dfce9dae4bb08dffc4ddcd7f5d24a0512d4bbf33e04f26",
+        )
         self.assertEqual(neo4j_gds["config"]["server.cluster.system_database_mode"], "SECONDARY")
         self.assertEqual(neo4j_gds["config"]["initial.server.mode_constraint"], "SECONDARY")
         installer = (ROOT / "deploy/k8s/install-operators.sh").read_text()
         self.assertIn("for member in 1 2 3", installer)
         self.assertIn('"neo4j-core-${member}"', installer)
         self.assertIn("NEO4J_ACCEPT_LICENSE_AGREEMENT", installer)
+        self.assertIn("NEO4J_GDS_IMAGE", installer)
+        self.assertIn("image.customImage=\"$NEO4J_GDS_IMAGE\"", installer)
+        gds_dockerfile = (ROOT / "deploy/images/neo4j-gds/Dockerfile").read_text()
+        self.assertIn(
+            "docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e",
+            gds_dockerfile,
+        )
+        self.assertIn(
+            "FROM neo4j@sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f9ce11602f6f9538e17e02c74d",
+            gds_dockerfile,
+        )
+        self.assertIn(
+            "--checksum=sha256:246e3fbbbf733b4def1e7b0a9740a2309f6605ee8a7b46b29fe1de56d0a4b47c",
+            gds_dockerfile,
+        )
+        self.assertIn("/opt/eci/neo4j-graph-data-science-2.13.12.jar", gds_dockerfile)
+        self.assertIn("/startup/neo4j-plugins.json", gds_dockerfile)
 
     def test_scenario_3_stateless_availability(self) -> None:
         deployments = [obj for obj in self.standard if obj.get("kind") == "Deployment"]
@@ -770,6 +807,11 @@ spec:
         self.assertIn("qdrant-post-renderer.sh", installer)
         self.assertIn("opensearch-operator-post-renderer.sh", installer)
         dev_up = (ROOT / "deploy/k8s/dev-up.sh").read_text()
+        self.assertIn(
+            "kindest/node@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a",
+            dev_up,
+        )
+        self.assertNotIn("kindest/node:v1.34.0", dev_up)
         self.assertIn(
             "opensearchproject/opensearch@sha256:23297b8d8545e129dd58c254ed08d786dc552410ba772983ad2af31048d2f04b",
             dev_up,
