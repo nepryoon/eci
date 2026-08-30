@@ -17,11 +17,11 @@ use tree_sitter::Node;
 
 pub mod chunking;
 pub mod embedding;
-pub mod hashing;
 pub mod imports;
+pub mod resolve;
+pub mod hashing;
 pub mod lineage;
 pub mod persist;
-pub mod resolve;
 pub mod runtime;
 pub mod worker;
 pub use persist::{
@@ -67,8 +67,7 @@ pub fn parse_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRela
              .tsx NON è .ts: cade qui, comportamento esplicitamente verificato da SPEC-026 §4."
         ),
     };
-    let _span =
-        tracing::info_span!("parse_file", file_path = file_path, language = language).entered();
+    let _span = tracing::info_span!("parse_file", file_path = file_path, language = language).entered();
 
     match language {
         "go" => parse_go_file(file_path, source),
@@ -84,28 +83,18 @@ pub fn parse_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRela
 /// linguaggio — il "futuro chiamante" a cui T2.2 §10 rimandava. Scarta
 /// `unresolved` (SPEC-025/026, non pertinente qui) esattamente come
 /// [`parse_js_file`]/[`parse_ts_file`] già fanno.
-pub fn parse_file_full(
-    file_path: &str,
-    source: &str,
-) -> (Vec<CodeNode>, Vec<CodeRelation>, Vec<chunking::CodeChunk>) {
+pub fn parse_file_full(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelation>, Vec<chunking::CodeChunk>) {
     parse_file_full_with_telemetry(file_path, source, true)
 }
 
 /// Runtime-only parsing path for authenticated repository content. It keeps
 /// `file_path` in canonical provenance but deliberately excludes it from span
 /// attributes, as required by SPEC-067's observability boundary.
-pub(crate) fn parse_file_full_private(
-    file_path: &str,
-    source: &str,
-) -> (Vec<CodeNode>, Vec<CodeRelation>, Vec<chunking::CodeChunk>) {
+pub(crate) fn parse_file_full_private(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelation>, Vec<chunking::CodeChunk>) {
     parse_file_full_with_telemetry(file_path, source, false)
 }
 
-fn parse_file_full_with_telemetry(
-    file_path: &str,
-    source: &str,
-    expose_path_in_span: bool,
-) -> (Vec<CodeNode>, Vec<CodeRelation>, Vec<chunking::CodeChunk>) {
+fn parse_file_full_with_telemetry(file_path: &str, source: &str, expose_path_in_span: bool) -> (Vec<CodeNode>, Vec<CodeRelation>, Vec<chunking::CodeChunk>) {
     let language = match std::path::Path::new(file_path)
         .extension()
         .and_then(|e| e.to_str())
@@ -119,11 +108,7 @@ fn parse_file_full_with_telemetry(
         ),
     };
     let span = if expose_path_in_span {
-        tracing::info_span!(
-            "parse_file_full",
-            file_path = file_path,
-            language = language
-        )
+        tracing::info_span!("parse_file_full", file_path = file_path, language = language)
     } else {
         tracing::info_span!("parse_file_full", language = language)
     };
@@ -347,12 +332,7 @@ fn parse_js_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelat
 pub(crate) fn parse_js_file_full(
     file_path: &str,
     source: &str,
-) -> (
-    Vec<CodeNode>,
-    Vec<CodeRelation>,
-    resolve::UnresolvedCalls,
-    Vec<chunking::CodeChunk>,
-) {
+) -> (Vec<CodeNode>, Vec<CodeRelation>, resolve::UnresolvedCalls, Vec<chunking::CodeChunk>) {
     let budget = chunking::chunk_budget_chars("javascript");
     let mut chunks: Vec<chunking::CodeChunk> = Vec::new();
 
@@ -509,13 +489,7 @@ pub(crate) fn parse_js_file_full(
     for (caller_id, body) in callable_bodies {
         let mut call_counts: HashMap<String, u32> = HashMap::new();
         let mut unresolved_counts: HashMap<String, u32> = HashMap::new();
-        collect_calls_js(
-            body,
-            source,
-            &name_to_id,
-            &mut call_counts,
-            &mut unresolved_counts,
-        );
+        collect_calls_js(body, source, &name_to_id, &mut call_counts, &mut unresolved_counts);
         for (callee_id, weight) in call_counts {
             relations.push(CodeRelation {
                 domain: "code".to_string(),
@@ -558,12 +532,7 @@ fn parse_ts_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelat
 pub(crate) fn parse_ts_file_full(
     file_path: &str,
     source: &str,
-) -> (
-    Vec<CodeNode>,
-    Vec<CodeRelation>,
-    resolve::UnresolvedCalls,
-    Vec<chunking::CodeChunk>,
-) {
+) -> (Vec<CodeNode>, Vec<CodeRelation>, resolve::UnresolvedCalls, Vec<chunking::CodeChunk>) {
     let budget = chunking::chunk_budget_chars("typescript");
     let mut chunks: Vec<chunking::CodeChunk> = Vec::new();
 
@@ -728,11 +697,7 @@ pub(crate) fn parse_ts_file_full(
                         match clause.kind() {
                             "extends_clause" => {
                                 if let Some(value) = clause.child_by_field_name("value") {
-                                    heritage_refs.push((
-                                        class_id.clone(),
-                                        "EXTENDS",
-                                        text(value, source),
-                                    ));
+                                    heritage_refs.push((class_id.clone(), "EXTENDS", text(value, source)));
                                 }
                             }
                             "implements_clause" => {
@@ -842,13 +807,7 @@ pub(crate) fn parse_ts_file_full(
         // `identifier`, `property_identifier`) sono stati verificati
         // empiricamente identici tra le due grammatiche prima di
         // scrivere questa funzione — nessun codice nuovo necessario.
-        collect_calls_js(
-            body,
-            source,
-            &name_to_id,
-            &mut call_counts,
-            &mut unresolved_counts,
-        );
+        collect_calls_js(body, source, &name_to_id, &mut call_counts, &mut unresolved_counts);
         for (callee_id, weight) in call_counts {
             relations.push(CodeRelation {
                 domain: "code".to_string(),
@@ -1064,10 +1023,7 @@ mod tests {
         assert!(types.contains(&("Method", "Process")));
         assert!(types.contains(&("Method", "Validate")));
 
-        let contains: Vec<_> = relations
-            .iter()
-            .filter(|r| r.rel_type == "CONTAINS")
-            .collect();
+        let contains: Vec<_> = relations.iter().filter(|r| r.rel_type == "CONTAINS").collect();
         assert_eq!(
             contains.len(),
             3,
@@ -1077,7 +1033,8 @@ mod tests {
         let class_id = find_id(&nodes, "Class", "OrderService");
         let process_id = find_id(&nodes, "Method", "Process");
         let validate_id = find_id(&nodes, "Method", "Validate");
-        let contains_targets: HashSet<&str> = contains.iter().map(|r| r.to_id.as_str()).collect();
+        let contains_targets: HashSet<&str> =
+            contains.iter().map(|r| r.to_id.as_str()).collect();
         assert!(contains.iter().all(|r| r.from_id == file_id));
         assert_eq!(
             contains_targets,
@@ -1146,10 +1103,7 @@ mod tests {
         assert!(types.contains(&("Class", "EmailNotifier")));
         assert!(types.contains(&("Method", "Notify")));
 
-        let contains_count = relations
-            .iter()
-            .filter(|r| r.rel_type == "CONTAINS")
-            .count();
+        let contains_count = relations.iter().filter(|r| r.rel_type == "CONTAINS").count();
         assert_eq!(contains_count, 3, "attesi 3 archi CONTAINS (g07)");
         let calls_count = relations.iter().filter(|r| r.rel_type == "CALLS").count();
         assert_eq!(calls_count, 0, "Notify non ha chiamate in uscita");
@@ -1183,11 +1137,7 @@ func caller() {
         );
         assert_eq!(calls[0].from_id, caller_id);
         assert_eq!(calls[0].to_id, helper_id);
-        assert_eq!(
-            calls[0].weight,
-            Some(3),
-            "3 occorrenze di helper() dentro caller()"
-        );
+        assert_eq!(calls[0].weight, Some(3), "3 occorrenze di helper() dentro caller()");
     }
 
     // SPEC-013 §3 scenario 6.
@@ -1202,10 +1152,7 @@ func caller() {
         assert!(types.contains(&("Function", "main")));
 
         assert_eq!(
-            relations
-                .iter()
-                .filter(|r| r.rel_type == "CONTAINS")
-                .count(),
+            relations.iter().filter(|r| r.rel_type == "CONTAINS").count(),
             1,
             "atteso 1 arco CONTAINS (File->main)"
         );
@@ -1302,10 +1249,7 @@ func alsoValid() {
             assert!(types.contains(&("Method", "process")));
             assert!(types.contains(&("Method", "validate")));
 
-            let contains: Vec<_> = relations
-                .iter()
-                .filter(|r| r.rel_type == "CONTAINS")
-                .collect();
+            let contains: Vec<_> = relations.iter().filter(|r| r.rel_type == "CONTAINS").collect();
             assert_eq!(
                 contains.len(),
                 4,
@@ -1390,10 +1334,7 @@ func alsoValid() {
             assert!(types.contains(&("Function", "computeTotal")));
 
             assert_eq!(
-                relations
-                    .iter()
-                    .filter(|r| r.rel_type == "CONTAINS")
-                    .count(),
+                relations.iter().filter(|r| r.rel_type == "CONTAINS").count(),
                 1,
                 "atteso 1 arco CONTAINS (File->computeTotal)"
             );
@@ -1421,10 +1362,7 @@ func alsoValid() {
             assert!(types.contains(&("Function", "main")));
 
             assert_eq!(
-                relations
-                    .iter()
-                    .filter(|r| r.rel_type == "CONTAINS")
-                    .count(),
+                relations.iter().filter(|r| r.rel_type == "CONTAINS").count(),
                 1,
                 "atteso 1 arco CONTAINS (File->main)"
             );
@@ -1483,9 +1421,7 @@ function alsoValid() {
 "#;
             let (nodes, _relations) = parse_file("nested.js", source);
             assert!(
-                nodes
-                    .iter()
-                    .any(|n| n.node_type == "Function" && n.name == "outer"),
+                nodes.iter().any(|n| n.node_type == "Function" && n.name == "outer"),
                 "outer deve essere estratta: {nodes:?}"
             );
             assert!(
@@ -1507,10 +1443,7 @@ function alsoValid() {
                 .iter()
                 .find(|n| n.name == "bar")
                 .unwrap_or_else(|| panic!("bar non trovato: {nodes:?}"));
-            assert_eq!(
-                bar.node_type, "Method",
-                "static non deve cambiare node_type"
-            );
+            assert_eq!(bar.node_type, "Method", "static non deve cambiare node_type");
         }
 
         // --- SPEC-024 §4 edge case: getter/setter, stesso trattamento di
@@ -1539,9 +1472,7 @@ function alsoValid() {
             let source = read_js_fixture("util.js");
             let (nodes, _relations) = parse_file("util.js", &source);
             assert!(
-                nodes
-                    .iter()
-                    .any(|n| n.node_type == "Function" && n.name == "computeTotal"),
+                nodes.iter().any(|n| n.node_type == "Function" && n.name == "computeTotal"),
                 "il dispatch su .js deve produrre l'estrazione JS reale: {nodes:?}"
             );
         }
@@ -1582,12 +1513,7 @@ function alsoValid() {
         fn build_ts_file_entry(
             path: &str,
             source: &str,
-        ) -> (
-            PathBuf,
-            Vec<CodeNode>,
-            Vec<crate::imports::ImportBinding>,
-            crate::resolve::UnresolvedCalls,
-        ) {
+        ) -> (PathBuf, Vec<CodeNode>, Vec<crate::imports::ImportBinding>, crate::resolve::UnresolvedCalls) {
             let tree = parse_ts_tree(source);
             let imports = extract_imports(&tree, source.as_bytes());
             let (nodes, _relations, unresolved, _chunks) = parse_ts_file_full(path, source);
@@ -1619,10 +1545,7 @@ function alsoValid() {
             let interface_notify_id = find_id(&nodes, "Method", "notify");
             let _ = interface_notify_id; // esistenza già verificata sopra
 
-            let contains: Vec<_> = relations
-                .iter()
-                .filter(|r| r.rel_type == "CONTAINS")
-                .collect();
+            let contains: Vec<_> = relations.iter().filter(|r| r.rel_type == "CONTAINS").collect();
             let interface_id = find_id(&nodes, "Interface", "Notifier");
             let class_id = find_id(&nodes, "Class", "EmailNotifier");
             assert!(
@@ -1644,10 +1567,7 @@ function alsoValid() {
             let class_id = find_id(&nodes, "Class", "EmailNotifier");
             let interface_id = find_id(&nodes, "Interface", "Notifier");
 
-            let implements: Vec<_> = relations
-                .iter()
-                .filter(|r| r.rel_type == "IMPLEMENTS")
-                .collect();
+            let implements: Vec<_> = relations.iter().filter(|r| r.rel_type == "IMPLEMENTS").collect();
             assert_eq!(implements.len(), 1, "ottenuti: {implements:?}");
             assert_eq!(implements[0].from_id, class_id);
             assert_eq!(implements[0].to_id, interface_id);
@@ -1752,9 +1672,7 @@ function alsoValid() {
                 "property_signature 'id' non deve produrre un CodeNode: {nodes:?}"
             );
             assert!(
-                nodes
-                    .iter()
-                    .any(|n| n.node_type == "Method" && n.name == "bar"),
+                nodes.iter().any(|n| n.node_type == "Method" && n.name == "bar"),
                 "method_signature 'bar' deve comunque essere estratto: {nodes:?}"
             );
         }
