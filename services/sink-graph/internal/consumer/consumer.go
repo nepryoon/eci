@@ -1,4 +1,4 @@
-// Package consumer implementa il consumer Kafka -> MERGE Neo4j di
+// Package consumer implementa il consumer Kafka -> proiezione Neo4j di
 // sink-graph (SPEC-015, T1.3): legge da outbox.event.CodeNode/CodeRelation,
 // dedup via processed_events, MERGE idempotente su Neo4j rispettando i
 // vincoli reali di D3 (contracts/cypher/schema.cypher).
@@ -8,12 +8,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	kafka "github.com/segmentio/kafka-go"
 
 	"github.com/eci-project/eci/libs/go/eci/models"
+	"github.com/eci-project/eci/libs/go/eci/outboxmeta"
 	"github.com/eci-project/eci/libs/go/eci/securitylabels"
 )
 
@@ -28,13 +30,6 @@ const (
 	TopicCodeNode     = "outbox.event.CodeNode"
 	TopicCodeRelation = "outbox.event.CodeRelation"
 )
-
-// eventIDHeaderKey è il nome dell'header Kafka promosso dall'addendum al
-// connector (SPEC-015 §2: transforms.outbox.table.fields.additional.placement
-// include "id:header:event_id" — l'header `id` di default di Debezium
-// esiste già senza l'addendum, ma sotto un nome diverso; questo consumer
-// legge specificamente `event_id`, il nome che l'addendum introduce).
-const eventIDHeaderKey = "event_id"
 
 // Deps sono le dipendenze di ProcessMessage — iniettate esplicitamente
 // (nessuno stato globale) per restare testabile con testcontainers senza
@@ -54,16 +49,17 @@ type Outcome int
 
 const (
 	OutcomeMerged Outcome = iota
+	OutcomeDeleted
 	OutcomeDuplicate
 	OutcomeInvalidSkipped
 )
 
 // ProcessMessage elabora UN messaggio Kafka già fetchato (SPEC-015 §2,
 // passi 1-3):
-//  1. estrae event_id dagli header;
+//  1. valida event_id e operation dagli header CDC;
 //  2. verifica processed_events senza prenotare l'evento;
-//  3. se nuovo, decodifica il payload e fa MERGE idempotente su Neo4j;
-//  4. solo dopo il MERGE riuscito registra processed_events.
+//  3. se nuovo, applica MERGE o DELETE idempotente su Neo4j;
+//  4. solo dopo l'effetto riuscito registra processed_events.
 //
 // Un errore ritornato (non-nil) significa "infrastruttura irraggiungibile,
 // NON committare l'offset" (SPEC-015 §4: Postgres/Neo4j persi a metà
@@ -74,11 +70,12 @@ const (
 // crash, non un'interpolazione Cypher con un valore non validato", "offset
 // comunque committato").
 func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, headers []kafka.Header) (Outcome, error) {
-	eventID, ok := eventIDFromHeaders(headers)
-	if !ok {
-		deps.Logf("sink-graph: messaggio su %s senza header %q valido, scartato (offset committato)", topic, eventIDHeaderKey)
+	metadata, metadataErr := outboxmeta.Parse(headers)
+	if metadataErr != nil {
+		deps.Logf("sink-graph: metadata outbox non valida, scartata")
 		return OutcomeInvalidSkipped, nil
 	}
+	eventID := metadata.EventID
 
 	processed, err := isProcessed(ctx, deps.DB, eventID)
 	if err != nil {
@@ -90,16 +87,29 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	}
 
 	var outcome Outcome
-	switch topic {
-	case TopicCodeNode:
-		outcome, err = mergeCodeNode(ctx, deps, value, eventID)
-	case TopicCodeRelation:
-		outcome, err = mergeCodeRelation(ctx, deps, value, eventID)
-	default:
-		deps.Logf("sink-graph: topic sconosciuto %q (event_id=%s), scartato", topic, eventID)
-		return OutcomeInvalidSkipped, nil
+	switch metadata.Operation {
+	case outboxmeta.OperationUpsert:
+		switch topic {
+		case TopicCodeNode:
+			outcome, err = mergeCodeNode(ctx, deps, value, eventID)
+		case TopicCodeRelation:
+			outcome, err = mergeCodeRelation(ctx, deps, value, eventID)
+		default:
+			deps.Logf("sink-graph: topic sconosciuto, scartato")
+			return OutcomeInvalidSkipped, nil
+		}
+	case outboxmeta.OperationDelete:
+		switch topic {
+		case TopicCodeNode:
+			outcome, err = deleteCodeNode(ctx, deps, value)
+		case TopicCodeRelation:
+			outcome, err = deleteCodeRelation(ctx, deps, value)
+		default:
+			deps.Logf("sink-graph: topic sconosciuto, scartato")
+			return OutcomeInvalidSkipped, nil
+		}
 	}
-	if err != nil || outcome != OutcomeMerged {
+	if err != nil || (outcome != OutcomeMerged && outcome != OutcomeDeleted) {
 		return outcome, err
 	}
 	isNew, err := markProcessed(ctx, deps.DB, eventID)
@@ -124,23 +134,7 @@ func isProcessed(ctx context.Context, db *sql.DB, eventID string) (bool, error) 
 	return processed, err
 }
 
-// eventIDFromHeaders estrae l'header event_id (SPEC-015 §2 punto 1). Un
-// header assente o con valore vuoto è trattato come assente, non come
-// stringa vuota valida.
-func eventIDFromHeaders(headers []kafka.Header) (string, bool) {
-	for _, h := range headers {
-		if h.Key != eventIDHeaderKey {
-			continue
-		}
-		if len(h.Value) == 0 {
-			return "", false
-		}
-		return string(h.Value), true
-	}
-	return "", false
-}
-
-// markProcessed registra il completamento solo dopo il MERGE esterno.
+// markProcessed registra il completamento solo dopo l'effetto esterno.
 // isNew=false quando l'INSERT non ha inserito nulla (event_id già
 // presente): sql.ErrNoRows su una query con RETURNING è esattamente
 // questo, non un errore da propagare.
@@ -236,6 +230,69 @@ type codeRelationPayload struct {
 	Weight *int64 `json:"weight"`
 }
 
+type codeNodeTombstone struct {
+	ID         string            `json:"id"`
+	Provenance models.Provenance `json:"provenance"`
+}
+
+type codeRelationTombstone struct {
+	ID         string            `json:"id"`
+	RelType    string            `json:"rel_type"`
+	FromID     string            `json:"from_id"`
+	ToID       string            `json:"to_id"`
+	Provenance models.Provenance `json:"provenance"`
+}
+
+func deleteCodeNode(ctx context.Context, deps Deps, value []byte) (Outcome, error) {
+	var tombstone codeNodeTombstone
+	if err := json.Unmarshal(value, &tombstone); err != nil || tombstone.ID == "" || tombstone.Provenance.Path == "" {
+		deps.Logf("sink-graph: tombstone CodeNode non valido, scartato")
+		return OutcomeInvalidSkipped, nil
+	}
+	if !securitylabels.Valid(tombstone.Provenance.TenantID, tombstone.Provenance.Repo, tombstone.Provenance.ACLGroup) {
+		securitylabels.Observe(ConsumerName, "rejected")
+		deps.Logf("sink-graph: tombstone CodeNode senza security labels valide, scartato")
+		return OutcomeInvalidSkipped, nil
+	}
+	securitylabels.Observe(ConsumerName, "accepted")
+	params := map[string]any{
+		"id": tombstone.ID, "tenant_id": tombstone.Provenance.TenantID,
+		"repo": tombstone.Provenance.Repo, "acl_group": tombstone.Provenance.ACLGroup,
+		"path": tombstone.Provenance.Path,
+	}
+	if err := runDeleteCodeNode(ctx, deps.Neo4j, params); errors.Is(err, errDeleteScopeMismatch) {
+		deps.Logf("sink-graph: tombstone CodeNode fuori scope, scartato")
+		return OutcomeInvalidSkipped, nil
+	} else if err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("DELETE CodeNode projection: %w", err)
+	}
+	return OutcomeDeleted, nil
+}
+
+func deleteCodeRelation(ctx context.Context, deps Deps, value []byte) (Outcome, error) {
+	var tombstone codeRelationTombstone
+	if err := json.Unmarshal(value, &tombstone); err != nil || tombstone.ID == "" || tombstone.FromID == "" || tombstone.ToID == "" {
+		deps.Logf("sink-graph: tombstone CodeRelation non valido, scartato")
+		return OutcomeInvalidSkipped, nil
+	}
+	if !securitylabels.Valid(tombstone.Provenance.TenantID, tombstone.Provenance.Repo, tombstone.Provenance.ACLGroup) {
+		securitylabels.Observe(ConsumerName, "rejected")
+		deps.Logf("sink-graph: tombstone CodeRelation senza security labels valide, scartato")
+		return OutcomeInvalidSkipped, nil
+	}
+	securitylabels.Observe(ConsumerName, "accepted")
+	query, err := deleteCodeRelationQuery(tombstone.RelType)
+	if err != nil {
+		deps.Logf("sink-graph: tombstone CodeRelation con tipo non valido, scartato")
+		return OutcomeInvalidSkipped, nil
+	}
+	params := map[string]any{"from_id": tombstone.FromID, "to_id": tombstone.ToID}
+	if err := runWrite(ctx, deps.Neo4j, lockDeleteRelationEndpointsQuery, query, params); err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("DELETE CodeRelation projection: %w", err)
+	}
+	return OutcomeDeleted, nil
+}
+
 // mergeCodeRelation decodifica il payload CodeRelation e fa MERGE su Neo4j
 // (SPEC-015 §2). Stessa disciplina di mergeCodeNode: rel_type ri-validato
 // da mergeCodeRelationQuery prima di qualunque interpolazione Cypher.
@@ -289,6 +346,51 @@ func runWrite(ctx context.Context, driver neo4j.DriverWithContext, lockQuery, mu
 			if _, err := result.Consume(ctx); err != nil {
 				return nil, err
 			}
+		}
+		return nil, nil
+	})
+	return err
+}
+
+var errDeleteScopeMismatch = errors.New("delete scope mismatch")
+
+func runDeleteCodeNode(ctx context.Context, driver neo4j.DriverWithContext, params map[string]any) error {
+	session := driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		lockResult, err := tx.Run(ctx, lockDeleteCodeNodeQuery, params)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := lockResult.Consume(ctx); err != nil {
+			return nil, err
+		}
+
+		scopeResult, err := tx.Run(ctx, checkDeleteCodeNodeScopeQuery, params)
+		if err != nil {
+			return nil, err
+		}
+		if !scopeResult.Next(ctx) {
+			if err := scopeResult.Err(); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		}
+		scopeMatches, _, err := neo4j.GetRecordValue[bool](scopeResult.Record(), "scope_matches")
+		if err != nil {
+			return nil, err
+		}
+		if !scopeMatches {
+			return nil, errDeleteScopeMismatch
+		}
+
+		deleteResult, err := tx.Run(ctx, deleteCodeNodeQuery, params)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := deleteResult.Consume(ctx); err != nil {
+			return nil, err
 		}
 		return nil, nil
 	})
