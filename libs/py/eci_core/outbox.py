@@ -13,6 +13,8 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict
 class AggregateType(StrEnum):
     CodeNode = "CodeNode"
     CodeRelation = "CodeRelation"
+    CodeChunk = "CodeChunk"
+    CodeEmbedding = "CodeEmbedding"
 
 
 class EventType(StrEnum):

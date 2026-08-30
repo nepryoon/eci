@@ -9,8 +9,8 @@ use ingestion::worker::{
     source_object_key, CommandErrorKind, FileOperation,
 };
 use ingestion::{
-    inspect_ingestion_command_receipt, parse_file_full, persist_ingestion_command, CommandOutcome,
-    CommandReceiptStatus,
+    inspect_ingestion_command_receipt, parse_file_full, persist_ingestion_command,
+    persist_ingestion_delete_command, CommandOutcome, CommandReceiptStatus,
 };
 use postgres::{Client, NoTls};
 use testcontainers::runners::SyncRunner;
@@ -70,15 +70,15 @@ fn legacy_upsert_and_delete_are_closed_distinct_commands() {
     assert_eq!(upsert.operation(), FileOperation::Upsert);
     assert!(upsert.source_sha256().is_some());
 
-    let (scope, delete) = parse_authenticated_command(
-        &valid_delete_payload(),
-        &valid_headers(),
-        16 * 1024 * 1024,
-    )
-    .expect("authenticated delete");
+    let (scope, delete) =
+        parse_authenticated_command(&valid_delete_payload(), &valid_headers(), 16 * 1024 * 1024)
+            .expect("authenticated delete");
     assert_eq!(delete.operation(), FileOperation::Delete);
     assert_eq!(delete.source_sha256(), None);
-    assert_eq!(command_message_key(&scope, &delete), command_message_key(&scope, &upsert));
+    assert_eq!(
+        command_message_key(&scope, &delete),
+        command_message_key(&scope, &upsert)
+    );
 
     let delete_with_source = String::from_utf8(valid_delete_payload())
         .unwrap()
@@ -112,15 +112,17 @@ fn checked_in_command_contract_is_closed_and_matches_runtime_limits() {
     );
     assert_eq!(
         schema["required"],
-        serde_json::json!([
-            "schema_version",
-            "command_id",
-            "commit_sha",
-            "path",
-            "source_sha256",
-            "source_size_bytes"
-        ])
+        serde_json::json!(["schema_version", "command_id", "commit_sha", "path"])
     );
+    assert_eq!(
+        schema["properties"]["operation"]["enum"],
+        serde_json::json!(["UPSERT", "DELETE"])
+    );
+    assert_eq!(
+        schema["oneOf"][0]["required"],
+        serde_json::json!(["source_sha256", "source_size_bytes"])
+    );
+    assert_eq!(schema["oneOf"][1]["properties"]["source_sha256"], false);
     for forbidden in [
         "tenant_id",
         "repository",
@@ -278,7 +280,7 @@ fn path_length_matches_json_schema_unicode_semantics_and_s3_key_limit() {
 fn object_key_and_partition_key_are_deterministic_and_non_disclosing() {
     let (scope, command) =
         parse_authenticated_command(&valid_payload(), &valid_headers(), 16 * 1024 * 1024).unwrap();
-    let object_key = source_object_key(&scope, &command);
+    let object_key = source_object_key(&scope, &command).expect("upsert source key");
     assert!(object_key.starts_with("sources/v1/"));
     assert_eq!(object_key.len(), 181);
     assert!(object_key.contains(command.commit_sha()));
@@ -382,8 +384,10 @@ fn command_receipt_is_atomic_idempotent_and_conflict_closed() {
              GRANT CONNECT ON DATABASE eci TO ingestion_runtime_probe;
              GRANT USAGE ON SCHEMA public TO ingestion_runtime_probe;
              GRANT SELECT, INSERT ON ingestion_command_receipt TO ingestion_runtime_probe;
-             GRANT INSERT, UPDATE ON code_node TO ingestion_runtime_probe;
+             GRANT SELECT, INSERT, UPDATE, DELETE ON code_node TO ingestion_runtime_probe;
              GRANT SELECT, INSERT, DELETE ON code_relation, code_chunk TO ingestion_runtime_probe;
+             GRANT SELECT, DELETE ON code_embedding TO ingestion_runtime_probe;
+             GRANT DELETE ON lineage TO ingestion_runtime_probe;
              GRANT INSERT ON outbox TO ingestion_runtime_probe;",
         )
         .expect("create least-privilege runtime probe role");
@@ -397,6 +401,215 @@ fn command_receipt_is_atomic_idempotent_and_conflict_closed() {
         .batch_execute("REVOKE SELECT ON ingestion_command_receipt FROM ingestion_runtime_probe")
         .expect("revoke required receipt permission");
     assert!(!postgres_runtime_schema_ready(&mut probe));
+}
+
+#[test]
+#[ignore = "requires Docker and the migrate CLI; run through task test:integration"]
+fn file_delete_is_atomic_idempotent_and_scope_isolated() {
+    let (_container, mut client, _) = start_migrated_postgres();
+    let (scope, upsert) =
+        parse_authenticated_command(&valid_payload(), &valid_headers(), 16 * 1024 * 1024).unwrap();
+    let source = "package orders\n\nfunc Process() {}\n";
+    let (nodes, relations, chunks) = parse_file_full(upsert.path(), source);
+    persist_ingestion_command(&mut client, &scope, &upsert, nodes, relations, &chunks)
+        .expect("seed file to delete");
+
+    client
+        .execute(
+            "INSERT INTO code_embedding (chunk_id, vector, model_id, embedding_dim)
+             SELECT id, ARRAY[0.1]::real[], 'delete-test', 1 FROM code_chunk LIMIT 1",
+            &[],
+        )
+        .expect("seed embedding");
+    let target_id: String = client
+        .query_one(
+            "SELECT id FROM code_node WHERE provenance->>'tenant_id'='tenant-a' LIMIT 1",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    let external_id = "f".repeat(64);
+    client
+        .execute(
+            "INSERT INTO code_node (id, domain, node_type, name, ast_hash, provenance)
+             VALUES ($1, 'code', 'Function', 'External', $2,
+               '{\"tenant_id\":\"tenant-a\",\"repo\":\"orders\",\"acl_group\":\"engineering\",\"path\":\"src/external.go\"}'::jsonb)",
+            &[&external_id, &"e".repeat(64)],
+        )
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO code_relation (domain, rel_type, from_id, to_id)
+             VALUES ('code', 'CALLS', $1, $2)",
+            &[&external_id, &target_id],
+        )
+        .expect("seed incoming cross-file relation");
+
+    let foreign_payload = String::from_utf8(valid_payload()).unwrap().replace(
+        "018f0806-3d73-7a8f-b5a5-c4b25f9d4701",
+        "018f0806-3d73-7a8f-b5a5-c4b25f9d4799",
+    );
+    let mut foreign_headers = valid_headers();
+    foreign_headers[0].1 = b"tenant-b".to_vec();
+    let (foreign_scope, foreign_upsert) = parse_authenticated_command(
+        foreign_payload.as_bytes(),
+        &foreign_headers,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    let (nodes, relations, chunks) = parse_file_full(foreign_upsert.path(), source);
+    persist_ingestion_command(
+        &mut client,
+        &foreign_scope,
+        &foreign_upsert,
+        nodes,
+        relations,
+        &chunks,
+    )
+    .expect("seed same path in foreign tenant");
+
+    let (_, delete) =
+        parse_authenticated_command(&valid_delete_payload(), &valid_headers(), 16 * 1024 * 1024)
+            .unwrap();
+    let outcome = persist_ingestion_delete_command(&mut client, &scope, &delete)
+        .expect("apply canonical delete");
+    let CommandOutcome::Applied(summary) = outcome else {
+        panic!("first delete must apply")
+    };
+    assert!(summary.outbox_rows_written > 0);
+
+    let scoped_count = |client: &mut Client, tenant: &str| -> i64 {
+        client
+            .query_one(
+                "SELECT count(*) FROM code_node
+                 WHERE provenance->>'tenant_id'=$1 AND provenance->>'path'=$2",
+                &[&tenant, &delete.path()],
+            )
+            .unwrap()
+            .get(0)
+    };
+    assert_eq!(scoped_count(&mut client, "tenant-a"), 0);
+    assert!(scoped_count(&mut client, "tenant-b") > 0);
+    assert_eq!(
+        client
+            .query_one(
+                "SELECT count(*) FROM code_relation WHERE from_id=$1 OR to_id=$1",
+                &[&target_id],
+            )
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    let delete_types: Vec<(String, i64)> = client
+        .query(
+            "SELECT aggregate_type, count(*) FROM outbox
+             WHERE event_type='DELETE' GROUP BY aggregate_type ORDER BY aggregate_type",
+            &[],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert!(delete_types.iter().any(|(kind, _)| kind == "CodeNode"));
+    assert!(delete_types.iter().any(|(kind, _)| kind == "CodeRelation"));
+    assert!(delete_types.iter().any(|(kind, _)| kind == "CodeChunk"));
+    assert!(delete_types.iter().any(|(kind, _)| kind == "CodeEmbedding"));
+    let invalid_tombstones: i64 = client
+        .query_one(
+            "SELECT count(*) FROM outbox WHERE event_type='DELETE' AND (
+               payload->'provenance'->>'tenant_id' <> 'tenant-a'
+               OR payload->'provenance'->>'repo' <> 'orders'
+               OR payload ? 'text' OR payload ? 'vector')",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(invalid_tombstones, 0);
+    let receipt = client
+        .query_one(
+            "SELECT operation, source_sha256 IS NULL FROM ingestion_command_receipt WHERE command_id=$1",
+            &[&delete.command_id()],
+        )
+        .unwrap();
+    assert_eq!(receipt.get::<_, String>(0), "DELETE");
+    assert!(receipt.get::<_, bool>(1));
+
+    let counts = canonical_counts(&mut client);
+    assert_eq!(
+        persist_ingestion_delete_command(&mut client, &scope, &delete).unwrap(),
+        CommandOutcome::Duplicate
+    );
+    assert_eq!(canonical_counts(&mut client), counts);
+
+    let absent_payload = String::from_utf8(valid_delete_payload())
+        .unwrap()
+        .replace(
+            "018f0806-3d73-7a8f-b5a5-c4b25f9d4702",
+            "018f0806-3d73-7a8f-b5a5-c4b25f9d4703",
+        )
+        .replace("src/order service.go", "src/absent.go");
+    let (_, absent) = parse_authenticated_command(
+        absent_payload.as_bytes(),
+        &valid_headers(),
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    let outbox_before: i64 = client
+        .query_one("SELECT count(*) FROM outbox", &[])
+        .unwrap()
+        .get(0);
+    let CommandOutcome::Applied(summary) =
+        persist_ingestion_delete_command(&mut client, &scope, &absent).unwrap()
+    else {
+        panic!("absent delete must still apply receipt")
+    };
+    assert_eq!(summary.outbox_rows_written, 0);
+    assert_eq!(
+        client
+            .query_one("SELECT count(*) FROM outbox", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        outbox_before
+    );
+}
+
+#[test]
+#[ignore = "requires Docker and the migrate CLI; run through task test:integration"]
+fn file_delete_rolls_back_canonical_rows_outbox_and_receipt_together() {
+    let (_container, mut client, _) = start_migrated_postgres();
+    let (scope, upsert) =
+        parse_authenticated_command(&valid_payload(), &valid_headers(), 16 * 1024 * 1024).unwrap();
+    let (nodes, relations, chunks) =
+        parse_file_full(upsert.path(), "package orders\n\nfunc Process() {}\n");
+    persist_ingestion_command(&mut client, &scope, &upsert, nodes, relations, &chunks)
+        .expect("seed canonical file");
+    let counts_before = canonical_counts(&mut client);
+
+    client
+        .batch_execute(
+            "CREATE FUNCTION reject_delete_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
+               BEGIN
+                 IF NEW.operation = 'DELETE' THEN
+                   RAISE EXCEPTION 'forced receipt failure';
+                 END IF;
+                 RETURN NEW;
+               END;
+             $$;
+             CREATE TRIGGER reject_delete_receipt
+               BEFORE INSERT ON ingestion_command_receipt
+               FOR EACH ROW EXECUTE FUNCTION reject_delete_receipt();",
+        )
+        .expect("install deterministic receipt failpoint");
+    let (_, delete) =
+        parse_authenticated_command(&valid_delete_payload(), &valid_headers(), 16 * 1024 * 1024)
+            .unwrap();
+
+    assert!(persist_ingestion_delete_command(&mut client, &scope, &delete).is_err());
+    assert_eq!(canonical_counts(&mut client), counts_before);
+    assert!(matches!(
+        inspect_ingestion_command_receipt(&mut client, &scope, &delete).unwrap(),
+        CommandReceiptStatus::New
+    ));
 }
 
 fn canonical_counts(client: &mut Client) -> (i64, i64, i64, i64, i64) {

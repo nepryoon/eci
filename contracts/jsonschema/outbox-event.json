@@ -5,7 +5,10 @@
   "required": ["id", "aggregate_type", "aggregate_id", "event_type", "payload", "created_at"],
   "properties": {
     "id": { "type": "string", "format": "uuid" },
-    "aggregate_type": { "type": "string", "enum": ["CodeNode", "CodeRelation"] },
+    "aggregate_type": {
+      "type": "string",
+      "enum": ["CodeNode", "CodeRelation", "CodeChunk", "CodeEmbedding"]
+    },
     "aggregate_id": { "type": "string" },
     "event_type": { "type": "string", "enum": ["UPSERT", "DELETE"] },
     "payload": { "type": "object" },

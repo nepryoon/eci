@@ -2,7 +2,10 @@
 // i test Python (tests/fixtures/jsonschema/).
 package models
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestParseOutboxEvent(t *testing.T) {
 	cases := []struct {
@@ -37,5 +40,23 @@ func TestParseOutboxEventFieldValues(t *testing.T) {
 	}
 	if event.EventType != "UPSERT" {
 		t.Fatalf("EventType = %q, want %q", event.EventType, "UPSERT")
+	}
+}
+
+func TestParseOutboxEventAcceptsEveryMaterializedAggregateTombstone(t *testing.T) {
+	for _, aggregateType := range []string{"CodeNode", "CodeRelation", "CodeChunk", "CodeEmbedding"} {
+		t.Run(aggregateType, func(t *testing.T) {
+			data := []byte(fmt.Sprintf(`{
+				"id":"11111111-1111-1111-1111-111111111111",
+				"aggregate_type":%q,
+				"aggregate_id":"entity-id",
+				"event_type":"DELETE",
+				"payload":{},
+				"created_at":"2025-01-01T00:00:00Z"
+			}`, aggregateType))
+			if _, err := ParseOutboxEvent(data); err != nil {
+				t.Fatalf("ParseOutboxEvent(%s DELETE): %v", aggregateType, err)
+			}
+		})
 	}
 }

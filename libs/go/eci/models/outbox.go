@@ -22,7 +22,9 @@ var outboxRequiredFields = []string{
 	"id", "aggregate_type", "aggregate_id", "event_type", "payload", "created_at",
 }
 
-var outboxAggregateTypes = map[string]bool{"CodeNode": true, "CodeRelation": true}
+var outboxAggregateTypes = map[string]bool{
+	"CodeNode": true, "CodeRelation": true, "CodeChunk": true, "CodeEmbedding": true,
+}
 
 var outboxEventTypes = map[string]bool{"UPSERT": true, "DELETE": true}
 

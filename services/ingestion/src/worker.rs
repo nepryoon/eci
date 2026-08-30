@@ -78,12 +78,29 @@ impl AuthenticatedCommitScope {
 #[serde(deny_unknown_fields)]
 pub struct IngestionFileCommand {
     schema_version: String,
+    operation: Option<FileOperation>,
     #[serde(deserialize_with = "deserialize_schema_uuid")]
     command_id: Uuid,
     commit_sha: String,
     path: String,
-    source_sha256: String,
-    source_size_bytes: u64,
+    source_sha256: Option<String>,
+    source_size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum FileOperation {
+    Upsert,
+    Delete,
+}
+
+impl FileOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Upsert => "UPSERT",
+            Self::Delete => "DELETE",
+        }
+    }
 }
 
 fn deserialize_schema_uuid<'de, D>(deserializer: D) -> Result<Uuid, D::Error>
@@ -110,6 +127,10 @@ impl IngestionFileCommand {
         self.command_id
     }
 
+    pub fn operation(&self) -> FileOperation {
+        self.operation.unwrap_or(FileOperation::Upsert)
+    }
+
     pub fn commit_sha(&self) -> &str {
         &self.commit_sha
     }
@@ -118,11 +139,11 @@ impl IngestionFileCommand {
         &self.path
     }
 
-    pub fn source_sha256(&self) -> &str {
-        &self.source_sha256
+    pub fn source_sha256(&self) -> Option<&str> {
+        self.source_sha256.as_deref()
     }
 
-    pub fn source_size_bytes(&self) -> u64 {
+    pub fn source_size_bytes(&self) -> Option<u64> {
         self.source_size_bytes
     }
 }
@@ -159,16 +180,30 @@ pub fn parse_authenticated_command(
 
     let command: IngestionFileCommand = serde_json::from_slice(payload)
         .map_err(|_| CommandError::new(CommandErrorKind::InvalidPayload))?;
-    if command.schema_version != "1"
-        || !lower_hex(&command.commit_sha, 40)
-        || !lower_hex(&command.source_sha256, 64)
-    {
+    if command.schema_version != "1" || !lower_hex(&command.commit_sha, 40) {
         return Err(CommandError::new(CommandErrorKind::InvalidPayload));
     }
     validate_path(&command.path)?;
-    let effective_limit = max_source_bytes.min(SCHEMA_MAX_SOURCE_BYTES);
-    if command.source_size_bytes > effective_limit {
-        return Err(CommandError::new(CommandErrorKind::SourceTooLarge));
+    match command.operation() {
+        FileOperation::Upsert => {
+            let (Some(digest), Some(size)) =
+                (command.source_sha256.as_deref(), command.source_size_bytes)
+            else {
+                return Err(CommandError::new(CommandErrorKind::InvalidPayload));
+            };
+            if !lower_hex(digest, 64) {
+                return Err(CommandError::new(CommandErrorKind::InvalidPayload));
+            }
+            let effective_limit = max_source_bytes.min(SCHEMA_MAX_SOURCE_BYTES);
+            if size > effective_limit {
+                return Err(CommandError::new(CommandErrorKind::SourceTooLarge));
+            }
+        }
+        FileOperation::Delete => {
+            if command.source_sha256.is_some() || command.source_size_bytes.is_some() {
+                return Err(CommandError::new(CommandErrorKind::InvalidPayload));
+            }
+        }
     }
 
     Ok((
@@ -219,14 +254,17 @@ fn validate_path(path: &str) -> Result<(), CommandError> {
 pub fn source_object_key(
     scope: &AuthenticatedCommitScope,
     command: &IngestionFileCommand,
-) -> String {
+) -> Option<String> {
+    if command.operation() != FileOperation::Upsert {
+        return None;
+    }
     let scope_hash = digest_components(&[scope.tenant_id(), scope.repository(), scope.acl_group()]);
     let path_hash = digest_components(&[command.path()]);
-    format!(
+    Some(format!(
         "sources/v1/{scope_hash}/{}/{}",
         command.commit_sha(),
         path_hash
-    )
+    ))
 }
 
 pub fn command_message_key(
@@ -248,14 +286,16 @@ pub fn command_fingerprint(
     scope: &AuthenticatedCommitScope,
     command: &IngestionFileCommand,
 ) -> String {
+    let source_size = command.source_size_bytes().map(|value| value.to_string());
     digest_components(&[
         scope.tenant_id(),
         scope.repository(),
         scope.acl_group(),
+        command.operation().as_str(),
         command.commit_sha(),
         command.path(),
-        command.source_sha256(),
-        &command.source_size_bytes().to_string(),
+        command.source_sha256().unwrap_or("-"),
+        source_size.as_deref().unwrap_or("-"),
     ])
 }
 

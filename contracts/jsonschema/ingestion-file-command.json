@@ -4,16 +4,10 @@
   "title": "IngestionFileCommand",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema_version",
-    "command_id",
-    "commit_sha",
-    "path",
-    "source_sha256",
-    "source_size_bytes"
-  ],
+  "required": ["schema_version", "command_id", "commit_sha", "path"],
   "properties": {
     "schema_version": {"const": "1"},
+    "operation": {"type": "string", "enum": ["UPSERT", "DELETE"]},
     "command_id": {"type": "string", "format": "uuid"},
     "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "path": {
@@ -28,5 +22,19 @@
       "minimum": 0,
       "maximum": 16777216
     }
-  }
+  },
+  "oneOf": [
+    {
+      "properties": {"operation": {"const": "UPSERT"}},
+      "required": ["source_sha256", "source_size_bytes"]
+    },
+    {
+      "properties": {
+        "operation": {"const": "DELETE"},
+        "source_sha256": false,
+        "source_size_bytes": false
+      },
+      "required": ["operation"]
+    }
+  ]
 }

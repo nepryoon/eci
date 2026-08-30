@@ -235,6 +235,7 @@ pub fn persist_ingestion_command(
 ) -> Result<CommandOutcome, PersistError> {
     let span = tracing::info_span!(
         "ingestion.command.persist",
+        ingestion.operation = "upsert",
         ingestion.outcome = tracing::field::Empty
     );
     let _entered = span.enter();
@@ -256,6 +257,9 @@ fn persist_ingestion_command_inner(
     relations: Vec<CodeRelation>,
     chunks: &[CodeChunk],
 ) -> Result<CommandOutcome, PersistError> {
+    if command.operation() != crate::worker::FileOperation::Upsert {
+        return Err(PersistError(PersistErrorKind::InvalidCommandData));
+    }
     if !parsed_command_data_is_valid(command.path(), &nodes, chunks) {
         return Err(PersistError(PersistErrorKind::InvalidCommandData));
     }
@@ -301,22 +305,231 @@ fn persist_ingestion_command_inner(
         &trace_id,
         Some(&provenance),
     )?;
+    insert_command_receipt(&mut tx, scope, command, &fingerprint)?;
+    tx.commit()?;
+    Ok(CommandOutcome::Applied(summary))
+}
+
+/// Apply an authenticated file removal and its projection tombstones in one
+/// canonical PostgreSQL transaction (SPEC-070 / ADR-0025).
+pub fn persist_ingestion_delete_command(
+    client: &mut postgres::Client,
+    scope: &crate::worker::AuthenticatedCommitScope,
+    command: &crate::worker::IngestionFileCommand,
+) -> Result<CommandOutcome, PersistError> {
+    let span = tracing::info_span!(
+        "ingestion.command.persist",
+        ingestion.operation = "delete",
+        ingestion.outcome = tracing::field::Empty
+    );
+    let _entered = span.enter();
+    let result = persist_ingestion_delete_command_inner(client, scope, command);
+    let outcome = match &result {
+        Ok(CommandOutcome::Applied(_)) => "applied",
+        Ok(CommandOutcome::Duplicate) => "duplicate",
+        Err(_) => "failed",
+    };
+    span.record("ingestion.outcome", outcome);
+    result
+}
+
+fn persist_ingestion_delete_command_inner(
+    client: &mut postgres::Client,
+    scope: &crate::worker::AuthenticatedCommitScope,
+    command: &crate::worker::IngestionFileCommand,
+) -> Result<CommandOutcome, PersistError> {
+    if command.operation() != crate::worker::FileOperation::Delete {
+        return Err(PersistError(PersistErrorKind::InvalidCommandData));
+    }
+    let trace_id = eci_common::observability::current_trace_id_hex();
+    let fingerprint = crate::worker::command_fingerprint(scope, command);
+    let command_id = command.command_id();
+    let mut tx = client.transaction()?;
+    tx.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        &[&command_id.to_string()],
+    )?;
+    if let Some(row) = tx.query_opt(
+        "SELECT fingerprint FROM ingestion_command_receipt WHERE command_id = $1",
+        &[&command_id],
+    )? {
+        let existing: String = row.get(0);
+        if existing == fingerprint {
+            tx.commit()?;
+            return Ok(CommandOutcome::Duplicate);
+        }
+        return Err(PersistError(PersistErrorKind::CommandIdConflict));
+    }
+
+    let node_rows = tx.query(
+        "SELECT id, node_type FROM code_node
+         WHERE provenance->>'tenant_id' = $1
+           AND provenance->>'repo' = $2
+           AND provenance->>'acl_group' = $3
+           AND provenance->>'path' = $4
+         ORDER BY id FOR UPDATE",
+        &[
+            &scope.tenant_id(),
+            &scope.repository(),
+            &scope.acl_group(),
+            &command.path(),
+        ],
+    )?;
+    let node_ids: Vec<String> = node_rows.iter().map(|row| row.get(0)).collect();
+    let provenance = serde_json::json!({
+        "tenant_id": scope.tenant_id(),
+        "repo": scope.repository(),
+        "acl_group": scope.acl_group(),
+        "path": command.path(),
+        "commit_sha": command.commit_sha(),
+    });
+
+    let relation_rows = tx.query(
+        "SELECT id::text, rel_type, from_id, to_id
+         FROM code_relation
+         WHERE from_id = ANY($1) OR to_id = ANY($1)
+         ORDER BY id FOR UPDATE",
+        &[&node_ids],
+    )?;
+    let chunk_rows = tx.query(
+        "SELECT id, entity_id FROM code_chunk
+         WHERE entity_id = ANY($1) ORDER BY id FOR UPDATE",
+        &[&node_ids],
+    )?;
+    let chunk_ids: Vec<uuid::Uuid> = chunk_rows.iter().map(|row| row.get(0)).collect();
+    let embedding_rows = tx.query(
+        "SELECT e.id::text, c.entity_id
+         FROM code_embedding e JOIN code_chunk c ON c.id = e.chunk_id
+         WHERE e.chunk_id = ANY($1) ORDER BY e.id FOR UPDATE",
+        &[&chunk_ids],
+    )?;
+
+    let mut outbox_rows_written = 0usize;
+    for row in &embedding_rows {
+        let id: String = row.get(0);
+        let entity_id: String = row.get(1);
+        insert_delete_outbox(
+            &mut tx,
+            "CodeEmbedding",
+            &id,
+            serde_json::json!({"id": id, "entity_id": entity_id, "provenance": provenance}),
+            &trace_id,
+        )?;
+        outbox_rows_written += 1;
+    }
+    for row in &chunk_rows {
+        let id = row.get::<_, uuid::Uuid>(0).to_string();
+        let entity_id: String = row.get(1);
+        insert_delete_outbox(
+            &mut tx,
+            "CodeChunk",
+            &id,
+            serde_json::json!({"id": id, "entity_id": entity_id, "provenance": provenance}),
+            &trace_id,
+        )?;
+        outbox_rows_written += 1;
+    }
+    for row in &relation_rows {
+        let id: String = row.get(0);
+        let rel_type: String = row.get(1);
+        let from_id: String = row.get(2);
+        let to_id: String = row.get(3);
+        insert_delete_outbox(
+            &mut tx,
+            "CodeRelation",
+            &id,
+            serde_json::json!({
+                "id": id, "rel_type": rel_type, "from_id": from_id,
+                "to_id": to_id, "provenance": provenance
+            }),
+            &trace_id,
+        )?;
+        outbox_rows_written += 1;
+    }
+    for row in &node_rows {
+        let id: String = row.get(0);
+        let node_type: String = row.get(1);
+        insert_delete_outbox(
+            &mut tx,
+            "CodeNode",
+            &id,
+            serde_json::json!({
+                "id": id, "ext": {"node_type": node_type}, "provenance": provenance
+            }),
+            &trace_id,
+        )?;
+        outbox_rows_written += 1;
+    }
+
+    tx.execute(
+        "DELETE FROM code_embedding WHERE chunk_id = ANY($1)",
+        &[&chunk_ids],
+    )?;
+    tx.execute(
+        "DELETE FROM code_chunk WHERE entity_id = ANY($1)",
+        &[&node_ids],
+    )?;
+    tx.execute(
+        "DELETE FROM code_relation WHERE from_id = ANY($1) OR to_id = ANY($1)",
+        &[&node_ids],
+    )?;
+    tx.execute(
+        "DELETE FROM lineage
+         WHERE old_node_id::text = ANY($1) OR new_node_id::text = ANY($1)",
+        &[&node_ids],
+    )?;
+    tx.execute(
+        "UPDATE code_node SET supersedes = NULL WHERE supersedes = ANY($1)",
+        &[&node_ids],
+    )?;
+    tx.execute("DELETE FROM code_node WHERE id = ANY($1)", &[&node_ids])?;
+    insert_command_receipt(&mut tx, scope, command, &fingerprint)?;
+    tx.commit()?;
+
+    Ok(CommandOutcome::Applied(PersistSummary {
+        nodes_upserted: 0,
+        relations_replaced: 0,
+        outbox_rows_written,
+    }))
+}
+
+fn insert_delete_outbox(
+    tx: &mut postgres::Transaction<'_>,
+    aggregate_type: &str,
+    aggregate_id: &str,
+    payload: serde_json::Value,
+    trace_id: &Option<String>,
+) -> Result<(), PersistError> {
+    tx.execute(
+        "INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload, trace_id)
+         VALUES ($1, $2, 'DELETE', $3, $4)",
+        &[&aggregate_type, &aggregate_id, &payload, trace_id],
+    )?;
+    Ok(())
+}
+
+fn insert_command_receipt(
+    tx: &mut postgres::Transaction<'_>,
+    scope: &crate::worker::AuthenticatedCommitScope,
+    command: &crate::worker::IngestionFileCommand,
+    fingerprint: &str,
+) -> Result<(), PersistError> {
     tx.execute(
         "INSERT INTO ingestion_command_receipt
-         (command_id, fingerprint, tenant_id, repository, commit_sha, path, source_sha256)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+         (command_id, fingerprint, tenant_id, repository, commit_sha, path, source_sha256, operation)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         &[
-            &command_id,
+            &command.command_id(),
             &fingerprint,
             &scope.tenant_id(),
             &scope.repository(),
             &command.commit_sha(),
             &command.path(),
             &command.source_sha256(),
+            &command.operation().as_str(),
         ],
     )?;
-    tx.commit()?;
-    Ok(CommandOutcome::Applied(summary))
+    Ok(())
 }
 
 fn parsed_command_data_is_valid(

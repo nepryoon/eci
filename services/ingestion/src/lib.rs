@@ -25,9 +25,9 @@ pub mod persist;
 pub mod runtime;
 pub mod worker;
 pub use persist::{
-    inspect_ingestion_command_receipt, persist_ingestion_command, persist_parsed_file,
-    scoped_node_id, CommandOutcome, CommandReceiptStatus, IngestionScope, PersistError,
-    PersistSummary, ScopeError,
+    inspect_ingestion_command_receipt, persist_ingestion_command, persist_ingestion_delete_command,
+    persist_parsed_file, scoped_node_id, CommandOutcome, CommandReceiptStatus, IngestionScope,
+    PersistError, PersistSummary, ScopeError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
