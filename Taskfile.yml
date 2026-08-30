@@ -46,6 +46,7 @@ tasks:
       - cd libs/go && go test -tags=integration ./eci/resilience/... -run TestWithRetryAndDLQ -v
       - cd services/ingestion && cargo test --test persist_integration_test -- --ignored --test-threads=1
       - cd services/ingestion && cargo test --test chunk_persist_integration_test -- --ignored --test-threads=1
+      - cd services/ingestion && cargo test --test worker_runtime_test -- --ignored --test-threads=1
       - cd services/sink-graph && go test -tags=integration ./internal/consumer -run TestSinkGraphConsumer -v
       - cd services/embedding-worker && go test -tags=integration ./internal/consumer -run TestEmbeddingWorkerConsumer -v
       - cd services/sink-vector && go test -tags=integration ./internal/consumer -run TestSinkVectorConsumer -v

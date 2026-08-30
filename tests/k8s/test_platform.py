@@ -81,6 +81,7 @@ class PlatformChartTests(unittest.TestCase):
             ("ingestion-plane", "sink-graph"),
             ("ingestion-plane", "sink-vector"),
             ("ingestion-plane", "sink-search"),
+            ("ingestion-plane", "ingestion"),
             ("gpu-plane", "vllm"),
             ("gpu-plane", "embedder"),
             ("gpu-plane", "reranker"),
@@ -91,19 +92,29 @@ class PlatformChartTests(unittest.TestCase):
         self.assertNotIn(("query-plane", "verification"), deployments)
         self.assertNotIn(("query-plane", "summarization"), deployments)
         cronjobs = {obj["metadata"]["name"] for obj in self.standard if obj.get("kind") == "CronJob"}
-        self.assertEqual(cronjobs, {"gds-impact", "ingestion-template"})
-        ingestion = self.by_key[("CronJob", "ingestion-plane", "ingestion-template")]
-        self.assertTrue(ingestion["spec"]["suspend"])
-        ingestion_pod = ingestion["spec"]["jobTemplate"]["spec"]["template"]["spec"]
-        self.assertEqual(ingestion_pod["containers"][0]["args"], ["/input/source"])
+        self.assertEqual(cronjobs, {"gds-impact"})
+        ingestion = self.by_key[("Deployment", "ingestion-plane", "ingestion")]
+        self.assertEqual(ingestion["spec"]["replicas"], 4)
+        ingestion_pod = ingestion["spec"]["template"]["spec"]
         self.assertEqual(
             {item["name"] for item in ingestion_pod["containers"][0]["env"]},
-            {"POSTGRES_DSN", "ECI_TENANT_ID", "ECI_REPOSITORY", "ECI_ACL_GROUP"},
+            {
+                "POSTGRES_DSN", "KAFKA_TOPIC", "KAFKA_GROUP_ID",
+                "MINIO_ENDPOINT", "MINIO_BUCKET", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY",
+                "ECI_INGESTION_MAX_SOURCE_BYTES", "ECI_METRICS_ADDRESS",
+            },
         )
+        container = ingestion_pod["containers"][0]
+        self.assertEqual(container["envFrom"], [{"configMapRef": {"name": "eci-runtime-routing"}}])
+        self.assertEqual(container["ports"], [{"name": "service", "containerPort": 9100}])
+        self.assertEqual(container["readinessProbe"]["httpGet"], {"path": "/ready", "port": "service", "scheme": "HTTP"})
+        self.assertEqual(container["livenessProbe"]["httpGet"], {"path": "/live", "port": "service", "scheme": "HTTP"})
+        self.assertEqual(ingestion["metadata"]["annotations"], {"eci.io/max-replicas": "40"})
         self.assertEqual(
-            ingestion_pod["volumes"][1]["persistentVolumeClaim"],
-            {"claimName": "eci-ingestion-source", "readOnly": True},
+            {volume["name"] for volume in ingestion_pod["volumes"]},
+            {"tmp", "kafka-ca"},
         )
+        self.assertNotIn(("CronJob", "ingestion-plane", "ingestion-template"), self.by_key)
         gds = self.by_key[("CronJob", "ingestion-plane", "gds-impact")]
         self.assertTrue(gds["spec"]["suspend"])
         gds_container = gds["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]
@@ -250,11 +261,13 @@ class PlatformChartTests(unittest.TestCase):
             "eci_connect_status", "outbox.event.CodeChunk.retry.embedding-worker",
             "outbox.event.CodeNode.retry.sink-graph", "outbox.event.CodeRelation.retry.sink-graph",
             "outbox.event.CodeEmbedding.retry.sink-vector", "outbox.event.CodeChunk.retry.sink-search",
+            "eci.ingestion.file.v1", "eci.ingestion.file.v1.DLQ",
         }
         self.assertEqual(set(topics), expected_topics)
         self.assertTrue(all(topic["spec"]["replicas"] == 3 for topic in topics.values()))
         self.assertEqual(topics["eci_connect_offsets"]["spec"]["partitions"], 25)
         self.assertEqual(topics["eci_connect_status"]["spec"]["partitions"], 5)
+        self.assertEqual(topics["eci.ingestion.file.v1"]["spec"]["partitions"], 40)
         self.assertFalse(kafka["spec"]["kafka"]["config"]["auto.create.topics.enable"])
 
         users = {obj["metadata"]["name"]: obj for obj in self.standard if obj.get("kind") == "KafkaUser"}
@@ -262,7 +275,8 @@ class PlatformChartTests(unittest.TestCase):
             set(users),
             {
                 "eci-kafka-kafka-connect", "eci-kafka-embedding-worker", "eci-kafka-sink-graph",
-                "eci-kafka-sink-vector", "eci-kafka-sink-search",
+                "eci-kafka-sink-vector", "eci-kafka-sink-search", "eci-kafka-ingestion",
+                "eci-kafka-ingestion-commit-producer",
             },
         )
         for name, user in users.items():
@@ -274,6 +288,23 @@ class PlatformChartTests(unittest.TestCase):
                     if resource["type"] in {"topic", "group"}:
                         self.assertEqual(resource["patternType"], "literal")
                         self.assertNotEqual(resource["name"], "*")
+
+        ingestion_acls = users["eci-kafka-ingestion"]["spec"]["authorization"]["acls"]
+        self.assertEqual(
+            {
+                (acl["resource"]["type"], acl["resource"].get("name"), tuple(acl["operations"]))
+                for acl in ingestion_acls
+            },
+            {
+                ("topic", "eci.ingestion.file.v1", ("Describe", "Read")),
+                ("topic", "eci.ingestion.file.v1.DLQ", ("Describe", "Write")),
+                ("group", "ingestion", ("Read",)),
+            },
+        )
+        producer_acls = users["eci-kafka-ingestion-commit-producer"]["spec"]["authorization"]["acls"]
+        self.assertEqual(len(producer_acls), 1)
+        self.assertEqual(producer_acls[0]["resource"]["name"], "eci.ingestion.file.v1")
+        self.assertEqual(producer_acls[0]["operations"], ["Describe", "Write"])
 
         graph_resources = {
             (acl["resource"]["type"], acl["resource"].get("name"))

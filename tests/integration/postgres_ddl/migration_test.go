@@ -72,7 +72,7 @@ func TestPostgresDDLMigration(t *testing.T) {
 	// Scenario 1: DB vuoto, applico `up` -> le 4 tabelle esistono.
 	runMigrateCLI(t, migrationsDir, dsn, "up")
 
-	assertTablesExist(t, db, "code_node", "code_relation", "outbox", "processed_events")
+	assertTablesExist(t, db, "code_node", "code_relation", "outbox", "processed_events", "ingestion_command_receipt")
 
 	if _, err := db.ExecContext(ctx, `CREATE ROLE eci_cdc LOGIN REPLICATION NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS IN ROLE eci_cdc_outbox_reader`); err != nil {
 		t.Fatalf("abilitazione ruolo CDC dopo migrations: %v", err)
@@ -243,7 +243,7 @@ func TestPostgresDDLMigration(t *testing.T) {
 	// lascia le tabelle di questa migration — `down` senza contatore
 	// resta corretto indipendentemente da quante migration si accumulano).
 	runMigrateCLI(t, migrationsDir, dsn, "down", "-all")
-	assertTablesAbsent(t, db, "code_node", "code_relation", "outbox", "processed_events")
+	assertTablesAbsent(t, db, "code_node", "code_relation", "outbox", "processed_events", "ingestion_command_receipt")
 	var publicationExists bool
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = 'eci_outbox_publication')`).Scan(&publicationExists); err != nil {
 		t.Fatalf("verifica drop publication: %v", err)
