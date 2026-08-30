@@ -8,6 +8,7 @@ set -euo pipefail
 services/orchestrator/.venv/bin/python -m pip install -q -e libs/py -e 'services/orchestrator[test]'
 services/verification/.venv/bin/python -m pip install -q -e libs/py -e 'services/verification[test]'
 services/summarization/.venv/bin/python -m pip install -q -e libs/py -e 'services/summarization[test]'
+libs/py/.venv/bin/python -m pytest libs/py/eci_core/test_grpc_server.py
 services/orchestrator/.venv/bin/python -m pytest \
   services/orchestrator/orchestrator/test_graph.py \
   services/orchestrator/orchestrator/test_intent.py
