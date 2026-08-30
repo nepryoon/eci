@@ -221,16 +221,23 @@ spec:
           env:
             - {name: SHARD_NUMBER, value: {{ .Values.dataPlane.qdrant.shardNumber | quote }}}
             - {name: REPLICATION_FACTOR, value: {{ .Values.dataPlane.qdrant.replicationFactor | quote }}}
+            - {name: VECTOR_SIZE, value: "1536"}
+            - {name: VECTOR_DISTANCE, value: "Cosine"}
           command: ["/bin/sh", "-ec"]
           args:
             - |
               endpoint=http://qdrant.data-plane.svc:6333/collections/code_embeddings
-              body="{\"vectors\":{\"size\":1536,\"distance\":\"Cosine\"},\"shard_number\":${SHARD_NUMBER},\"replication_factor\":${REPLICATION_FACTOR}}"
+              body="{\"vectors\":{\"size\":${VECTOR_SIZE},\"distance\":\"${VECTOR_DISTANCE}\"},\"shard_number\":${SHARD_NUMBER},\"replication_factor\":${REPLICATION_FACTOR}}"
               status="$(curl -sS -o /tmp/current -w '%{http_code}' "$endpoint")"
               if [ "$status" = 404 ]; then curl -fsS -X PUT -H 'content-type: application/json' --data "$body" "$endpoint"; exit 0; fi
               test "$status" = 200
               grep -q "\"shard_number\":${SHARD_NUMBER}" /tmp/current
               grep -q "\"replication_factor\":${REPLICATION_FACTOR}" /tmp/current
+              tr -d '[:space:]' </tmp/current >/tmp/current.compact
+              vectors_config="$(sed -n 's/.*"vectors":{\([^}]*\)}.*/\1/p' /tmp/current.compact)"
+              test -n "$vectors_config"
+              printf '%s\n' "$vectors_config" | grep -Eq "(^|,)\"size\":${VECTOR_SIZE}(,|$)"
+              printf '%s\n' "$vectors_config" | grep -Eq "(^|,)\"distance\":\"${VECTOR_DISTANCE}\"(,|$)"
           readinessProbe:
             exec: {command: ["/bin/sh", "-c", "test -r /proc/self/status"]}
           livenessProbe:

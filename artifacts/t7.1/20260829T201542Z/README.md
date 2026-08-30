@@ -14,8 +14,9 @@ Neo4j Enterprise licensing/RBAC, GPU capacity, disaster recovery, or D9 SLOs.
 Results:
 
 - clean kind bootstrap: PASS;
-- exact kind node repository digest and Kubernetes server version reuse gate:
-  PASS (deterministic mismatch tests plus live match on `eci-dev`);
+- exact kind node repository digest, cluster-derived kubeconfig and Kubernetes
+  server version reuse gate: PASS (deterministic mismatch/binding tests plus
+  live match on `eci-dev`);
 - all pinned operator/chart releases deployed: PASS;
 - PostgreSQL, Kafka, Neo4j 5.26.30, Qdrant, OpenSearch, Redis, MinIO, OPA and
   Keycloak readiness: PASS;
@@ -80,6 +81,10 @@ Results:
 - immutable Qdrant bootstrap Job upgrade: the first atomic upgrade failed and
   rolled back as designed; the hook lifecycle fix then upgraded successfully
   at revision 6 and the full smoke remained green.
+- existing Qdrant collection compatibility validates shard/replica plus vector
+  size 1536 and Cosine distance and rejects mismatch without data recreation:
+  PASS (deterministic rendered-hook fixtures plus live matching collection
+  response).
 
 During the final data-node pin verification, deleting the only OpenSearch dev
 pod exposed the expected non-HA single-node quorum boundary. The disposable

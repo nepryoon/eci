@@ -15,12 +15,14 @@ for executable in "$DOCKER_BIN" "$HELM_BIN" "$KUBECTL_BIN" "$KIND_BIN" openssl b
   command -v "$executable" >/dev/null || { echo "required executable not found: $executable" >&2; exit 1; }
 done
 "$DOCKER_BIN" info >/dev/null
+ECI_DEV_TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$ECI_DEV_TMP_DIR"' EXIT
 
 if ! "$KIND_BIN" get clusters | grep -qx eci-dev; then
   "$KIND_BIN" create cluster --name eci-dev --config "$ROOT_DIR/deploy/k8s/kind-config.yaml" --image "$ECI_KIND_NODE_IMAGE"
 fi
-eci_verify_existing_kind_cluster "$ECI_KIND_NODE_IMAGE" "$ECI_KIND_KUBERNETES_VERSION"
-"$KUBECTL_BIN" config use-context kind-eci-dev >/dev/null
+eci_verify_existing_kind_cluster "$ECI_KIND_NODE_IMAGE" "$ECI_KIND_KUBERNETES_VERSION" "$ECI_DEV_TMP_DIR/kubeconfig"
+export KUBECONFIG="$ECI_DEV_TMP_DIR/kubeconfig"
 
 "$HELM_BIN" template eci "$ROOT_DIR/deploy/k8s/eci-platform" --show-only templates/namespaces.yaml | "$KUBECTL_BIN" apply -f -
 
@@ -37,8 +39,6 @@ if "$KUBECTL_BIN" -n data-plane get secret eci-postgres-cdc >/dev/null 2>&1; the
 else
   ECI_CDC_PASSWORD="$(openssl rand -hex 18)"
 fi
-ECI_DEV_TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$ECI_DEV_TMP_DIR"' EXIT
 printf '%s\n' \
   'username=eci' \
   "password=$ECI_DEV_PASSWORD" \

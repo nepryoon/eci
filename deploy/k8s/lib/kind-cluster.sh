@@ -6,6 +6,7 @@
 eci_verify_existing_kind_cluster() {
   local expected_image="$1"
   local expected_version="$2"
+  local kubeconfig_path="$3"
   local nodes_output node image_id repo_digests version_json server_version
   local -a nodes=()
 
@@ -34,7 +35,20 @@ eci_verify_existing_kind_cluster() {
     fi
   done
 
-  if ! version_json="$("$KUBECTL_BIN" --context kind-eci-dev version -o json)"; then
+  if [[ -z "$kubeconfig_path" ]]; then
+    echo "temporary kubeconfig path is required for kind-eci-dev verification" >&2
+    return 1
+  fi
+  if ! "$KIND_BIN" export kubeconfig --name eci-dev --kubeconfig "$kubeconfig_path" >/dev/null; then
+    echo "cannot derive kubeconfig from inspected kind cluster eci-dev" >&2
+    return 1
+  fi
+  chmod 0600 "$kubeconfig_path"
+  if ! "$KUBECTL_BIN" --kubeconfig "$kubeconfig_path" config use-context kind-eci-dev >/dev/null; then
+    echo "derived kubeconfig does not contain kind-eci-dev" >&2
+    return 1
+  fi
+  if ! version_json="$("$KUBECTL_BIN" --kubeconfig "$kubeconfig_path" --context kind-eci-dev version -o json)"; then
     echo "cannot query Kubernetes server version for kind-eci-dev" >&2
     return 1
   fi

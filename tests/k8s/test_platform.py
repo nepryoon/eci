@@ -303,6 +303,8 @@ class PlatformChartTests(unittest.TestCase):
         env = bootstrap["spec"]["template"]["spec"]["containers"][0]["env"]
         self.assertIn({"name": "SHARD_NUMBER", "value": "3"}, env)
         self.assertIn({"name": "REPLICATION_FACTOR", "value": "2"}, env)
+        self.assertIn({"name": "VECTOR_SIZE", "value": "1536"}, env)
+        self.assertIn({"name": "VECTOR_DISTANCE", "value": "Cosine"}, env)
 
         neo4j_core = yaml.safe_load((ROOT / "deploy/k8s/vendor-values/neo4j-core.yaml").read_text())
         neo4j_gds = yaml.safe_load((ROOT / "deploy/k8s/vendor-values/neo4j-gds.yaml").read_text())
@@ -751,8 +753,13 @@ class PlatformChartTests(unittest.TestCase):
             commands = {
                 "kind": """#!/usr/bin/env bash
 set -euo pipefail
-[[ "$*" == "get nodes --name eci-dev" ]]
-printf '%s\\n' eci-dev-control-plane
+if [[ "$*" == "get nodes --name eci-dev" ]]; then
+  printf '%s\\n' eci-dev-control-plane
+elif [[ "$1 $2 $3 $4 $5" == "export kubeconfig --name eci-dev --kubeconfig" ]]; then
+  printf '%s\\n' generated-from-eci-dev >"$6"
+else
+  exit 2
+fi
 """,
                 "docker": """#!/usr/bin/env bash
 set -euo pipefail
@@ -766,6 +773,12 @@ fi
 """,
                 "kubectl": """#!/usr/bin/env bash
 set -euo pipefail
+[[ "$1" == --kubeconfig ]]
+[[ "$(cat "$2")" == generated-from-eci-dev ]]
+if [[ "$3 $4 $5" == "config use-context kind-eci-dev" ]]; then
+  exit 0
+fi
+[[ "$3 $4 $5 $6 $7" == "--context kind-eci-dev version -o json" ]]
 cat <<JSON
 {"clientVersion":{"gitVersion":"v1.34.0"},"serverVersion":{"gitVersion":"${FAKE_SERVER_VERSION}"}}
 JSON
@@ -788,7 +801,7 @@ JSON
                         "-c",
                         (
                             'source "$1"; KIND_BIN="$2" DOCKER_BIN="$3" KUBECTL_BIN="$4" '
-                            'eci_verify_existing_kind_cluster "$5" "$6"'
+                            'eci_verify_existing_kind_cluster "$5" "$6" "$7"'
                         ),
                         "_",
                         str(policy),
@@ -797,6 +810,7 @@ JSON
                         str(fake_bin / "kubectl"),
                         expected_image,
                         "1.34.0",
+                        str(fake_bin / "derived-kubeconfig"),
                     ],
                     capture_output=True,
                     text=True,
@@ -816,6 +830,76 @@ JSON
             wrong_version = verify(expected_image, "v1.33.7")
             self.assertNotEqual(wrong_version.returncode, 0)
             self.assertIn("Kubernetes server version", wrong_version.stderr)
+
+        up = (ROOT / "deploy/k8s/dev-up.sh").read_text()
+        self.assertIn('export KUBECONFIG="$ECI_DEV_TMP_DIR/kubeconfig"', up)
+        self.assertNotIn("config use-context kind-eci-dev", up)
+        self.assertLess(
+            up.index('export KUBECONFIG="$ECI_DEV_TMP_DIR/kubeconfig"'),
+            up.index("templates/namespaces.yaml"),
+        )
+
+    def test_review_qdrant_bootstrap_rejects_incompatible_vector_config(self) -> None:
+        bootstrap = self.by_key[("Job", "data-plane", "qdrant-collection-bootstrap")]
+        script = bootstrap["spec"]["template"]["spec"]["containers"][0]["args"][0]
+
+        with tempfile.TemporaryDirectory() as directory:
+            fake_bin = Path(directory)
+            curl = fake_bin / "curl"
+            curl.write_text(
+                """#!/usr/bin/env sh
+set -eu
+output=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then output="$2"; shift 2; continue; fi
+  shift
+done
+test -n "$output"
+printf '%s' "$FAKE_QDRANT_BODY" >"$output"
+printf '%s' 200
+"""
+            )
+            curl.chmod(0o755)
+            script = script.replace("/tmp/current", str(fake_bin / "current"))
+
+            def bootstrap_with(vectors: dict[str, object]) -> subprocess.CompletedProcess[str]:
+                environment = os.environ.copy()
+                environment.update(
+                    PATH=f"{fake_bin}:{environment['PATH']}",
+                    SHARD_NUMBER="3",
+                    REPLICATION_FACTOR="2",
+                    VECTOR_SIZE="1536",
+                    VECTOR_DISTANCE="Cosine",
+                    FAKE_QDRANT_BODY=json.dumps(
+                        {
+                            "result": {
+                                "config": {
+                                    "params": {
+                                        "vectors": vectors,
+                                        "shard_number": 3,
+                                        "replication_factor": 2,
+                                    }
+                                }
+                            }
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+                return subprocess.run(
+                    ["/bin/sh", "-ec", script],
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+
+            valid = bootstrap_with({"size": 1536, "distance": "Cosine"})
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+
+            wrong_size = bootstrap_with({"size": 1024, "distance": "Cosine"})
+            self.assertNotEqual(wrong_size.returncode, 0)
+
+            wrong_distance = bootstrap_with({"size": 1536, "distance": "Dot"})
+            self.assertNotEqual(wrong_distance.returncode, 0)
 
     def test_scenario_6_versions_and_api_groups_are_pinned(self) -> None:
         versions = yaml.safe_load((ROOT / "deploy/k8s/operator-versions.yaml").read_text())

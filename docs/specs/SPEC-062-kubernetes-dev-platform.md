@@ -222,6 +222,7 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
 | Helm/kubectl/kind assente | preflight fallisce con versione richiesta e link/script, nessuna mutazione |
 | Docker indisponibile | `k8s:validate` resta CPU-only; `k8s:dev:up` fallisce prima di creare cluster |
 | cluster `eci-dev` esistente con node digest o server Kubernetes diverso | bootstrap rifiuta il riuso prima di ogni mutazione; non elimina automaticamente il cluster |
+| kubeconfig corrente stale o ripuntato a un altro cluster | ignorato: kind esporta un kubeconfig temporaneo dal cluster ispezionato e tutte le mutazioni successive usano soltanto quello |
 | secret runtime assente | pod fail-closed/non schedulato; bootstrap stampa solo nomi chiave, mai valori |
 | override password diverso su cluster dev esistente | bootstrap termina prima di riscrivere Secret; la rotazione credenziali deve aggiornare esplicitamente ruolo e consumer |
 | Secret di un sibling riusato o chiave non enumerata | non referenziato dal Pod; review/policy test non-zero |
@@ -243,7 +244,7 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
 | Neo4j Enterprise senza licenza | production-like richiede Secret/licenza; dev usa Community ed è marcato non equivalente |
 | OpenSearch TLS/admin secret errato | nessun fallback a security plugin disabilitato; verifica fallisce |
 | immagine Qdrant non coincide col tag atteso o resta mutabile | post-renderer/install termina prima dell'apply Helm |
-| Qdrant collection già esistente | bootstrap idempotente verifica shard/replica; mismatch fallisce, non ricrea dati |
+| Qdrant collection già esistente | bootstrap idempotente verifica shard/replica, vector size 1536 e distance Cosine; mismatch fallisce, non ricrea dati |
 | PVC/path modello GPU assente | rollout GPU non supera startup/readiness; nessun download/fallback modello |
 | policy OPA assente/non valida | OPA o lo smoke decisionale falliscono; nessun avvio senza policy/default allow |
 | MinIO PVC non provisionabile | StatefulSet resta non Ready; nessun fallback automatico a `emptyDir` |
@@ -310,7 +311,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
 - Vendor runtime: post-render Qdrant richiede esattamente l'immagine attesa e
   rifiuta qualsiasi container non pin-nato per digest.
 - Integration locale: kind pinned e riuso ammesso soltanto dopo verifica di
-  ogni node image digest più versione API server; install operatori/chart pinned, apply
+  ogni node image digest più versione API server tramite kubeconfig derivato
+  dal cluster ispezionato; install operatori/chart pinned, apply
   atomic, `kubectl wait`, probe DNS/TCP/HTTP e raccolta eventi in errore.
 - Regression: `task build`, `task lint`, `task test`, `task guard`; nessuna GPU
   e nessun servizio SaaS nel gate CI.
@@ -480,9 +482,14 @@ serve ADR.
 Il passaggio di review sul riuso del cluster ha inoltre rifiutato l'assunzione
 che il solo nome `eci-dev` provi la toolchain. Il bootstrap risolve per ogni
 container kind l'image ID Docker e richiede che i `RepoDigests` contengano
-l'esatto pin SPEC-062; interroga inoltre il server sul context esplicito e
-richiede `v1.34.0`. Il test comportamentale copre success, digest differente e
-versione differente; il gate è eseguito anche subito dopo una nuova creazione.
+l'esatto pin SPEC-062; esporta un kubeconfig temporaneo direttamente da quel
+cluster e interroga il server soltanto tramite tale file, richiedendo
+`v1.34.0`. Lo stesso kubeconfig diventa il solo target delle mutazioni
+successive. Il test comportamentale copre success, digest differente, versione
+differente e binding del kubeconfig; il gate è eseguito anche subito dopo una
+nuova creazione. Il bootstrap Qdrant valida inoltre la configurazione vettoriale
+esistente (`1536/Cosine`) oltre a shard e replica, con fixture deterministiche
+positive e negative; nessun mismatch causa ricreazione o modifica dei dati.
 
 Il pass security successivo ha individuato due confused-deputy boundary e ha
 prodotto ADR-0019. Le ACL ora rendono Kafka Connect l'unico writer dei topic

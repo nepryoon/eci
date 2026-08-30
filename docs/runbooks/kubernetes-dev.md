@@ -34,7 +34,11 @@ never represented by sleep/placeholder containers.
 
 An existing `eci-dev` cluster is reusable only when every kind node resolves
 through Docker to the exact pinned `kindest/node` repository digest and the
-live API server reports Kubernetes `v1.34.0`. A tag match is not sufficient.
+live API server reports Kubernetes `v1.34.0`. The script first exports a
+temporary kubeconfig directly from that inspected kind cluster, validates the
+server through it, and exports it as `KUBECONFIG` for every later kubectl and
+Helm operation. A caller's current context is never trusted and a tag match is
+not sufficient.
 Any missing metadata, different digest, or version mismatch fails before
 changing context, namespace, Secret, operator, or Helm release. Recreate the
 disposable cluster explicitly with `task k8s:dev:down` followed by
@@ -163,6 +167,12 @@ a client certificate or broker CA, the secret manager updates the composite
 target and the deployment controller rolls that one workload. A stale or
 partially updated identity is a fail-closed outage, never a reason to disable
 mTLS or share another client's Secret.
+
+The Qdrant pre-install/pre-upgrade hook treats an existing
+`code_embeddings` collection as compatible only when shard count,
+replication factor, vector size `1536`, and distance `Cosine` all match the
+runtime contract. A mismatch fails the atomic release; it never recreates or
+silently mutates a collection containing data.
 
 OpenSearch clients need only the public HTTP CA. A local one-off equivalent
 for that separate trust material is:
