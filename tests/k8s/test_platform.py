@@ -691,6 +691,44 @@ class PlatformChartTests(unittest.TestCase):
         self.assertIn("io.debezium.connector.postgresql.PostgresConnector", verify)
         self.assertIn("OPA allow and fail-closed decisions: PASS", verify)
 
+    def test_review_dev_password_override_cannot_desynchronize_existing_cluster(self) -> None:
+        policy = ROOT / "deploy/k8s/lib/dev-password.sh"
+
+        def resolve(stored: str, requested: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; eci_resolve_dev_password "$2" "$3"',
+                    "_",
+                    str(policy),
+                    stored,
+                    requested,
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+        reused = resolve("persisted-password", "")
+        self.assertEqual((reused.returncode, reused.stdout), (0, "persisted-password"))
+
+        identical = resolve("persisted-password", "persisted-password")
+        self.assertEqual((identical.returncode, identical.stdout), (0, "persisted-password"))
+
+        mismatch = resolve("persisted-password", "different-password")
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertEqual(mismatch.stdout, "")
+        self.assertIn("explicit credential rotation", mismatch.stderr)
+
+        fresh = resolve("", "operator-selected-password")
+        self.assertEqual((fresh.returncode, fresh.stdout), (0, "operator-selected-password"))
+
+        up = (ROOT / "deploy/k8s/dev-up.sh").read_text()
+        resolution = 'ECI_DEV_PASSWORD="$(eci_resolve_dev_password'
+        first_runtime_secret_write = "create secret generic eci-runtime"
+        self.assertIn(resolution, up)
+        self.assertLess(up.index(resolution), up.index(first_runtime_secret_write))
+
     def test_scenario_6_versions_and_api_groups_are_pinned(self) -> None:
         versions = yaml.safe_load((ROOT / "deploy/k8s/operator-versions.yaml").read_text())
         self.assertEqual(

@@ -31,6 +31,11 @@ The chart only references credentials. `dev-up.sh` creates ephemeral
 OpenSearch bcrypt hash is generated at install time, so no default credential
 is stored in Git. Production-like installations must provision these named
 Secrets through their deployment environment before installing the chart.
+On a repeated dev install, the password already stored in `eci-runtime` is
+authoritative because the CloudNativePG bootstrap Secret does not rotate an
+existing database role. A different `ECI_DEV_PASSWORD` override is rejected
+before Secret mutation; credential rotation is an explicit out-of-band
+operation, not an implicit Helm upgrade side effect.
 
 Application pods receive non-secret service discovery from the namespace-local
 `eci-runtime-routing` ConfigMap; addresses never default to localhost. They do

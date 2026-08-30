@@ -32,6 +32,14 @@ uses atomic Helm upgrades. Source-built ECI applications are disabled by
 default because no published image is assumed; infrastructure readiness is
 never represented by sleep/placeholder containers.
 
+For a fresh cluster, `ECI_DEV_PASSWORD` may provide the initial disposable
+credential; otherwise the script generates one. For an existing cluster,
+`eci-runtime` is authoritative. Supplying a different override fails before
+any Secret is rewritten because CloudNativePG's `bootstrap.initdb.secret` is
+initialization-only. Rotate the PostgreSQL role and every dependent store and
+Secret through a separately reviewed rotation procedure; `dev-up.sh` never
+performs a partial implicit rotation.
+
 Before a production-like install, provision `eci-postgres-cdc` in
 `data-plane` from the secret manager with exactly `username=eci_cdc` and a
 random `password` key. Do not reuse `eci-runtime` or place the value on a Helm

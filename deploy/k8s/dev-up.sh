@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT_DIR/deploy/k8s/lib/dev-password.sh"
 HELM_BIN="${HELM_BIN:-helm}"
 KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
 KIND_BIN="${KIND_BIN:-kind}"
@@ -18,14 +19,13 @@ fi
 
 "$HELM_BIN" template eci "$ROOT_DIR/deploy/k8s/eci-platform" --show-only templates/namespaces.yaml | "$KUBECTL_BIN" apply -f -
 
-if [[ -z "${ECI_DEV_PASSWORD:-}" ]]; then
-  if "$KUBECTL_BIN" -n data-plane get secret eci-runtime >/dev/null 2>&1; then
-    ECI_DEV_PASSWORD="$("$KUBECTL_BIN" -n data-plane get secret eci-runtime -o jsonpath='{.data.password}' | base64 --decode)"
-    test -n "$ECI_DEV_PASSWORD" || { echo "existing eci-runtime secret has no password" >&2; exit 1; }
-  else
-    ECI_DEV_PASSWORD="$(openssl rand -hex 18)"
-  fi
+ECI_STORED_DEV_PASSWORD=""
+if "$KUBECTL_BIN" -n data-plane get secret eci-runtime >/dev/null 2>&1; then
+  ECI_STORED_DEV_PASSWORD="$("$KUBECTL_BIN" -n data-plane get secret eci-runtime -o jsonpath='{.data.password}' | base64 --decode)"
+  test -n "$ECI_STORED_DEV_PASSWORD" || { echo "existing eci-runtime secret has no password" >&2; exit 1; }
 fi
+ECI_DEV_PASSWORD="$(eci_resolve_dev_password "$ECI_STORED_DEV_PASSWORD" "${ECI_DEV_PASSWORD:-}")"
+unset ECI_STORED_DEV_PASSWORD
 if "$KUBECTL_BIN" -n data-plane get secret eci-postgres-cdc >/dev/null 2>&1; then
   ECI_CDC_PASSWORD="$("$KUBECTL_BIN" -n data-plane get secret eci-postgres-cdc -o jsonpath='{.data.password}' | base64 --decode)"
   test -n "$ECI_CDC_PASSWORD" || { echo "existing eci-postgres-cdc secret has no password" >&2; exit 1; }

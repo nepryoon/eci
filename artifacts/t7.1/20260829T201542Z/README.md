@@ -191,3 +191,9 @@ The closing render review rejects `applications.enabled=true` together with
 trust, or egress contract and therefore cannot claim that topology. This is a
 deterministic fail-closed configuration check and does not alter the revision
 24 live-cluster evidence.
+The dev credential policy also treats the existing `eci-runtime` password as
+authoritative. A differing `ECI_DEV_PASSWORD` is rejected before Secret
+mutation because the CloudNativePG bootstrap Secret cannot rotate the existing
+role. The deterministic unit regression and a real mismatched-override attempt
+against the existing kind cluster both exited non-zero before Secret mutation;
+neither rotated nor disclosed the live cluster credential.

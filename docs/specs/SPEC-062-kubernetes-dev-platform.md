@@ -218,6 +218,7 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
 | Helm/kubectl/kind assente | preflight fallisce con versione richiesta e link/script, nessuna mutazione |
 | Docker indisponibile | `k8s:validate` resta CPU-only; `k8s:dev:up` fallisce prima di creare cluster |
 | secret runtime assente | pod fail-closed/non schedulato; bootstrap stampa solo nomi chiave, mai valori |
+| override password diverso su cluster dev esistente | bootstrap termina prima di riscrivere Secret; la rotazione credenziali deve aggiornare esplicitamente ruolo e consumer |
 | Secret di un sibling riusato o chiave non enumerata | non referenziato dal Pod; review/policy test non-zero |
 | digest chart Helm non corrispondente | installer termina prima della prima mutazione Helm |
 | immagine vuota, tag-only, `latest` o non pin-nata per digest | policy check non-zero |
@@ -376,6 +377,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
 - [x] Il catalogo applicativo non può essere abilitato senza il data plane
       gestito: il chart rifiuta la combinazione anziché renderizzare workload
       privi di identity/egress verso backend esterni non supportati.
+- [x] Un rerun dev riusa la credenziale persistita; un override differente è
+      rifiutato prima di desincronizzare il ruolo PostgreSQL e i Secret runtime.
 - [x] I sink graph/vector/search registrano `processed_events` soltanto dopo
       il write esterno idempotente riuscito; un write fallito resta ritentabile
       e non viene trasformato in falso duplicato. Qdrant richiede applicazione
