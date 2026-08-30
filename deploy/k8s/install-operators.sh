@@ -55,10 +55,18 @@ fi
 
 "$HELM_BIN" upgrade --install strimzi \
   "$CHART_DIR/strimzi-1.2.0.tgz" \
-  --namespace data-plane --wait --atomic --timeout 5m
+  --namespace data-plane \
+  --set-string image.registry=quay.io \
+  --set-string image.repository=strimzi \
+  --set-string image.name=operator \
+  --set-string image.tag=1.2.0@sha256:77f8fa8121a67561c3418de985783d197f51b8931e9a47f793dc0437dc6bb21f \
+  --wait --atomic --timeout 5m
 
 "$HELM_BIN" upgrade --install cloudnative-pg "$CHART_DIR/cloudnative-pg-0.29.0.tgz" \
-  --namespace data-plane --wait --atomic --timeout 5m
+  --namespace data-plane \
+  --set-string image.repository=ghcr.io/cloudnative-pg/cloudnative-pg \
+  --set-string image.tag=1.30.0@sha256:a2701eb97cdd2a34b1fdb2cb51987f544b706e40bec72ae7146cd8580efefebb \
+  --wait --atomic --timeout 5m
 "$HELM_BIN" upgrade --install opensearch-operator "$CHART_DIR/opensearch-operator-2.8.0.tgz" \
   --namespace data-plane \
   --set kubeRbacProxy.image.repository=registry.k8s.io/kubebuilder/kube-rbac-proxy \

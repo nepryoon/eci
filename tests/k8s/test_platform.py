@@ -136,6 +136,18 @@ class PlatformChartTests(unittest.TestCase):
         self.assertEqual(kafka["apiVersion"], "kafka.strimzi.io/v1")
         self.assertEqual(kafka["spec"]["kafka"]["authorization"], {"type": "simple"})
         self.assertEqual(
+            kafka["spec"]["kafka"]["image"],
+            "quay.io/strimzi/kafka@sha256:fef34b5438e8556cc08c01f3e254e47346f061b53a4e38d4289853777e0ea7f1",
+        )
+        self.assertEqual(
+            kafka["spec"]["entityOperator"]["topicOperator"]["image"],
+            "quay.io/strimzi/operator@sha256:77f8fa8121a67561c3418de985783d197f51b8931e9a47f793dc0437dc6bb21f",
+        )
+        self.assertEqual(
+            kafka["spec"]["entityOperator"]["userOperator"]["image"],
+            "quay.io/strimzi/operator@sha256:77f8fa8121a67561c3418de985783d197f51b8931e9a47f793dc0437dc6bb21f",
+        )
+        self.assertEqual(
             kafka["spec"]["kafka"]["listeners"],
             [{"name": "clients", "port": 9093, "type": "internal", "tls": True,
               "authentication": {"type": "tls"}}],
@@ -316,6 +328,14 @@ class PlatformChartTests(unittest.TestCase):
         self.assertIn("NEO4J_ACCEPT_LICENSE_AGREEMENT", installer)
         self.assertIn("NEO4J_GDS_IMAGE", installer)
         self.assertIn("image.customImage=\"$NEO4J_GDS_IMAGE\"", installer)
+        self.assertIn(
+            "1.2.0@sha256:77f8fa8121a67561c3418de985783d197f51b8931e9a47f793dc0437dc6bb21f",
+            installer,
+        )
+        self.assertIn(
+            "1.30.0@sha256:a2701eb97cdd2a34b1fdb2cb51987f544b706e40bec72ae7146cd8580efefebb",
+            installer,
+        )
         gds_dockerfile = (ROOT / "deploy/images/neo4j-gds/Dockerfile").read_text()
         self.assertIn(
             "docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e",

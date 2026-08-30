@@ -86,6 +86,7 @@ metadata:
 spec:
   kafka:
     version: {{ .Values.dataPlane.kafka.version | quote }}
+    image: {{ include "eci.digestImage" (dict "field" "dataPlane.kafka.image" "value" .Values.dataPlane.kafka.image) | quote }}
     metadataVersion: "4.3-IV0"
     listeners:
       - name: clients
@@ -103,8 +104,10 @@ spec:
       default.replication.factor: {{ min 3 .Values.dataPlane.kafka.replicas }}
       min.insync.replicas: {{ min 2 .Values.dataPlane.kafka.replicas }}
   entityOperator:
-    topicOperator: {}
-    userOperator: {}
+    topicOperator:
+      image: {{ include "eci.digestImage" (dict "field" "dataPlane.kafka.operatorImage" "value" .Values.dataPlane.kafka.operatorImage) | quote }}
+    userOperator:
+      image: {{ include "eci.digestImage" (dict "field" "dataPlane.kafka.operatorImage" "value" .Values.dataPlane.kafka.operatorImage) | quote }}
     template:
       pod:
         securityContext:

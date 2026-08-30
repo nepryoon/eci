@@ -133,3 +133,9 @@ an internal-only Docker network; `gds.version()` returned `2.13.12`, logs showed
 the plugin copied from `/opt/eci`, and no URL resolution/download occurred.
 This is offline image-contract evidence, not publication or Enterprise cluster
 evidence; the release image still requires trusted registry publication.
+The subsequent self-adversarial supply-chain pass also pinned the Strimzi and
+CloudNativePG operator manifests plus the Kafka broker and both entity-operator
+containers. The real kind cluster upgraded all verified chart archives to
+revision 13 and ECI to revision 18; Strimzi observed Kafka generation 4 with
+all four runtime container specs on their expected digests, then the complete
+readiness, connectivity, OPA and Kafka allowed/denied smoke passed.

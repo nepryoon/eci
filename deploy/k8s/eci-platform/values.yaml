@@ -222,6 +222,8 @@ dataPlane:
   kafka:
     replicas: 3
     version: "4.3.1"
+    image: quay.io/strimzi/kafka@sha256:fef34b5438e8556cc08c01f3e254e47346f061b53a4e38d4289853777e0ea7f1
+    operatorImage: quay.io/strimzi/operator@sha256:77f8fa8121a67561c3418de985783d197f51b8931e9a47f793dc0437dc6bb21f
     storage: 500Gi
     topicPartitions: 12
   openSearch:
