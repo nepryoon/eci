@@ -1,5 +1,5 @@
 # SPEC-070 — Canonical file delete e tombstone outbox
-Stato: approved
+Stato: implemented
 Task-tree: T7.1a · Servizio: services/ingestion · ADD: Modulo 1 §1.6.4–§1.6.6, §2.2
 Contratti: contracts/jsonschema/ingestion-file-command.json, contracts/sql/migrations/0008_ingestion_file_delete.up.sql
 
@@ -108,13 +108,19 @@ repository, ACL o tombstone payload.
 
 ## 9. Criteri di accettazione
 
-- [ ] Test nuovi rossi contro il runtime UPSERT-only.
-- [ ] `cargo test --manifest-path services/ingestion/Cargo.toml`
+- [x] Test nuovi rossi contro il runtime UPSERT-only.
+- [x] `cargo test --manifest-path services/ingestion/Cargo.toml`
 - [ ] test PostgreSQL `persist_ingestion_delete_command` due volte sullo stesso stato.
-- [ ] `task schema:gen` e output clean.
-- [ ] `task build && task lint && task test && task guard`
+- [x] `task schema:gen` e output clean.
+- [x] `task build && task lint && task test && task guard`
 - [ ] `task test:integration` verde con Docker.
-- [ ] Review avversariale scope/replay/rollback/offset/log completata.
+- [x] Review avversariale scope/replay/rollback/offset/log completata.
+
+L'evidenza CPU e di compilazione e' verde al commit di implementazione. I test
+PostgreSQL coprono scope omonimo cross-tenant, relazioni entranti, quattro tipi
+di tombstone, replay, assenza e rollback tramite failpoint; sono compilati e
+inclusi in `task test:integration`, ma non possono essere dichiarati eseguiti
+senza il daemon Docker richiesto dalla suite.
 
 ## 10. Review avversariale pre-implementazione
 
