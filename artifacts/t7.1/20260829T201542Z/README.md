@@ -33,6 +33,10 @@ Results:
   on the pod IP; plugin discovery through administrative exec: PASS;
 - dedicated CNPG-managed `eci_cdc` role, fixed outbox publication, SELECT-only
   table grant, logical slot and live Debezium connector/task: PASS;
+- migration 0006 consumer-scoped `processed_events` key applied live; a
+  rolled-back probe registered the same event for `embedding-worker` and
+  `sink-search`, while integration tests retain same-consumer dedup and verify
+  fail-closed rollback: PASS;
 - dynamic connectivity probe image pinned by registry digest: PASS;
 - Qdrant live pod spec and imageID match the registry-resolved immutable
   runtime digest: PASS;

@@ -280,6 +280,32 @@ func scenario5DistinctConsumerGroupFanOut(t *testing.T, ctx context.Context, st 
 	if string(msgA.Value) != string(payload) {
 		t.Fatalf("messaggio ricevuto dal gruppo sink-search non combacia col messaggio prodotto")
 	}
+
+	// Simula embedding-worker che ha gia' elaborato la propria copia dello
+	// stesso evento. La deduplica deve essere consumer-scoped: questa riga non
+	// puo' sopprimere il lavoro legittimo di sink-search.
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO processed_events (event_id, consumer_name) VALUES ($1, $2)`,
+		eventID, embeddingWorkerConsumerName,
+	); err != nil {
+		t.Fatalf("registrazione processed_events embedding-worker: %v", err)
+	}
+	outcome, err := consumer.ProcessMessage(ctx, newDeps(st), msgA.Topic, msgA.Value, msgA.Headers)
+	if err != nil {
+		t.Fatalf("ProcessMessage sink-search dopo altro consumer: %v", err)
+	}
+	if outcome != consumer.OutcomeStored {
+		t.Fatalf("outcome sink-search dopo altro consumer = %v, want OutcomeStored", outcome)
+	}
+	var processedCount int
+	if err := st.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM processed_events WHERE event_id = $1`, eventID,
+	).Scan(&processedCount); err != nil {
+		t.Fatalf("conteggio fan-out processed_events: %v", err)
+	}
+	if processedCount != 2 {
+		t.Fatalf("processed_events fan-out = %d, want 2 consumer distinti", processedCount)
+	}
 	if err := sinkSearchReader.CommitMessages(ctx, msgA); err != nil {
 		t.Fatalf("commit offset gruppo sink-search: %v", err)
 	}
@@ -465,9 +491,10 @@ func startPostgres(t *testing.T, ctx context.Context) *sql.DB {
 	}
 	if _, err := db.ExecContext(ctx, `
 		CREATE TABLE processed_events (
-			event_id       UUID PRIMARY KEY,
+			event_id       UUID NOT NULL,
 			consumer_name  TEXT NOT NULL,
-			processed_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+			processed_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+			PRIMARY KEY (event_id, consumer_name)
 		)`); err != nil {
 		t.Fatalf("creazione processed_events: %v", err)
 	}

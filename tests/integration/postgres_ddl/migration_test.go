@@ -12,6 +12,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -120,15 +121,53 @@ func TestPostgresDDLMigration(t *testing.T) {
 		assertPQErrorCode(t, err, "23503", "foreign_key_violation su from_id")
 	})
 
-	// Scenario 6: processed_events, event_id duplicato -> PK violation (dedup).
+	// Scenario 6: la deduplica e' per consumer. Lo stesso evento deve poter
+	// essere elaborato da due consumer distinti (fan-out Kafka), mentre una
+	// redelivery allo stesso consumer deve restare una violazione univoca.
 	t.Run("Scenario6_ProcessedEventsPKDedup", func(t *testing.T) {
 		const eventID = "11111111-1111-1111-1111-111111111111"
 		_, err := db.ExecContext(ctx, `INSERT INTO processed_events (event_id, consumer_name) VALUES ($1, 'sink-graph')`, eventID)
 		if err != nil {
 			t.Fatalf("primo insert in processed_events fallito: %v", err)
 		}
+		_, err = db.ExecContext(ctx, `INSERT INTO processed_events (event_id, consumer_name) VALUES ($1, 'sink-search')`, eventID)
+		if err != nil {
+			t.Fatalf("stesso event_id per consumer distinto deve essere ammesso: %v", err)
+		}
 		_, err = db.ExecContext(ctx, `INSERT INTO processed_events (event_id, consumer_name) VALUES ($1, 'sink-graph')`, eventID)
-		assertPQErrorCode(t, err, "23505", "unique_violation su event_id duplicato")
+		assertPQErrorCode(t, err, "23505", "unique_violation sulla coppia event_id/consumer_name")
+	})
+
+	t.Run("Scenario6_RollbackFailsClosedWithFanOutProvenance", func(t *testing.T) {
+		const eventID = "11111111-1111-1111-1111-111111111111"
+		downSQL, err := os.ReadFile(repoPath(t, "contracts", "sql", "migrations", "0006_consumer_scoped_processed_events.down.sql"))
+		if err != nil {
+			t.Fatalf("lettura down migration 0006: %v", err)
+		}
+		_, err = db.ExecContext(ctx, string(downSQL))
+		assertPQErrorCode(t, err, "P0001", "rollback fail-closed con fan-out gia' registrato")
+
+		if _, err := db.ExecContext(ctx, `
+			DELETE FROM processed_events
+			WHERE event_id = $1 AND consumer_name = 'sink-search'`, eventID); err != nil {
+			t.Fatalf("cleanup controllato fixture fan-out: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, string(downSQL)); err != nil {
+			t.Fatalf("down migration 0006 senza fan-out: %v", err)
+		}
+		_, err = db.ExecContext(ctx, `INSERT INTO processed_events (event_id, consumer_name) VALUES ($1, 'sink-search')`, eventID)
+		assertPQErrorCode(t, err, "23505", "chiave globale ripristinata dalla down migration")
+
+		upSQL, err := os.ReadFile(repoPath(t, "contracts", "sql", "migrations", "0006_consumer_scoped_processed_events.up.sql"))
+		if err != nil {
+			t.Fatalf("lettura up migration 0006: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, string(upSQL)); err != nil {
+			t.Fatalf("ripristino schema 0006 dopo test rollback: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO processed_events (event_id, consumer_name) VALUES ($1, 'sink-search')`, eventID); err != nil {
+			t.Fatalf("ripristino fixture fan-out dopo up migration: %v", err)
+		}
 	})
 
 	// Scenario 4: atomicità. INSERT code_node + INSERT outbox nella stessa
@@ -179,6 +218,16 @@ func TestPostgresDDLMigration(t *testing.T) {
 			t.Errorf("outbox dopo ROLLBACK: count = %d, want 0 (atomicità violata)", count)
 		}
 	})
+
+	// La down migration 0006 rifiuta correttamente di perdere record di
+	// consumer distinti (scenario dedicato sopra). Rimuoviamo qui la sola
+	// fixture fan-out prima del rollback completo.
+	if _, err := db.ExecContext(ctx, `
+		DELETE FROM processed_events
+		WHERE event_id = '11111111-1111-1111-1111-111111111111'
+		  AND consumer_name = 'sink-search'`); err != nil {
+		t.Fatalf("cleanup fixture fan-out prima del rollback: %v", err)
+	}
 
 	// Scenario 2: applico `down` -> tutte le tabelle rimosse senza errori.
 	// `down` senza contatore (non `down 1`, SPEC-027 §10 deviazione: `down

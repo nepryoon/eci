@@ -16,6 +16,7 @@ postgres_wal_level=logical
 postgres_cdc_role=Ready (eci_cdc LOGIN+REPLICATION; no administrative attributes; separate random Secret)
 postgres_cdc_publication=Ready (eci_outbox_publication; public.outbox only)
 postgres_cdc_slot=active (eci_outbox_slot; pgoutput)
+postgres_schema_migration=6 (consumer-scoped processed_events primary key live)
 neo4j=Ready (1/1 dev Community; version 5.26.30)
 qdrant=Ready (1/1 dev; v1.19.0; runtime imageID sha256:a0e04fe623cb064502cd869cefc1dc7ce359d8edd481063b5bd351c0a0a2c91e)
 opensearch=green (1/1 dev; version 3.2.0; Security initialized)

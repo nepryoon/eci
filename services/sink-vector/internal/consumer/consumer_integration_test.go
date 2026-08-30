@@ -431,9 +431,10 @@ func startPostgres(t *testing.T, ctx context.Context) *sql.DB {
 	}
 	if _, err := db.ExecContext(ctx, `
 		CREATE TABLE processed_events (
-			event_id       UUID PRIMARY KEY,
+			event_id       UUID NOT NULL,
 			consumer_name  TEXT NOT NULL,
-			processed_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+			processed_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+			PRIMARY KEY (event_id, consumer_name)
 		)`); err != nil {
 		t.Fatalf("creazione processed_events: %v", err)
 	}

@@ -2,6 +2,7 @@ eci-postgres-rw.data-plane.svc:5432=PASS
 postgres-eci-cdc-role=PASS (LOGIN+REPLICATION; no superuser/createdb/createrole/bypassrls)
 postgres-outbox-publication=PASS (public.outbox only)
 postgres-cdc-select=PASS (public.outbox)
+postgres-processed-events-key=PASS (event_id,consumer_name; same event registered for two consumers in rolled-back probe)
 postgres-logical-slot=PASS (eci_outbox_slot/pgoutput/eci)
 eci-kafka-kafka-bootstrap.data-plane.svc:9093=PASS (mTLS listener)
 kafka-mtls-client-identity=PASS

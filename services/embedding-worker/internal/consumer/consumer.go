@@ -169,7 +169,7 @@ func storeEmbedding(ctx context.Context, deps Deps, eventID, chunkID, entityID s
 	err = tx.QueryRowContext(ctx,
 		`INSERT INTO processed_events (event_id, consumer_name)
 		 VALUES ($1, $2)
-		 ON CONFLICT (event_id) DO NOTHING
+		 ON CONFLICT (event_id, consumer_name) DO NOTHING
 		 RETURNING event_id`,
 		eventID, ConsumerName,
 	).Scan(&returnedEventID)

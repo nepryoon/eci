@@ -13,7 +13,7 @@ Indicizzare su OpenSearch il testo dei chunk (SPEC-029) per ricerca full-text �
 
 **Indice**: nome dichiarato `code_chunks`, creato idempotentemente al via del servizio (stesso principio già stabilito per la collection Qdrant in T3.1) se non esiste. Mapping minimo: `text` (analizzato per full-text), `entity_id`/`provenance`/`chunk_index` (memorizzati, non necessariamente analizzati per full-text).
 
-**Consumer**: stesso scheletro Kafka-consumer+dedup già stabilito (`sink-graph`/`embedding-worker`/`sink-vector`) — consuma `outbox.event.CodeChunk` con un **consumer group id proprio e distinto** da quello di `embedding-worker` (necessario perché entrambi devono ricevere OGNI messaggio indipendentemente — due consumer group diversi sullo stesso topic, non uno condiviso), dedup via `processed_events` (stessa tabella condivisa).
+**Consumer**: stesso scheletro Kafka-consumer+dedup già stabilito (`sink-graph`/`embedding-worker`/`sink-vector`) — consuma `outbox.event.CodeChunk` con un **consumer group id proprio e distinto** da quello di `embedding-worker` (necessario perché entrambi devono ricevere OGNI messaggio indipendentemente — due consumer group diversi sullo stesso topic, non uno condiviso), dedup via `processed_events` (stessa tabella condivisa, chiave `(event_id, consumer_name)` secondo ADR-0021, quindi un consumer non sopprime la copia legittima dell'altro).
 
 ## 3. Comportamento (scenari)
 

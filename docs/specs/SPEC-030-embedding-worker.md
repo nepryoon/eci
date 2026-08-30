@@ -8,7 +8,7 @@ Consumare `outbox.event.CodeChunk` (SPEC-029), chiamare il client di embedding (
 
 ## 2. Interfaccia
 
-**Nuovo servizio Go** `services/embedding-worker/`, stesso scheletro di `sink-graph` (T1.3, SPEC-015) — consumer Kafka del topic `outbox.event.CodeChunk`, dedup via la tabella `processed_events` GIÀ ESISTENTE (stesso meccanismo, stesso `INSERT...ON CONFLICT DO NOTHING RETURNING` — non una nuova tabella di dedup, il meccanismo è già generico per costruzione).
+**Nuovo servizio Go** `services/embedding-worker/`, stesso scheletro di `sink-graph` (T1.3, SPEC-015) — consumer Kafka del topic `outbox.event.CodeChunk`, dedup via la tabella `processed_events` GIÀ ESISTENTE (stesso meccanismo, `INSERT...ON CONFLICT (event_id, consumer_name) DO NOTHING RETURNING` secondo ADR-0021 — non una nuova tabella di dedup, il meccanismo è consumer-scoped per costruzione).
 
 **Client di embedding in Go** (nuovo, piccolo — non un riuso del client Rust di T2.4, che vive in un crate diverso e non è chiamabile da Go): stessa API nativa TEI (`POST {base_url}/embed`, `{"inputs": text}` → `[[float]]`), stesso principio di URL configurabile (fake in sviluppo/test, vero TEI quando disponibile) di T2.4 — nessuna logica nuova, la stessa scelta di design replicata nel linguaggio di questo servizio.
 

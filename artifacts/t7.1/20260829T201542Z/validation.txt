@@ -18,6 +18,7 @@ kafka_primary_producer_provenance_unit=PASS (consumer primary Write absent; own 
 kafka_connect_loopback_only_unit=PASS (no Service; exec probes; dedicated Kafka/PostgreSQL policies)
 postgres_cdc_role_unit=PASS (separate Secret; REPLICATION without admin attributes; no owner credential in Connect)
 postgres_cdc_migration_integration=PASS (fixed publication + SELECT grant + down migration)
+processed_events_consumer_scope_integration=PASS (migration 0006 composite key; same-event fan-out; same-consumer dedup; fail-closed rollback)
 dev_connectivity_probe_image_digest=PASS (registry-resolved netshoot multi-arch digest)
 opensearch_https_ca_basic_auth_unit=PASS
 redis_requirepass_propagation_unit=PASS

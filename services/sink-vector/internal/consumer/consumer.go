@@ -242,7 +242,7 @@ func markProcessed(ctx context.Context, db *sql.DB, eventID string) (isNew bool,
 	err = db.QueryRowContext(ctx,
 		`INSERT INTO processed_events (event_id, consumer_name)
 		 VALUES ($1, $2)
-		 ON CONFLICT (event_id) DO NOTHING
+		 ON CONFLICT (event_id, consumer_name) DO NOTHING
 		 RETURNING event_id`,
 		eventID, ConsumerName,
 	).Scan(&returned)

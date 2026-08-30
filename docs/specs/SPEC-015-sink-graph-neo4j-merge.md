@@ -17,7 +17,7 @@ Popolare `services/sink-graph` con un consumer Kafka che legge da `outbox.event.
 
 Per ogni messaggio:
 1. Estrarre `event_id` (header, UUID) e `trace_id` (header, via `kafkatrace.TraceIDFromHeaders` già esistente).
-2. Dedup atomico: `INSERT INTO processed_events (event_id, consumer_name) VALUES ($1, 'sink-graph') ON CONFLICT (event_id) DO NOTHING RETURNING event_id` — se nessuna riga tornata, il messaggio è già stato processato: salta il MERGE, procedi comunque a fare il commit dell'offset Kafka.
+2. Dedup atomico: `INSERT INTO processed_events (event_id, consumer_name) VALUES ($1, 'sink-graph') ON CONFLICT (event_id, consumer_name) DO NOTHING RETURNING event_id` — se nessuna riga tornata, il messaggio è già stato processato **da questo consumer**: salta il MERGE, procedi comunque a fare il commit dell'offset Kafka. ADR-0021 corregge il vincolo globale originario senza cambiare la semantica di redelivery del singolo consumer.
 3. Se nuovo: parse del payload JSON (stessa forma prodotta da `persist.rs`, T1.2) e MERGE su Neo4j secondo il topic di origine.
 
 **MERGE per `CodeNode`** (topic `outbox.event.CodeNode`): l'etichetta specifica (`node_type` da `payload.ext.node_type`) va validata contro un enum whitelist (`File`, `Class`, `Interface`, `Method`, `Function`) **prima** di essere interpolata nella stringa Cypher — Neo4j non supporta label parametrizzate, ma un valore validato contro un enum noto non è mai un rischio di injection.
