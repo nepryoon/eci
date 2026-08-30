@@ -55,17 +55,51 @@ func TestPostgresDDLMigration(t *testing.T) {
 
 	migrationsDir := repoPath(t, "contracts", "sql", "migrations")
 
-	// Scenario 1: DB vuoto, applico `up` -> le 4 tabelle esistono.
-	runMigrateCLI(t, migrationsDir, dsn, "up")
-
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	db.SetConnMaxLifetime(time.Minute)
+	if _, err := db.ExecContext(ctx, `CREATE ROLE eci_cdc LOGIN REPLICATION NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS`); err != nil {
+		t.Fatalf("creazione ruolo CDC fixture: %v", err)
+	}
+
+	// Scenario 1: DB vuoto, applico `up` -> le 4 tabelle esistono.
+	runMigrateCLI(t, migrationsDir, dsn, "up")
 
 	assertTablesExist(t, db, "code_node", "code_relation", "outbox", "processed_events")
+
+	t.Run("ADR0020_DedicatedCDCReplicationRoleAndFixedPublication", func(t *testing.T) {
+		var replication, superuser, createDB, createRole, bypassRLS bool
+		if err := db.QueryRowContext(ctx, `
+			SELECT rolreplication, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls
+			FROM pg_catalog.pg_roles WHERE rolname = 'eci_cdc'`,
+		).Scan(&replication, &superuser, &createDB, &createRole, &bypassRLS); err != nil {
+			t.Fatalf("lettura attributi eci_cdc: %v", err)
+		}
+		if !replication || superuser || createDB || createRole || bypassRLS {
+			t.Fatalf("attributi eci_cdc inattesi: replication=%v superuser=%v createdb=%v createrole=%v bypassrls=%v", replication, superuser, createDB, createRole, bypassRLS)
+		}
+		var canSelect bool
+		if err := db.QueryRowContext(ctx, `SELECT has_table_privilege('eci_cdc', 'public.outbox', 'SELECT')`).Scan(&canSelect); err != nil {
+			t.Fatalf("verifica SELECT outbox per eci_cdc: %v", err)
+		}
+		if !canSelect {
+			t.Fatal("eci_cdc non ha SELECT su public.outbox")
+		}
+		var publishedTable string
+		if err := db.QueryRowContext(ctx, `
+			SELECT schemaname || '.' || tablename
+			FROM pg_catalog.pg_publication_tables
+			WHERE pubname = 'eci_outbox_publication'`,
+		).Scan(&publishedTable); err != nil {
+			t.Fatalf("lettura publication CDC: %v", err)
+		}
+		if publishedTable != "public.outbox" {
+			t.Fatalf("publication table = %q, want public.outbox", publishedTable)
+		}
+	})
 
 	// Scenario 3: INSERT con domain non valido -> CHECK constraint violation.
 	t.Run("Scenario3_CheckConstraintOnDomain", func(t *testing.T) {
@@ -154,6 +188,13 @@ func TestPostgresDDLMigration(t *testing.T) {
 	// resta corretto indipendentemente da quante migration si accumulano).
 	runMigrateCLI(t, migrationsDir, dsn, "down", "-all")
 	assertTablesAbsent(t, db, "code_node", "code_relation", "outbox", "processed_events")
+	var publicationExists bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = 'eci_outbox_publication')`).Scan(&publicationExists); err != nil {
+		t.Fatalf("verifica drop publication: %v", err)
+	}
+	if publicationExists {
+		t.Fatal("eci_outbox_publication ancora presente dopo migrate down")
+	}
 }
 
 func runMigrateCLI(t *testing.T, migrationsDir, dsn string, args ...string) {

@@ -116,6 +116,10 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    NetworkPolicy non identifica un apiserver esterno, la sorgente portabile è
    `0.0.0.0/0` ma il selector resta limitato ai soli pod operator e il CIDR è
    restringibile per cluster.
+   PostgreSQL riconcilia un ruolo `eci_cdc` dedicato con LOGIN+REPLICATION ma
+   senza privilegi amministrativi; usa un Secret separato dal database owner.
+   La publication outbox è creata dalla migration 0005 e Connect non può
+   auto-crearla.
    Kafka espone soltanto il listener applicativo mTLS 9093 con simple
    authorization deny-by-default. Connect e ogni consumer hanno un
    `KafkaUser` distinto; topic e consumer group sono ACL literal senza
@@ -292,7 +296,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       obbligatori; gap worker D8 dichiarato in ADR-0016/T7.1a, nessun
       placeholder/sleep container o immagine ECI inesistente di default.
 - [x] Debezium/Kafka Connect è pinned, usa una propria identità mTLS/ACL verso Strimzi e non incorpora
-      la password PostgreSQL nella ConfigMap del connector.
+      la password PostgreSQL nella ConfigMap del connector; il ruolo PostgreSQL
+      dedicato `eci_cdc` ha REPLICATION+SELECT outbox senza privilegi owner/admin.
 - [x] OPA carica la policy canonica e lo smoke prova allow + deny fail-closed.
 - [x] MinIO standard è distribuito 4x100 GiB su PVC; dev è 1x1 GiB su PVC.
 - [x] Strimzi, CNPG, OpenSearch Operator, Neo4j e Qdrant hanno versioni pinned.
@@ -411,3 +416,7 @@ primari e assegnano a ogni consumer un retry topic distinto; la REST Connect è
 loopback-only, senza Service, ed esclusa dalla policy data-plane generale. Il
 dev smoke deve provare sia il retry publish consentito sia il primary publish
 negato e ispezionare il plugin soltanto tramite exec amministrativo.
+
+ADR-0020 elimina inoltre il riuso del database owner in Connect: CNPG gestisce
+`eci_cdc` con REPLICATION least-privilege, la migration 0005 crea la publication
+outbox fissa e Connect usa un Secret distinto con autocreation disabilitata.

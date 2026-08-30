@@ -31,6 +31,9 @@ Results:
   denied: PASS;
 - Kafka Connect REST reachable on loopback only, absent as a Service and denied
   on the pod IP; plugin discovery through administrative exec: PASS;
+- dedicated CNPG-managed `eci_cdc` role, fixed outbox publication, SELECT-only
+  table grant, logical slot and live Debezium connector/task: PASS;
+- dynamic connectivity probe image pinned by registry digest: PASS;
 - Qdrant live pod spec and imageID match the registry-resolved immutable
   runtime digest: PASS;
 - OpenSearch operator manager and kube-rbac-proxy live pod spec/imageID match
@@ -97,4 +100,7 @@ retries use five explicit per-consumer topics and consumers have no primary
 Write ACL. ECI release revision 14 binds Kafka Connect REST to loopback, exposes no Service
 and is excluded from the namespace-wide data policy; real allowed/denied
 broker publishes and loopback/pod-IP REST probes passed. Vendor release
-revision 11 remained Ready after the final upgrade.
+revision 12 remained Ready after the final upgrade. ADR-0020 then separated
+the CDC database identity from the owner: ECI revision 15 reconciled the
+least-privilege replication role, migration 0005 and a live connector/slot
+successfully, without exposing the generated password.

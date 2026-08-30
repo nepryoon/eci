@@ -26,6 +26,12 @@ if [[ -z "${ECI_DEV_PASSWORD:-}" ]]; then
     ECI_DEV_PASSWORD="$(openssl rand -hex 18)"
   fi
 fi
+if "$KUBECTL_BIN" -n data-plane get secret eci-postgres-cdc >/dev/null 2>&1; then
+  ECI_CDC_PASSWORD="$("$KUBECTL_BIN" -n data-plane get secret eci-postgres-cdc -o jsonpath='{.data.password}' | base64 --decode)"
+  test -n "$ECI_CDC_PASSWORD" || { echo "existing eci-postgres-cdc secret has no password" >&2; exit 1; }
+else
+  ECI_CDC_PASSWORD="$(openssl rand -hex 18)"
+fi
 ECI_DEV_TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$ECI_DEV_TMP_DIR"' EXIT
 printf '%s\n' \
@@ -44,6 +50,13 @@ for namespace in data-plane query-plane ingestion-plane ingress; do
     --from-env-file="$ECI_DEV_TMP_DIR/runtime.env" \
     --dry-run=client -o yaml | "$KUBECTL_BIN" apply -f - >/dev/null
 done
+printf '%s\n' 'username=eci_cdc' "password=$ECI_CDC_PASSWORD" \
+  >"$ECI_DEV_TMP_DIR/postgres-cdc.env"
+chmod 0600 "$ECI_DEV_TMP_DIR/postgres-cdc.env"
+"$KUBECTL_BIN" -n data-plane create secret generic eci-postgres-cdc \
+  --from-env-file="$ECI_DEV_TMP_DIR/postgres-cdc.env" \
+  --dry-run=client -o yaml | "$KUBECTL_BIN" apply -f - >/dev/null
+unset ECI_CDC_PASSWORD
 
 # Operator 2.8.0 expects its admin identity in the credentials secret and in
 # the supplied security configuration. Generate the bcrypt hash at install

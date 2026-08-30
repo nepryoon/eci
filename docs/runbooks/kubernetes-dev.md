@@ -32,6 +32,13 @@ uses atomic Helm upgrades. Source-built ECI applications are disabled by
 default because no published image is assumed; infrastructure readiness is
 never represented by sleep/placeholder containers.
 
+Before a production-like install, provision `eci-postgres-cdc` in
+`data-plane` from the secret manager with exactly `username=eci_cdc` and a
+random `password` key. Do not reuse `eci-runtime` or place the value on a Helm
+command line. CNPG refuses to reconcile the managed replication role without
+that Secret. The local bootstrap creates and reuses an independent random
+value automatically without printing it.
+
 ## Enabling released ECI applications
 
 The repository does not invent registry digests. A release pipeline must
@@ -233,7 +240,11 @@ kubectl -n data-plane exec -i deployment/kafka-connect -c kafka-connect -- \
 ```
 
 The worker resolves
-`${env:POSTGRES_PASSWORD}` from `eci-runtime`; the ConfigMap and deployment
+`${env:POSTGRES_PASSWORD}` from the dedicated `eci-postgres-cdc` Secret. CNPG
+manages the `eci_cdc` role with LOGIN+REPLICATION but without superuser,
+createdb, createrole or bypassrls. Migration 0005 creates the fixed publication
+on `public.outbox` and grants only SELECT; `publication.autocreate.mode` remains
+disabled. The ConfigMap and deployment
 logs never contain the password. Registration must fail if the table or
 connector plugin is absent, and readiness of the worker alone must not be
 reported as an active CDC stream.

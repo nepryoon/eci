@@ -80,7 +80,7 @@ func securityConsumerScopedRetryNormalizesOriginalTopic(t *testing.T, ctx contex
 		t.Fatalf("first attempt = (%v, %v), want (OutcomeRetried, nil)", outcome, err)
 	}
 
-	retryReader := newReaderWithGroup(brokers, "scoped-retry-group", retryTopic)
+	retryReader := newPartitionReader(brokers, retryTopic)
 	defer retryReader.Close()
 	retry := fetchWithTimeout(t, ctx, retryReader)
 	if retry.Topic != retryTopic {
@@ -170,37 +170,31 @@ func scenario2ExhaustedRetriesGoesToDLQWithMaxCount(t *testing.T, ctx context.Co
 	producer := newWriter(brokers)
 	defer producer.Close()
 
-	produce(t, ctx, producer, topic, "k2", []byte("payload"), nil)
-
 	cfg := resilience.Config{MaxRetries: 2, BackoffBase: 30 * time.Millisecond, RetryTopicSuffix: retrySuffix}
 	alwaysFails := func(context.Context, string, []byte, []kafka.Header) (resilience.Outcome, error) {
 		return 0, errors.New("simulated permanent failure")
 	}
 	wrapped := resilience.WithRetryAndDLQ(cfg, producer, alwaysFails)
 
-	primaryReader := newReaderWithGroup(brokers, "scenario2-primary-group", topic)
-	defer primaryReader.Close()
-	retryReader := newReaderWithGroup(brokers, "scenario2-retry-group", retryTopic)
+	retryReader := newPartitionReader(brokers, retryTopic)
 	defer retryReader.Close()
 
-	for i := 0; i < cfg.MaxRetries; i++ {
-		reader := retryReader
-		if i == 0 {
-			reader = primaryReader
-		}
-		msg := fetchWithTimeout(t, ctx, reader)
+	outcome, err := wrapped(ctx, topic, []byte("payload"), nil)
+	if err != nil || outcome != resilience.OutcomeRetried {
+		t.Fatalf("wrapped al giro 0 = (%v, %v), want (OutcomeRetried, nil)", outcome, err)
+	}
+
+	for i := 1; i < cfg.MaxRetries; i++ {
+		msg := fetchWithTimeout(t, ctx, retryReader)
 		if got := resilience.RetryCount(msg.Headers); got != i {
 			t.Fatalf("retry-count al giro %d = %d, want %d", i, got, i)
 		}
-		outcome, err := wrapped(ctx, msg.Topic, msg.Value, msg.Headers)
+		outcome, err = wrapped(ctx, msg.Topic, msg.Value, msg.Headers)
 		if err != nil {
 			t.Fatalf("wrapped al giro %d: %v", i, err)
 		}
 		if outcome != resilience.OutcomeRetried {
 			t.Fatalf("outcome al giro %d = %v, want OutcomeRetried", i, outcome)
-		}
-		if err := reader.CommitMessages(ctx, msg); err != nil {
-			t.Fatalf("commit al giro %d: %v", i, err)
 		}
 	}
 
@@ -208,18 +202,14 @@ func scenario2ExhaustedRetriesGoesToDLQWithMaxCount(t *testing.T, ctx context.Co
 	if got := resilience.RetryCount(lastMsg.Headers); got != cfg.MaxRetries {
 		t.Fatalf("retry-count dell'ultimo tentativo = %d, want %d", got, cfg.MaxRetries)
 	}
-	outcome, err := wrapped(ctx, lastMsg.Topic, lastMsg.Value, lastMsg.Headers)
+	outcome, err = wrapped(ctx, lastMsg.Topic, lastMsg.Value, lastMsg.Headers)
 	if err != nil {
 		t.Fatalf("wrapped (esaurimento retry): %v", err)
 	}
 	if outcome != resilience.OutcomeDeadLettered {
 		t.Fatalf("outcome = %v, want OutcomeDeadLettered", outcome)
 	}
-	if err := retryReader.CommitMessages(ctx, lastMsg); err != nil {
-		t.Fatalf("commit finale: %v", err)
-	}
-
-	dlqReader := newReaderWithGroup(brokers, "scenario2-dlq-group", topic+".DLQ")
+	dlqReader := newPartitionReader(brokers, topic+".DLQ")
 	defer dlqReader.Close()
 	dlqMsg := fetchWithTimeout(t, ctx, dlqReader)
 	if got := resilience.RetryCount(dlqMsg.Headers); got != cfg.MaxRetries {
@@ -515,6 +505,17 @@ func newReaderWithGroup(brokers []string, groupID, topic string) *kafka.Reader {
 		GroupID:        groupID,
 		GroupTopics:    []string{topic},
 		CommitInterval: 0,
+	})
+}
+
+// newPartitionReader avoids consumer-group coordination in tests that verify
+// Kafka routing rather than offset semantics. This removes coordinator
+// rebalance timing from deterministic retry-topic assertions.
+func newPartitionReader(brokers []string, topic string) *kafka.Reader {
+	return kafka.NewReader(kafka.ReaderConfig{
+		Brokers:   brokers,
+		Topic:     topic,
+		Partition: 0,
 	})
 }
 

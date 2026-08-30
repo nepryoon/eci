@@ -37,6 +37,9 @@ echo 'Debezium PostgreSQL connector plugin through loopback-only REST: PASS'
 postgres_primary="$("$KUBECTL_BIN" -n data-plane get pod -l cnpg.io/instanceRole=primary -o jsonpath='{.items[0].metadata.name}')"
 test -n "$postgres_primary"
 "$KUBECTL_BIN" -n data-plane exec "$postgres_primary" -- psql -U postgres -tAc 'SHOW wal_level' | grep -qx logical
+"$KUBECTL_BIN" -n data-plane exec "$postgres_primary" -- psql -U postgres -tAc \
+  "SELECT rolreplication AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolbypassrls FROM pg_roles WHERE rolname='eci_cdc'" | grep -qx t
+echo 'PostgreSQL dedicated eci_cdc replication role: PASS'
 
 "$KUBECTL_BIN" -n data-plane delete pod eci-connectivity --ignore-not-found --wait=true >/dev/null
 "$KUBECTL_BIN" apply -f - <<'EOF'
@@ -58,7 +61,7 @@ spec:
     seccompProfile: {type: RuntimeDefault}
   containers:
     - name: eci-connectivity
-      image: nicolaka/netshoot:v0.14
+      image: nicolaka/netshoot@sha256:7f08c4aff13ff61a35d30e30c5c1ea8396eac6ab4ce19fd02d5a4b3b5d0d09a2
       securityContext:
         allowPrivilegeEscalation: false
         capabilities: {drop: [ALL]}

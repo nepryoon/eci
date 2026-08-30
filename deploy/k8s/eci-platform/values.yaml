@@ -201,6 +201,7 @@ batch:
 
 cdc:
   enabled: true
+  postgresSecret: eci-postgres-cdc
   image: quay.io/debezium/connect@sha256:698f0559e667a242f962221079e75917b2b7a3ad4de62661e977628da0e33b45
   replicas: 2
   heapOptions: "-Xms256M -Xmx1536M"

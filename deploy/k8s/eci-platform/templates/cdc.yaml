@@ -12,7 +12,7 @@ data:
       "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
       "database.hostname": "eci-postgres-rw.data-plane.svc",
       "database.port": "5432",
-      "database.user": "eci",
+      "database.user": "eci_cdc",
       "database.password": "${env:POSTGRES_PASSWORD}",
       "database.dbname": "eci",
       "topic.prefix": "eci",
@@ -20,7 +20,7 @@ data:
       "plugin.name": "pgoutput",
       "slot.name": "eci_outbox_slot",
       "publication.name": "eci_outbox_publication",
-      "publication.autocreate.mode": "filtered",
+      "publication.autocreate.mode": "disabled",
       "transforms": "outbox",
       "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
       "transforms.outbox.route.by.field": "aggregate_type",
@@ -169,7 +169,7 @@ spec:
             - {name: CONNECT_CONFIG_PROVIDERS_ENV_CLASS, value: "org.apache.kafka.common.config.provider.EnvVarConfigProvider"}
             - name: POSTGRES_PASSWORD
               valueFrom:
-                secretKeyRef: {name: {{ .Values.global.existingSecret }}, key: password}
+                secretKeyRef: {name: {{ .Values.cdc.postgresSecret }}, key: password}
           startupProbe:
             exec:
               command: ["/bin/bash", "-ec", "curl -fsS http://127.0.0.1:8083/connectors >/dev/null"]

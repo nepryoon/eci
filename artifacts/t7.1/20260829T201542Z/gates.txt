@@ -4,8 +4,10 @@ task test=PASS
 task test:integration=PASS
 task guard=PASS
 task k8s:validate=PASS
-task k8s:dev:up=PASS (ECI revision 14; vendor releases revision 11)
-task k8s:dev:verify=PASS (readiness, connectivity, OPA, Kafka mTLS/ACL, scoped retry and loopback-only Connect REST)
+task k8s:dev:up=PASS (ECI revision 15; vendor releases revision 12)
+task k8s:dev:verify=PASS (readiness, connectivity, OPA, Kafka mTLS/ACL, scoped retry, loopback-only Connect REST, dedicated CDC role)
+postgres DDL integration=PASS (migration 0005 publication, least-privilege role grant, rollback)
+live Debezium registration=PASS (connector/task RUNNING; pgoutput slot active)
 go test -tags=integration ./eci/resilience/... -run TestWithRetryAndDLQ=PASS (including ADR-0019 scoped retry)
 OpenSearch operator digest-pinned atomic upgrade=PASS (revision 9; live spec/imageID verified)
 task envoy:validate=PASS

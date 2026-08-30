@@ -88,6 +88,10 @@ configuration is stored separately in `eci-debezium-connector`, uses the
 Kafka environment config provider for the PostgreSQL password, and is not
 submitted before the `public.outbox` migration exists. See the runbook for the
 post-migration registration boundary.
+Its PostgreSQL identity is the CNPG-managed `eci_cdc` role, sourced from the
+separate `eci-postgres-cdc` Secret. Migration 0005 pre-creates the fixed outbox
+publication and grants only SELECT on `public.outbox`; Connect never receives
+the database-owner password.
 
 Each Kafka consumer retries on `{primary}.retry.{consumer}`. Consumers can
 read the primary and their own retry topic, but cannot write any primary topic;

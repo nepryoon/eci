@@ -149,6 +149,15 @@ class PlatformChartTests(unittest.TestCase):
             "ghcr.io/cloudnative-pg/postgresql:17.6@sha256:30b304a2e300ed80b6d1b740e4369e9b0f25599fb518de78c01fd9f25531791b",
         )
         self.assertEqual(postgres["spec"]["postgresql"]["parameters"]["wal_level"], "logical")
+        self.assertEqual(
+            postgres["spec"]["managed"]["roles"],
+            [{
+                "name": "eci_cdc", "ensure": "present", "login": True,
+                "replication": True, "superuser": False, "createdb": False,
+                "createrole": False, "bypassrls": False,
+                "passwordSecret": {"name": "eci-postgres-cdc"},
+            }],
+        )
         self.assertEqual(opensearch["apiVersion"], "opensearch.opster.io/v1")
         self.assertEqual(opensearch["spec"]["nodePools"][0]["replicas"], 3)
         self.assertEqual(
@@ -167,6 +176,13 @@ class PlatformChartTests(unittest.TestCase):
         self.assertEqual(env["CONNECT_SECURITY_PROTOCOL"]["value"], "SSL")
         self.assertEqual(env["CONNECT_CONFIG_PROVIDERS"]["value"], "env")
         self.assertIn("secretKeyRef", env["POSTGRES_PASSWORD"]["valueFrom"])
+        self.assertEqual(
+            env["POSTGRES_PASSWORD"]["valueFrom"]["secretKeyRef"],
+            {"name": "eci-postgres-cdc", "key": "password"},
+        )
+        connector = json.loads(self.by_key[("ConfigMap", "data-plane", "eci-debezium-connector")]["data"]["connector.json"])
+        self.assertEqual(connector["database.user"], "eci_cdc")
+        self.assertEqual(connector["publication.autocreate.mode"], "disabled")
         self.assertEqual(connect_container["securityContext"]["readOnlyRootFilesystem"], True)
         self.assertEqual(env["BOOTSTRAP_SERVERS"]["value"], "eci-kafka-kafka-bootstrap.data-plane.svc:9093")
         self.assertEqual(env["CONNECT_SSL_KEYSTORE_TYPE"]["value"], "PKCS12")
@@ -416,11 +432,22 @@ class PlatformChartTests(unittest.TestCase):
             )
         )
 
+    def test_dev_probe_image_is_immutable(self) -> None:
+        verifier = (ROOT / "deploy/k8s/dev-verify.sh").read_text()
+        self.assertIn(
+            "nicolaka/netshoot@sha256:7f08c4aff13ff61a35d30e30c5c1ea8396eac6ab4ce19fd02d5a4b3b5d0d09a2",
+            verifier,
+        )
+        self.assertNotIn("nicolaka/netshoot:v0.14", verifier)
+
     def test_scenario_7_dev_scripts_preserve_restricted_security_and_random_secrets(self) -> None:
         up = (ROOT / "deploy/k8s/dev-up.sh").read_text()
         verify = (ROOT / "deploy/k8s/dev-verify.sh").read_text()
         self.assertIn("openssl rand -hex", up)
         self.assertIn("get secret eci-runtime", up)
+        self.assertIn("get secret eci-postgres-cdc", up)
+        self.assertIn("create secret generic eci-postgres-cdc", up)
+        self.assertIn("unset ECI_CDC_PASSWORD", up)
         self.assertIn("hash.sh", up)
         self.assertIn("eci-opensearch-security-config", up)
         self.assertNotIn("admin:admin", up)
