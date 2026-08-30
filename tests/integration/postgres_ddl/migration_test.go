@@ -12,6 +12,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -55,17 +56,58 @@ func TestPostgresDDLMigration(t *testing.T) {
 
 	migrationsDir := repoPath(t, "contracts", "sql", "migrations")
 
-	// Scenario 1: DB vuoto, applico `up` -> le 4 tabelle esistono.
-	runMigrateCLI(t, migrationsDir, dsn, "up")
-
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	db.SetConnMaxLifetime(time.Minute)
+	// CNPG keeps this passwordless privilege role present even while CDC is
+	// disabled. The login role is intentionally created only after migrations
+	// to reproduce a supported disabled -> enabled chart upgrade.
+	if _, err := db.ExecContext(ctx, `CREATE ROLE eci_cdc_outbox_reader NOLOGIN NOREPLICATION NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS`); err != nil {
+		t.Fatalf("creazione ruolo privilegi CDC fixture: %v", err)
+	}
+
+	// Scenario 1: DB vuoto, applico `up` -> le 4 tabelle esistono.
+	runMigrateCLI(t, migrationsDir, dsn, "up")
 
 	assertTablesExist(t, db, "code_node", "code_relation", "outbox", "processed_events")
+
+	if _, err := db.ExecContext(ctx, `CREATE ROLE eci_cdc LOGIN REPLICATION NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS IN ROLE eci_cdc_outbox_reader`); err != nil {
+		t.Fatalf("abilitazione ruolo CDC dopo migrations: %v", err)
+	}
+
+	t.Run("ADR0020_DedicatedCDCUpgradeRoleAndFixedPublication", func(t *testing.T) {
+		var replication, superuser, createDB, createRole, bypassRLS bool
+		if err := db.QueryRowContext(ctx, `
+			SELECT rolreplication, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls
+			FROM pg_catalog.pg_roles WHERE rolname = 'eci_cdc'`,
+		).Scan(&replication, &superuser, &createDB, &createRole, &bypassRLS); err != nil {
+			t.Fatalf("lettura attributi eci_cdc: %v", err)
+		}
+		if !replication || superuser || createDB || createRole || bypassRLS {
+			t.Fatalf("attributi eci_cdc inattesi: replication=%v superuser=%v createdb=%v createrole=%v bypassrls=%v", replication, superuser, createDB, createRole, bypassRLS)
+		}
+		var canSelect bool
+		if err := db.QueryRowContext(ctx, `SELECT has_table_privilege('eci_cdc', 'public.outbox', 'SELECT')`).Scan(&canSelect); err != nil {
+			t.Fatalf("verifica SELECT outbox per eci_cdc: %v", err)
+		}
+		if !canSelect {
+			t.Fatal("eci_cdc non ha SELECT su public.outbox")
+		}
+		var publishedTable string
+		if err := db.QueryRowContext(ctx, `
+			SELECT schemaname || '.' || tablename
+			FROM pg_catalog.pg_publication_tables
+			WHERE pubname = 'eci_outbox_publication'`,
+		).Scan(&publishedTable); err != nil {
+			t.Fatalf("lettura publication CDC: %v", err)
+		}
+		if publishedTable != "public.outbox" {
+			t.Fatalf("publication table = %q, want public.outbox", publishedTable)
+		}
+	})
 
 	// Scenario 3: INSERT con domain non valido -> CHECK constraint violation.
 	t.Run("Scenario3_CheckConstraintOnDomain", func(t *testing.T) {
@@ -86,15 +128,53 @@ func TestPostgresDDLMigration(t *testing.T) {
 		assertPQErrorCode(t, err, "23503", "foreign_key_violation su from_id")
 	})
 
-	// Scenario 6: processed_events, event_id duplicato -> PK violation (dedup).
+	// Scenario 6: la deduplica e' per consumer. Lo stesso evento deve poter
+	// essere elaborato da due consumer distinti (fan-out Kafka), mentre una
+	// redelivery allo stesso consumer deve restare una violazione univoca.
 	t.Run("Scenario6_ProcessedEventsPKDedup", func(t *testing.T) {
 		const eventID = "11111111-1111-1111-1111-111111111111"
 		_, err := db.ExecContext(ctx, `INSERT INTO processed_events (event_id, consumer_name) VALUES ($1, 'sink-graph')`, eventID)
 		if err != nil {
 			t.Fatalf("primo insert in processed_events fallito: %v", err)
 		}
+		_, err = db.ExecContext(ctx, `INSERT INTO processed_events (event_id, consumer_name) VALUES ($1, 'sink-search')`, eventID)
+		if err != nil {
+			t.Fatalf("stesso event_id per consumer distinto deve essere ammesso: %v", err)
+		}
 		_, err = db.ExecContext(ctx, `INSERT INTO processed_events (event_id, consumer_name) VALUES ($1, 'sink-graph')`, eventID)
-		assertPQErrorCode(t, err, "23505", "unique_violation su event_id duplicato")
+		assertPQErrorCode(t, err, "23505", "unique_violation sulla coppia event_id/consumer_name")
+	})
+
+	t.Run("Scenario6_RollbackFailsClosedWithFanOutProvenance", func(t *testing.T) {
+		const eventID = "11111111-1111-1111-1111-111111111111"
+		downSQL, err := os.ReadFile(repoPath(t, "contracts", "sql", "migrations", "0006_consumer_scoped_processed_events.down.sql"))
+		if err != nil {
+			t.Fatalf("lettura down migration 0006: %v", err)
+		}
+		_, err = db.ExecContext(ctx, string(downSQL))
+		assertPQErrorCode(t, err, "P0001", "rollback fail-closed con fan-out gia' registrato")
+
+		if _, err := db.ExecContext(ctx, `
+			DELETE FROM processed_events
+			WHERE event_id = $1 AND consumer_name = 'sink-search'`, eventID); err != nil {
+			t.Fatalf("cleanup controllato fixture fan-out: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, string(downSQL)); err != nil {
+			t.Fatalf("down migration 0006 senza fan-out: %v", err)
+		}
+		_, err = db.ExecContext(ctx, `INSERT INTO processed_events (event_id, consumer_name) VALUES ($1, 'sink-search')`, eventID)
+		assertPQErrorCode(t, err, "23505", "chiave globale ripristinata dalla down migration")
+
+		upSQL, err := os.ReadFile(repoPath(t, "contracts", "sql", "migrations", "0006_consumer_scoped_processed_events.up.sql"))
+		if err != nil {
+			t.Fatalf("lettura up migration 0006: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, string(upSQL)); err != nil {
+			t.Fatalf("ripristino schema 0006 dopo test rollback: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO processed_events (event_id, consumer_name) VALUES ($1, 'sink-search')`, eventID); err != nil {
+			t.Fatalf("ripristino fixture fan-out dopo up migration: %v", err)
+		}
 	})
 
 	// Scenario 4: atomicità. INSERT code_node + INSERT outbox nella stessa
@@ -146,6 +226,16 @@ func TestPostgresDDLMigration(t *testing.T) {
 		}
 	})
 
+	// La down migration 0006 rifiuta correttamente di perdere record di
+	// consumer distinti (scenario dedicato sopra). Rimuoviamo qui la sola
+	// fixture fan-out prima del rollback completo.
+	if _, err := db.ExecContext(ctx, `
+		DELETE FROM processed_events
+		WHERE event_id = '11111111-1111-1111-1111-111111111111'
+		  AND consumer_name = 'sink-search'`); err != nil {
+		t.Fatalf("cleanup fixture fan-out prima del rollback: %v", err)
+	}
+
 	// Scenario 2: applico `down` -> tutte le tabelle rimosse senza errori.
 	// `down` senza contatore (non `down 1`, SPEC-027 §10 deviazione: `down
 	// 1` annullava correttamente TUTTO finché esisteva una sola migration;
@@ -154,6 +244,13 @@ func TestPostgresDDLMigration(t *testing.T) {
 	// resta corretto indipendentemente da quante migration si accumulano).
 	runMigrateCLI(t, migrationsDir, dsn, "down", "-all")
 	assertTablesAbsent(t, db, "code_node", "code_relation", "outbox", "processed_events")
+	var publicationExists bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = 'eci_outbox_publication')`).Scan(&publicationExists); err != nil {
+		t.Fatalf("verifica drop publication: %v", err)
+	}
+	if publicationExists {
+		t.Fatal("eci_outbox_publication ancora presente dopo migrate down")
+	}
 }
 
 func runMigrateCLI(t *testing.T, migrationsDir, dsn string, args ...string) {

@@ -87,6 +87,44 @@ func TestSinkGraphConsumer(t *testing.T) {
 	t.Run("T6_7_ConcurrentScopeReadsSerializeAfterEntityLocks", func(t *testing.T) {
 		t67ConcurrentScopeReadsSerializeAfterEntityLocks(t, ctx, st)
 	})
+	t.Run("Review_FailedNeo4jWriteDoesNotMarkProcessed", func(t *testing.T) {
+		reviewFailedNeo4jWriteDoesNotMarkProcessed(t, st)
+	})
+}
+
+func reviewFailedNeo4jWriteDoesNotMarkProcessed(t *testing.T, st *stack) {
+	eventID := uniqueEventID(t)
+	driver, err := neo4j.NewDriverWithContext(
+		"bolt://127.0.0.1:1",
+		neo4j.BasicAuth("neo4j", neo4jAdminPassword, ""),
+	)
+	if err != nil {
+		t.Fatalf("NewDriverWithContext: %v", err)
+	}
+	defer driver.Close(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = consumer.ProcessMessage(
+		ctx,
+		consumer.Deps{DB: st.db, Neo4j: driver, Logf: t.Logf},
+		consumer.TopicCodeNode,
+		codeNodePayload(uniqueID(t, "failed-write"), "FailedWrite", "Method", "go", "failed.go"),
+		[]kafka.Header{{Key: "event_id", Value: []byte(eventID)}},
+	)
+	if err == nil {
+		t.Fatal("expected unreachable Neo4j write to fail")
+	}
+	var count int
+	if err := st.db.QueryRowContext(context.Background(),
+		"SELECT count(*) FROM processed_events WHERE event_id = $1 AND consumer_name = $2",
+		eventID, consumer.ConsumerName,
+	).Scan(&count); err != nil {
+		t.Fatalf("query processed marker: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("processed marker count after failed Neo4j write = %d, want 0", count)
+	}
 }
 
 func t67GDSPartitionInvalidatedOnScopeAndTopologyMutation(t *testing.T, ctx context.Context, st *stack) {
@@ -516,6 +554,27 @@ func scenario2RedeliveryDoesNotDuplicate(t *testing.T, ctx context.Context, st *
 	countAfterFirst := countNodesWithID(t, ctx, st.driver, nodeID)
 	if countAfterFirst != 1 {
 		t.Fatalf("nodi con id=%s dopo la prima consegna = %d, want 1", nodeID, countAfterFirst)
+	}
+
+	// Simula il solo failure window tra MERGE Neo4j riuscito e marker
+	// PostgreSQL: la ripetizione applica nuovamente lo stesso MERGE, ma non deve
+	// invalidare una seconda volta la partizione GDS se il grafo non cambia.
+	generationAfterFirst := readPartitionGeneration(t, ctx, st.driver, aclPlaceholder)
+	if _, err := st.db.ExecContext(ctx,
+		`DELETE FROM processed_events WHERE event_id = $1 AND consumer_name = $2`,
+		eventID, consumer.ConsumerName,
+	); err != nil {
+		t.Fatalf("rimozione marker per simulare failure window: %v", err)
+	}
+	replayOutcome, err := consumer.ProcessMessage(ctx, deps, msg1.Topic, msg1.Value, msg1.Headers)
+	if err != nil {
+		t.Fatalf("ProcessMessage dopo marker failure simulata: %v", err)
+	}
+	if replayOutcome != consumer.OutcomeMerged {
+		t.Fatalf("replay outcome = %v, want OutcomeMerged", replayOutcome)
+	}
+	if generationAfterReplay := readPartitionGeneration(t, ctx, st.driver, aclPlaceholder); generationAfterReplay != generationAfterFirst {
+		t.Fatalf("generation dopo MERGE idempotente = %d, want %d", generationAfterReplay, generationAfterFirst)
 	}
 
 	// "Riavvio": nuovo reader, STESSO group id — l'offset non committato

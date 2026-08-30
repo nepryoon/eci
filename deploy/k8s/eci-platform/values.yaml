@@ -1,0 +1,254 @@
+global:
+  imageRegistry: ghcr.io/nepryoon/eci
+  # Application images are intentionally unset: an installation may enable
+  # applications only with registry-issued OCI digests from its release job.
+  imageReferences:
+    api-gateway: ""
+    retrieval-engine: ""
+    llm-gateway: ""
+    semantic-cache: ""
+    ingestion: ""
+    embedding-worker: ""
+    sink-graph: ""
+    sink-vector: ""
+    sink-search: ""
+    gds-impact: ""
+  existingSecret: eci-runtime
+  storageClass: ""
+  profile: production-like
+  highAvailability: true
+  neo4jEdition: enterprise
+
+namespaces:
+  create: true
+
+# The bundled IdP exists only in the reduced dev profile. dev-up provisions a
+# short-lived certificate Secret; no private key is rendered or committed.
+devIdentity:
+  tlsSecret: eci-keycloak-tls
+
+applications:
+  enabled: false
+  workloads:
+    - name: api-gateway
+      namespace: ingress
+      port: 8081
+      metricsPort: 9107
+      replicas: 2
+      profile: io
+      runtimeSecret: eci-runtime-api-gateway
+      secretEnv:
+        - {name: ECI_OIDC_ISSUER, key: ECI_OIDC_ISSUER}
+        - {name: ECI_OIDC_AUDIENCE, key: ECI_OIDC_AUDIENCE}
+    - name: retrieval-engine
+      namespace: query-plane
+      port: 50053
+      metricsPort: 9105
+      replicas: 4
+      profile: io
+      runtimeSecret: eci-runtime-retrieval-engine
+      secretEnv:
+        - {name: NEO4J_USER, key: NEO4J_USER}
+        - {name: NEO4J_PASSWORD, key: NEO4J_PASSWORD}
+        - {name: OPENSEARCH_USERNAME, key: OPENSEARCH_USERNAME}
+        - {name: OPENSEARCH_PASSWORD, key: OPENSEARCH_PASSWORD}
+    - {name: llm-gateway, namespace: query-plane, port: 8002, replicas: 2, profile: io}
+    - name: semantic-cache
+      namespace: query-plane
+      port: 50054
+      metricsPort: 9106
+      replicas: 2
+      profile: io
+      runtimeSecret: eci-runtime-semantic-cache
+      secretEnv: [{name: REDIS_PASSWORD, key: REDIS_PASSWORD}]
+    - name: embedding-worker
+      namespace: ingestion-plane
+      port: 9102
+      metricsPort: 9102
+      replicas: 2
+      profile: io
+      runtimeSecret: eci-runtime-embedding-worker
+      secretEnv: [{name: POSTGRES_DSN, key: POSTGRES_DSN}]
+    - name: sink-graph
+      namespace: ingestion-plane
+      port: 9101
+      metricsPort: 9101
+      replicas: 2
+      profile: io
+      runtimeSecret: eci-runtime-sink-graph
+      secretEnv:
+        - {name: POSTGRES_DSN, key: POSTGRES_DSN}
+        - {name: NEO4J_USER, key: NEO4J_USER}
+        - {name: NEO4J_PASSWORD, key: NEO4J_PASSWORD}
+    - name: sink-vector
+      namespace: ingestion-plane
+      port: 9103
+      metricsPort: 9103
+      replicas: 2
+      profile: io
+      runtimeSecret: eci-runtime-sink-vector
+      secretEnv: [{name: POSTGRES_DSN, key: POSTGRES_DSN}]
+    - name: sink-search
+      namespace: ingestion-plane
+      port: 9104
+      metricsPort: 9104
+      replicas: 2
+      profile: io
+      runtimeSecret: eci-runtime-sink-search
+      secretEnv:
+        - {name: POSTGRES_DSN, key: POSTGRES_DSN}
+        - {name: OPENSEARCH_USERNAME, key: OPENSEARCH_USERNAME}
+        - {name: OPENSEARCH_PASSWORD, key: OPENSEARCH_PASSWORD}
+    - name: vllm
+      namespace: gpu-plane
+      image: "vllm/vllm-openai@sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14"
+      port: 8000
+      metricsPort: 8000
+      replicas: 1
+      profile: gpu-vllm
+      modelPVC: eci-gpu-models
+      args:
+        - /models/qwen3-coder-30b-a3b-instruct-fp8
+        - --served-model-name
+        - eci-qwen3-coder-30b-a3b-fp8
+        - --host
+        - 0.0.0.0
+        - --port
+        - "8000"
+        - --kv-cache-dtype
+        - fp8
+    - name: embedder
+      namespace: gpu-plane
+      image: "ghcr.io/huggingface/text-embeddings-inference@sha256:274104f179b88e2fdfc20e4d1e5273098f1cbcc2385fdef1687558413af85639"
+      port: 80
+      metricsPort: 80
+      replicas: 1
+      profile: gpu-small
+      modelPVC: eci-gpu-models
+      args: [--model-id, /models/jina-code-embeddings-1.5b]
+    - name: reranker
+      namespace: gpu-plane
+      image: "ghcr.io/huggingface/text-embeddings-inference@sha256:274104f179b88e2fdfc20e4d1e5273098f1cbcc2385fdef1687558413af85639"
+      port: 80
+      metricsPort: 80
+      replicas: 1
+      profile: gpu-small
+      modelPVC: eci-gpu-models
+      args: [--model-id, /models/bge-reranker-v2-m3]
+
+edge:
+  enabled: true
+  image: "envoyproxy/envoy@sha256:d59f7f5fa10cff6d5892b6c5e7df5c9297ddfb2c3683e33fbfb82da24de4fa66"
+  configMap: eci-envoy-config
+  tlsSecret: eci-envoy-tls
+  replicas: 2
+  port: 8080
+  metricsPort: 9901
+
+routing:
+  opaURL: http://opa.query-plane.svc.cluster.local:8181
+  retrievalAddress: retrieval-engine.query-plane.svc.cluster.local:50053
+  # The production-like Neo4j chart installs one server per release. The
+  # routing driver bootstraps from one primary and discovers the remaining
+  # cluster members. GDS batch work is pinned to the dedicated secondary.
+  neo4jURI: neo4j://neo4j-core-1.data-plane.svc.cluster.local:7687
+  neo4jGDSURI: bolt://neo4j-gds.data-plane.svc.cluster.local:7687
+  qdrantHost: qdrant.data-plane.svc.cluster.local
+  qdrantGRPCPort: "6334"
+  embeddingServiceURL: http://embedder.gpu-plane.svc.cluster.local:80
+  rerankerServiceURL: http://reranker.gpu-plane.svc.cluster.local:80
+  openSearchURL: https://eci-opensearch.data-plane.svc.cluster.local:9200
+  redisAddress: redis.data-plane.svc.cluster.local:6379
+  kafkaBrokers: eci-kafka-kafka-bootstrap.data-plane.svc.cluster.local:9093
+  kafkaTLSSecretPrefix: eci-kafka
+  openSearchTLSSecret: eci-opensearch-client-ca
+  vllmURL: http://vllm.gpu-plane.svc.cluster.local:8000/v1
+  # Resolve the trusted external issuer or an egress proxy to explicit CIDRs.
+  # Applications outside the bundled dev profile fail to render when this list
+  # is empty. Dev reaches only its in-cluster Keycloak through a pod-selected
+  # NetworkPolicy and must not add an external CIDR exception.
+  oidcIssuerEgressCIDRs: []
+
+resources:
+  io:
+    requests: {cpu: "1", memory: 2Gi}
+    limits: {cpu: "4", memory: 8Gi}
+  cpu:
+    requests: {cpu: "4", memory: 8Gi}
+    limits: {cpu: "8", memory: 12Gi}
+  gpu-vllm:
+    requests: {cpu: "16", memory: 96Gi, nvidia.com/gpu: "1"}
+    limits: {cpu: "24", memory: 120Gi, nvidia.com/gpu: "1"}
+  gpu-small:
+    requests: {cpu: "4", memory: 16Gi, nvidia.com/mig-1g.10gb: "1"}
+    limits: {cpu: "8", memory: 24Gi, nvidia.com/mig-1g.10gb: "1"}
+  java:
+    requests: {cpu: "1", memory: 1Gi}
+    limits: {cpu: "2", memory: 2Gi}
+
+batch:
+  ingestion:
+    schedule: "0 0 31 2 *"
+    sourcePVC: eci-ingestion-source
+    sourcePath: /input/source
+    runtimeSecret: eci-runtime-ingestion
+    secretEnv:
+      - {name: POSTGRES_DSN, key: POSTGRES_DSN}
+      - {name: ECI_TENANT_ID, key: ECI_TENANT_ID}
+      - {name: ECI_REPOSITORY, key: ECI_REPOSITORY}
+      - {name: ECI_ACL_GROUP, key: ECI_ACL_GROUP}
+    profile: cpu
+  gds:
+    schedule: "0 2 * * *"
+    profile: io
+    runtimeSecret: eci-runtime-gds-impact
+    secretEnv:
+      - {name: NEO4J_USER, key: NEO4J_USER}
+      - {name: NEO4J_PASSWORD, key: NEO4J_PASSWORD}
+      - {name: ECI_GDS_ENTRY_NODE_ID, key: ECI_GDS_ENTRY_NODE_ID}
+      - {name: ECI_GDS_TENANT_ID, key: ECI_GDS_TENANT_ID}
+      - {name: ECI_GDS_REPOSITORY, key: ECI_GDS_REPOSITORY}
+      - {name: ECI_GDS_ACL_GROUP, key: ECI_GDS_ACL_GROUP}
+
+cdc:
+  enabled: true
+  postgresSecret: eci-postgres-cdc
+  image: quay.io/debezium/connect@sha256:698f0559e667a242f962221079e75917b2b7a3ad4de62661e977628da0e33b45
+  # Loopback-only REST cannot advertise a worker-reachable leader URL.
+  replicas: 1
+  heapOptions: "-Xms256M -Xmx1536M"
+  resources:
+    requests: {cpu: "1", memory: 1Gi}
+    limits: {cpu: "2", memory: 2Gi}
+
+dataPlane:
+  enabled: true
+  redis: {storage: 20Gi}
+  postgres:
+    instances: 3
+    image: ghcr.io/cloudnative-pg/postgresql:17.6@sha256:30b304a2e300ed80b6d1b740e4369e9b0f25599fb518de78c01fd9f25531791b
+    storage: 100Gi
+  kafka:
+    replicas: 3
+    version: "4.3.1"
+    image: quay.io/strimzi/kafka@sha256:fef34b5438e8556cc08c01f3e254e47346f061b53a4e38d4289853777e0ea7f1
+    operatorImage: quay.io/strimzi/operator@sha256:77f8fa8121a67561c3418de985783d197f51b8931e9a47f793dc0437dc6bb21f
+    storage: 500Gi
+    topicPartitions: 12
+  openSearch:
+    replicas: 3
+    version: "3.2.0"
+    image: docker.io/opensearchproject/opensearch@sha256:23297b8d8545e129dd58c254ed08d786dc552410ba772983ad2af31048d2f04b
+    storage: 30Gi
+    adminCredentialsSecret: eci-opensearch-admin
+    securityConfigSecret: eci-opensearch-security-config
+    resources:
+      requests: {cpu: "2", memory: 4Gi}
+      limits: {cpu: "8", memory: 32Gi}
+  minio:
+    image: minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    replicas: 4
+    storage: 100Gi
+  qdrant:
+    shardNumber: 3
+    replicationFactor: 2

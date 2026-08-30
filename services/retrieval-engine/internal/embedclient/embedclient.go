@@ -34,6 +34,27 @@ func New(baseURL string) *Client {
 	return &Client{BaseURL: baseURL, HTTPClient: http.DefaultClient}
 }
 
+// Health calls TEI's native model health endpoint without generating an
+// embedding. It is suitable for frequent readiness checks because it does not
+// enqueue inference work.
+func (c *Client) Health(ctx context.Context) error {
+	url := c.BaseURL + "/health"
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("embedclient: costruzione health GET %s: %w", url, err)
+	}
+	response, err := c.HTTPClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("embedclient: health GET %s: %w", url, err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("embedclient: health GET %s: status %d", url, response.StatusCode)
+	}
+	return nil
+}
+
 // Embed chiama POST {base_url}/embed con {"inputs": text} e ritorna il primo
 // vettore della risposta. Un errore ritornato include sempre il contesto
 // (URL + causa) — mai un dettaglio silente perso, mai un vettore vuoto

@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	kafka "github.com/segmentio/kafka-go"
@@ -31,8 +32,32 @@ const (
 // Config configura WithRetryAndDLQ (SPEC-035 §2). Zero value -> default
 // (MaxRetries=5, BackoffBase=1s, che produce i ritardi 1s,2s,4s,8s,16s).
 type Config struct {
-	MaxRetries  int
-	BackoffBase time.Duration
+	MaxRetries       int
+	BackoffBase      time.Duration
+	RetryTopicSuffix string
+	// ShouldRetry can reserve infrastructure-unavailability errors for the
+	// caller, which must then leave the source offset uncommitted. Nil keeps
+	// the historical behavior: every processing error is retried/DLQed.
+	ShouldRetry func(error) bool
+}
+
+// RetryTopic returns a consumer-scoped retry topic. An empty suffix preserves
+// the verified SPEC-035 same-topic behavior for compatibility; production
+// consumers set a unique suffix so they never need Write on a shared primary.
+func RetryTopic(topic, suffix string) string {
+	if suffix == "" {
+		return topic
+	}
+	return OriginalTopic(topic, suffix) + suffix
+}
+
+// OriginalTopic normalizes a message read from a scoped retry topic before
+// invoking the existing ProcessFunc, whose topic allow-list remains unchanged.
+func OriginalTopic(topic, suffix string) string {
+	if suffix != "" && strings.HasSuffix(topic, suffix) {
+		return strings.TrimSuffix(topic, suffix)
+	}
+	return topic
 }
 
 func (c Config) withDefaults() Config {
@@ -61,7 +86,7 @@ const (
 	// nessun retry necessario.
 	OutcomeProcessed Outcome = iota
 	// OutcomeRetried: la ProcessFunc interna ha fallito, il messaggio è
-	// stato ripubblicato sullo STESSO topic con retry-count incrementato.
+	// stato ripubblicato sul retry topic configurato con retry-count incrementato.
 	OutcomeRetried
 	// OutcomeDeadLettered: la ProcessFunc interna ha fallito con
 	// retry-count già a MaxRetries, il messaggio è stato pubblicato su
@@ -77,7 +102,9 @@ const (
 type ProcessFunc func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (Outcome, error)
 
 // WithRetryAndDLQ avvolge inner (SPEC-035 §2): su successo, ritorna
-// direttamente il risultato di inner. Su errore, legge il retry-count
+// direttamente il risultato di inner. Se ShouldRetry rifiuta l'errore, lo
+// propaga senza pubblicare e il chiamante deve lasciare l'offset non
+// committato. Sugli altri errori legge il retry-count
 // dagli header (assente o non numerico = 0, §4 edge case — fail-safe, mai
 // un crash), applica un backoff ESPONENZIALE SINCRONO (`BackoffBase *
 // 2^retryCount` — l'unico modo di produrre un ritardo reale osservabile
@@ -85,7 +112,7 @@ type ProcessFunc func(ctx context.Context, topic string, value []byte, headers [
 // esplicito di §2 "via header sul messaggio stesso, non stato in
 // Postgres": la funzione blocca il chiamante per la durata del backoff),
 // poi:
-//   - se retryCount < MaxRetries: ripubblica sullo STESSO topic con
+//   - se retryCount < MaxRetries: ripubblica sul retry topic deterministico con
 //     l'header incrementato di esattamente 1 (mai un doppio incremento,
 //     §3 scenario 4) e ritorna (OutcomeRetried, nil) — l'offset
 //     ORIGINALE viene commesso dal chiamante, il messaggio riappare più
@@ -116,9 +143,13 @@ func WithRetryAndDLQ(cfg Config, producer *kafka.Writer, inner ProcessFunc) Proc
 	cfg = cfg.withDefaults()
 
 	return func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (Outcome, error) {
-		outcome, err := inner(ctx, topic, value, headers)
+		originalTopic := OriginalTopic(topic, cfg.RetryTopicSuffix)
+		outcome, err := inner(ctx, originalTopic, value, headers)
 		if err == nil {
 			return outcome, nil
+		}
+		if cfg.ShouldRetry != nil && !cfg.ShouldRetry(err) {
+			return outcome, err
 		}
 
 		retryCount := RetryCount(headers)
@@ -132,17 +163,18 @@ func WithRetryAndDLQ(cfg Config, producer *kafka.Writer, inner ProcessFunc) Proc
 			}
 
 			retryHeaders := withRetryCountHeader(headers, retryCount+1)
+			retryTopic := RetryTopic(originalTopic, cfg.RetryTopicSuffix)
 			if pubErr := producer.WriteMessages(ctx, kafka.Message{
-				Topic:   topic,
+				Topic:   retryTopic,
 				Value:   value,
 				Headers: retryHeaders,
 			}); pubErr != nil {
-				return OutcomeRetried, fmt.Errorf("resilience: publish di retry su %q (tentativo %d): %w", topic, retryCount+1, pubErr)
+				return OutcomeRetried, fmt.Errorf("resilience: publish di retry su %q (tentativo %d): %w", retryTopic, retryCount+1, pubErr)
 			}
 			return OutcomeRetried, nil
 		}
 
-		dlqTopic := topic + ".DLQ"
+		dlqTopic := originalTopic + ".DLQ"
 		dlqHeaders := withRetryCountHeader(headers, retryCount)
 		if pubErr := producer.WriteMessages(ctx, kafka.Message{
 			Topic:   dlqTopic,

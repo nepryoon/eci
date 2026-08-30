@@ -1,0 +1,212 @@
+{{- if .Values.applications.enabled }}
+{{- if not .Values.dataPlane.enabled }}
+{{- fail "applications.enabled=true requires dataPlane.enabled=true; external data-plane routing and egress are not implemented" }}
+{{- end }}
+{{- range $workload := .Values.applications.workloads }}
+{{- with $workload.secretEnv }}
+{{- $expectedSecret := printf "eci-runtime-%s" $workload.name }}
+{{- if ne (default "" $workload.runtimeSecret) $expectedSecret }}
+{{- fail (printf "applications.workloads[%s].runtimeSecret must be %s for per-workload isolation" $workload.name $expectedSecret) }}
+{{- end }}
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $workload.name }}
+  namespace: {{ $workload.namespace }}
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $workload.name }}
+  namespace: {{ $workload.namespace }}
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+    app.kubernetes.io/name: {{ $workload.name }}
+spec:
+  replicas: {{ $workload.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  selector:
+    matchLabels:
+      {{- include "eci.selectorLabels" (dict "name" $workload.name) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "eci.selectorLabels" (dict "name" $workload.name) | nindent 8 }}
+      {{- if $workload.metricsPort }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ $workload.metricsPort | quote }}
+        prometheus.io/path: /metrics
+      {{- end }}
+    spec:
+      serviceAccountName: {{ $workload.name }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "eci.podSecurityContext" $ | nindent 8 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "eci.selectorLabels" (dict "name" $workload.name) | nindent 14 }}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "eci.selectorLabels" (dict "name" $workload.name) | nindent 14 }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "eci.selectorLabels" (dict "name" $workload.name) | nindent 20 }}
+      containers:
+        - name: {{ $workload.name }}
+          image: {{ include "eci.image" (dict "root" $ "workload" $workload) | quote }}
+          imagePullPolicy: IfNotPresent
+          {{- with $workload.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- include "eci.containerSecurityContext" $ | nindent 12 }}
+          ports:
+            - {name: service, containerPort: {{ $workload.port }}}
+            {{- if and $workload.metricsPort (ne (int $workload.metricsPort) (int $workload.port)) }}
+            - {name: metrics, containerPort: {{ $workload.metricsPort }}}
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: eci-runtime-routing
+          {{- with $workload.secretEnv }}
+          env:
+            {{- range $secret := . }}
+            - name: {{ $secret.name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required (printf "applications.workloads[%s].runtimeSecret is required when secretEnv is set" $workload.name) $workload.runtimeSecret }}
+                  key: {{ $secret.key }}
+            {{- end }}
+            {{- if and (eq $.Values.global.profile "dev") (eq $workload.name "api-gateway") }}
+            # Preserve the image's public trust roots while adding the public
+            # certificate of the bundled development issuer.
+            - {name: SSL_CERT_DIR, value: "/etc/eci/oidc:/etc/ssl/certs"}
+            {{- end }}
+          {{- end }}
+          readinessProbe:
+            {{- if or (eq $workload.name "semantic-cache") (eq $workload.name "retrieval-engine") (eq $workload.name "llm-gateway") }}
+            httpGet: {path: /ready, port: {{ ternary "service" "metrics" (eq $workload.name "llm-gateway") }}, scheme: HTTP}
+            {{- else if eq $workload.namespace "ingestion-plane" }}
+            httpGet: {path: /ready, port: service, scheme: HTTP}
+            {{- else }}
+            tcpSocket: {port: service}
+            {{- end }}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          startupProbe:
+            {{- if or (eq $workload.name "semantic-cache") (eq $workload.name "retrieval-engine") (eq $workload.name "llm-gateway") }}
+            httpGet: {path: /ready, port: {{ ternary "service" "metrics" (eq $workload.name "llm-gateway") }}, scheme: HTTP}
+            {{- else if eq $workload.namespace "ingestion-plane" }}
+            httpGet: {path: /ready, port: service, scheme: HTTP}
+            {{- else }}
+            tcpSocket: {port: service}
+            {{- end }}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 180
+          livenessProbe:
+            tcpSocket: {port: service}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            {{- toYaml (index $.Values.resources $workload.profile) | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            {{- if eq $workload.namespace "ingestion-plane" }}
+            - {name: kafka-ca, mountPath: /etc/eci/kafka, readOnly: true}
+            {{- end }}
+            {{- if or (eq $workload.name "retrieval-engine") (eq $workload.name "sink-search") }}
+            - {name: opensearch-ca, mountPath: /etc/eci/opensearch, readOnly: true}
+            {{- end }}
+            {{- if and (eq $.Values.global.profile "dev") (eq $workload.name "api-gateway") }}
+            - {name: oidc-ca, mountPath: /etc/eci/oidc, readOnly: true}
+            {{- end }}
+            {{- with $workload.modelPVC }}
+            - {name: models, mountPath: /models, readOnly: true}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if eq $workload.namespace "ingestion-plane" }}
+        - name: kafka-ca
+          secret:
+            secretName: {{ printf "%s-%s" $.Values.routing.kafkaTLSSecretPrefix $workload.name }}
+            items:
+              - {key: ca.crt, path: ca.crt}
+              - {key: user.crt, path: user.crt}
+              - {key: user.key, path: user.key}
+        {{- end }}
+        {{- if or (eq $workload.name "retrieval-engine") (eq $workload.name "sink-search") }}
+        - name: opensearch-ca
+          secret:
+            secretName: {{ $.Values.routing.openSearchTLSSecret }}
+            items: [{key: ca.crt, path: ca.crt}]
+        {{- end }}
+        {{- if and (eq $.Values.global.profile "dev") (eq $workload.name "api-gateway") }}
+        - name: oidc-ca
+          secret:
+            secretName: {{ required "devIdentity.tlsSecret is required for the dev API gateway" $.Values.devIdentity.tlsSecret }}
+            items: [{key: tls.crt, path: keycloak.crt}]
+        {{- end }}
+        {{- with $workload.modelPVC }}
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ . }}
+            readOnly: true
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $workload.name }}
+  namespace: {{ $workload.namespace }}
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eci.selectorLabels" (dict "name" $workload.name) | nindent 4 }}
+  ports:
+    - {name: service, port: {{ $workload.port }}, targetPort: service}
+    {{- if and $workload.metricsPort (ne (int $workload.metricsPort) (int $workload.port)) }}
+    - {name: metrics, port: {{ $workload.metricsPort }}, targetPort: metrics}
+    {{- end }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $workload.name }}
+  namespace: {{ $workload.namespace }}
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "eci.selectorLabels" (dict "name" $workload.name) | nindent 6 }}
+{{- end }}
+{{- end }}

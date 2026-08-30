@@ -18,6 +18,12 @@ def embed(inputs) -> list[list[float]]:
     return resp.json()
 
 
+def test_native_health_is_non_inference_and_ready():
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
 # SPEC-023 §3 scenario 1.
 def test_scenario1_same_text_twice_is_byte_identical():
     resp1 = embed("Chi chiama Validate?")

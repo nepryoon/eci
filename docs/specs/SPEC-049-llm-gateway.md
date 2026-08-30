@@ -12,10 +12,12 @@ type Route struct { Upstream *url.URL; Model string }
 type Config struct { Routes map[string]Route; DefaultRoute Route; Timeout time.Duration; FailureThreshold int; OpenDuration time.Duration }
 func NewHandler(Config, *http.Client) (http.Handler, error)
 ```
-Endpoint `POST /v1/chat/completions`, health `GET /healthz`. Env: `LLM_GATEWAY_ADDR`, `LLM_GATEWAY_ROUTES`, `LLM_GATEWAY_DEFAULT`, `LLM_GATEWAY_TIMEOUT`.
+Endpoint `POST /v1/chat/completions`, liveness locale `GET /healthz`, readiness
+upstream `GET /ready`. Env: `LLM_GATEWAY_ADDR`, `LLM_GATEWAY_ROUTES`,
+`LLM_GATEWAY_DEFAULT`, `LLM_GATEWAY_TIMEOUT`.
 
 ## 3. Comportamento
-1. Alias noto: route e model rewrite. 2. Alias ignoto: default o 400. 3. Status/header/body preservati. 4. `stream=true`: flush incrementale. 5. Timeout/cancellazione propagati. 6. N errori rete/5xx aprono breaker, half-open dopo durata, successo richiude. 7. Input/metodo invalidi non raggiungono upstream. 8. Health sempre 200.
+1. Alias noto: route e model rewrite. 2. Alias ignoto: default o 400. 3. Status/header/body preservati. 4. `stream=true`: flush incrementale. 5. Timeout/cancellazione propagati. 6. N errori rete/5xx aprono breaker, half-open dopo durata, successo richiude. 7. Input/metodo invalidi non raggiungono upstream. 8. Health sempre 200. 9. Readiness deduplica gli upstream configurati e richiede `GET /health` 2xx per tutti entro due secondi, senza inferenza; upstream assente/irraggiungibile/5xx produce 503 senza body.
 
 ## 4. Errori & edge case
 | Condizione | Comportamento |
@@ -24,6 +26,7 @@ Endpoint `POST /v1/chat/completions`, health `GET /healthz`. Env: `LLM_GATEWAY_A
 | model vuoto | 400 |
 | upstream 4xx | propagato, non conta nel breaker |
 | upstream 5xx/rete | conta nel breaker |
+| nessun upstream o health upstream non 2xx/timeout | `/ready` 503 vuoto; `/healthz` resta liveness locale 200 |
 
 ## 5. Non-goals
 Quota/rate limit/cache, nuovo proto, auth, retry/hedging della generazione non idempotente.
@@ -38,7 +41,7 @@ Stateless; vLLM on-prem default; streaming; budget ~15s; circuit breaker; nessun
 Header `X-ECI-Upstream-Model`; nessun prompt nei log. OTel HTTP completo demandato a T7.3.
 
 ## 9. Criteri di accettazione
-- [x] Scenari 1-8 verdi.
+- [x] Scenari 1-9 verdi.
 - [x] `task build`, `task lint`, `task test`, `task guard` verdi.
 - [x] ADD/contratti invariati.
 

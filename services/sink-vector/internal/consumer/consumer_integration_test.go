@@ -61,6 +61,44 @@ func TestSinkVectorConsumer(t *testing.T) {
 	t.Run("EdgeCase_MessageWithoutSecurityScopeRejected", func(t *testing.T) {
 		edgeCaseMessageWithoutSecurityScopeRejected(t, ctx, st)
 	})
+	t.Run("Review_FailedQdrantWriteDoesNotMarkProcessed", func(t *testing.T) {
+		reviewFailedQdrantWriteDoesNotMarkProcessed(t, ctx, st)
+	})
+}
+
+func reviewFailedQdrantWriteDoesNotMarkProcessed(t *testing.T, ctx context.Context, st *stack) {
+	unreachable, err := qdrant.NewClient(&qdrant.Config{Host: "127.0.0.1", Port: 1})
+	if err != nil {
+		t.Fatalf("qdrant NewClient: %v", err)
+	}
+	defer unreachable.Close()
+	eventID := uuid.NewString()
+	payload := codeEmbeddingPayload(
+		uuid.NewString(), uuid.NewString(), "failed-write", syntheticVector(7), "test-model",
+		map[string]any{"path": "failed.go"},
+	)
+	writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_, err = consumer.ProcessMessage(
+		writeCtx,
+		consumer.Deps{DB: st.db, Qdrant: unreachable, Logf: t.Logf},
+		consumer.TopicCodeEmbedding,
+		payload,
+		[]kafka.Header{{Key: "event_id", Value: []byte(eventID)}},
+	)
+	if err == nil {
+		t.Fatal("expected unreachable Qdrant write to fail")
+	}
+	var count int
+	if err := st.db.QueryRowContext(ctx,
+		"SELECT count(*) FROM processed_events WHERE event_id = $1 AND consumer_name = $2",
+		eventID, consumer.ConsumerName,
+	).Scan(&count); err != nil {
+		t.Fatalf("query processed marker: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("processed marker count after failed Qdrant write = %d, want 0", count)
+	}
 }
 
 // ============================================================
@@ -431,9 +469,10 @@ func startPostgres(t *testing.T, ctx context.Context) *sql.DB {
 	}
 	if _, err := db.ExecContext(ctx, `
 		CREATE TABLE processed_events (
-			event_id       UUID PRIMARY KEY,
+			event_id       UUID NOT NULL,
 			consumer_name  TEXT NOT NULL,
-			processed_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+			processed_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+			PRIMARY KEY (event_id, consumer_name)
 		)`); err != nil {
 		t.Fatalf("creazione processed_events: %v", err)
 	}

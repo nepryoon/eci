@@ -22,6 +22,25 @@ func TestGDSInvalidationUsesPartitionGenerationWithoutPartitionScan(t *testing.T
 		if strings.Contains(query, "MATCH (stale:CodeNode)") || strings.Contains(query, "REMOVE stale.") {
 			t.Errorf("%s mutation performs an eager full-partition rewrite", name)
 		}
+		if !strings.Contains(query, "CASE WHEN changed") {
+			t.Errorf("%s mutation does not gate generation advancement on a real graph change", name)
+		}
+		if strings.Contains(query, "ON MATCH SET p.generation = coalesce(p.generation, 0) + 1") {
+			t.Errorf("%s mutation advances generation unconditionally on an idempotent retry", name)
+		}
+	}
+}
+
+func TestRelationWriteSetsAbsoluteWeightForRetryIdempotency(t *testing.T) {
+	query, err := mergeCodeRelationQuery("CALLS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(query, "SET r.weight = coalesce($weight, 1)") {
+		t.Fatal("relation MERGE must set the absolute payload weight")
+	}
+	if strings.Contains(query, "r.weight, 0) +") {
+		t.Fatal("relation redelivery must not add the payload weight again")
 	}
 }
 

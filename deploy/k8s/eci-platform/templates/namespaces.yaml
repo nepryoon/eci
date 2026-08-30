@@ -1,0 +1,15 @@
+{{- if .Values.namespaces.create }}
+{{- range list "ingress" "query-plane" "gpu-plane" "ingestion-plane" "data-plane" "observability" }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ . }}
+  labels:
+    kubernetes.io/metadata.name: {{ . }}
+    app.kubernetes.io/part-of: eci
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+{{- end }}
+{{- end }}

@@ -164,12 +164,10 @@ type securityProvenance struct {
 
 // ProcessMessage elabora UN messaggio Kafka già fetchato (SPEC-033 §2/§3):
 //  1. estrae event_id dagli header;
-//  2. dedup via processed_events (stesso meccanismo di sink-graph, PRIMA
-//     della scrittura Qdrant — Qdrant non è Postgres, non può condividere
-//     una transazione con il dedup, a differenza di embedding-worker/
-//     SPEC-030 dove entrambe le scritture erano nella stessa Postgres);
-//  3. se nuovo, upsert di UN punto Qdrant con id derivato (DerivePointID)
+//  2. verifica processed_events senza prenotare l'evento;
+//  3. se nuovo, upsert idempotente di UN punto Qdrant con id derivato
 //     dall'id dell'embedding e payload {node_id, domain, provenance?}.
+//  4. solo dopo l'upsert riuscito registra processed_events.
 //
 // Un errore ritornato (non-nil) significa "infrastruttura irraggiungibile,
 // NON committare l'offset" (SPEC-033 §4). Un payload malformato o senza id
@@ -206,11 +204,11 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	}
 	securitylabels.Observe(ConsumerName, "accepted")
 
-	isNew, err := markProcessed(ctx, deps.DB, eventID)
+	processed, err := isProcessed(ctx, deps.DB, eventID)
 	if err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("dedup event_id=%s: %w", eventID, err)
 	}
-	if !isNew {
+	if processed {
 		deps.Logf("sink-vector: event_id=%s già in processed_events, skip upsert (redelivery)", eventID)
 		return OutcomeDuplicate, nil
 	}
@@ -218,7 +216,26 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	if err := upsertPoint(ctx, deps.Qdrant, msg); err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("upsert punto Qdrant id=%s: %w", msg.ID, err)
 	}
+	isNew, err := markProcessed(ctx, deps.DB, eventID)
+	if err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("complete dedup event_id=%s after Qdrant upsert: %w", eventID, err)
+	}
+	if !isNew {
+		deps.Logf("sink-vector: event_id=%s completato concorrentemente, upsert idempotente già applicato", eventID)
+		return OutcomeDuplicate, nil
+	}
 	return OutcomeStored, nil
+}
+
+func isProcessed(ctx context.Context, db *sql.DB, eventID string) (bool, error) {
+	var processed bool
+	err := db.QueryRowContext(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM processed_events WHERE event_id = $1 AND consumer_name = $2
+		)`,
+		eventID, ConsumerName,
+	).Scan(&processed)
+	return processed, err
 }
 
 // eventIDFromHeaders — stessa logica di sink-graph (SPEC-015 §2 punto 1).
@@ -242,7 +259,7 @@ func markProcessed(ctx context.Context, db *sql.DB, eventID string) (isNew bool,
 	err = db.QueryRowContext(ctx,
 		`INSERT INTO processed_events (event_id, consumer_name)
 		 VALUES ($1, $2)
-		 ON CONFLICT (event_id) DO NOTHING
+		 ON CONFLICT (event_id, consumer_name) DO NOTHING
 		 RETURNING event_id`,
 		eventID, ConsumerName,
 	).Scan(&returned)
@@ -265,6 +282,22 @@ func markProcessed(ctx context.Context, db *sql.DB, eventID string) (isNew bool,
 // nota a fondo SPEC), payload {node_id: msg.EntityID, domain: "code",
 // provenance?: msg.Provenance}.
 func upsertPoint(ctx context.Context, client *qdrant.Client, msg codeEmbeddingPayload) error {
+	request, err := buildUpsertRequest(msg)
+	if err != nil {
+		return err
+	}
+	result, err := client.Upsert(ctx, request)
+	if err != nil {
+		return err
+	}
+	return validateAppliedUpdate(result)
+}
+
+// buildUpsertRequest makes the durability boundary explicit: the external
+// operation is not complete merely because Qdrant acknowledged the RPC. Wait
+// forces Qdrant to apply the update before ProcessMessage may write its
+// PostgreSQL completion marker (ADR-0022).
+func buildUpsertRequest(msg codeEmbeddingPayload) (*qdrant.UpsertPoints, error) {
 	payloadFields := map[string]any{
 		"node_id": msg.EntityID,
 		"domain":  "code",
@@ -272,7 +305,7 @@ func upsertPoint(ctx context.Context, client *qdrant.Client, msg codeEmbeddingPa
 	if len(msg.Provenance) > 0 {
 		var provenance any
 		if err := json.Unmarshal(msg.Provenance, &provenance); err != nil {
-			return fmt.Errorf("decodifica provenance: %w", err)
+			return nil, fmt.Errorf("decodifica provenance: %w", err)
 		}
 		payloadFields["provenance"] = provenance
 		if p, ok := provenance.(map[string]any); ok {
@@ -283,11 +316,13 @@ func upsertPoint(ctx context.Context, client *qdrant.Client, msg codeEmbeddingPa
 	}
 	qdrantPayload, err := qdrant.TryValueMap(payloadFields)
 	if err != nil {
-		return fmt.Errorf("costruzione payload Qdrant: %w", err)
+		return nil, fmt.Errorf("costruzione payload Qdrant: %w", err)
 	}
 
-	_, err = client.Upsert(ctx, &qdrant.UpsertPoints{
+	wait := true
+	return &qdrant.UpsertPoints{
 		CollectionName: CollectionName,
+		Wait:           &wait,
 		Points: []*qdrant.PointStruct{
 			{
 				Id:      qdrant.NewID(DerivePointID(msg.ID)),
@@ -295,6 +330,15 @@ func upsertPoint(ctx context.Context, client *qdrant.Client, msg codeEmbeddingPa
 				Payload: qdrantPayload,
 			},
 		},
-	})
-	return err
+	}, nil
+}
+
+func validateAppliedUpdate(result *qdrant.UpdateResult) error {
+	if result == nil {
+		return fmt.Errorf("Qdrant upsert returned no update result")
+	}
+	if result.GetStatus() != qdrant.UpdateStatus_Completed {
+		return fmt.Errorf("Qdrant upsert not completed: status=%s", result.GetStatus())
+	}
+	return nil
 }

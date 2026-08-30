@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {"enum": ["postgresql.cnpg.io/v1"]},
+    "kind": {"enum": ["Cluster"]},
+    "metadata": {"type": "object", "required": ["name", "namespace"]},
+    "spec": {
+      "type": "object", "required": ["instances", "imageName", "bootstrap", "storage"],
+      "properties": {
+        "instances": {"type": "integer", "minimum": 1},
+        "imageName": {"type": "string", "pattern": ":17\\."},
+        "storage": {"type": "object", "required": ["size"]}
+      }
+    }
+  }
+}

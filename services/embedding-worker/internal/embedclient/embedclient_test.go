@@ -57,6 +57,9 @@ func TestEmbedUnreachableAddressReturnsErrNotPanic(t *testing.T) {
 	if err == nil {
 		t.Fatal("atteso errore su indirizzo irraggiungibile, ottenuto nil")
 	}
+	if !IsUnavailable(err) {
+		t.Fatalf("transport error must be classified unavailable: %v", err)
+	}
 }
 
 // --- edge case: risposta HTTP con status diverso da 200 -> errore
@@ -70,6 +73,20 @@ func TestEmbedNon200StatusReturnsErrWithStatusCodeInMessage(t *testing.T) {
 	}
 	if got := err.Error(); !strings.Contains(got, "500") {
 		t.Fatalf("il messaggio d'errore deve includere il codice di stato: %s", got)
+	}
+	if !IsUnavailable(err) {
+		t.Fatalf("HTTP 500 must be classified unavailable: %v", err)
+	}
+}
+
+func TestEmbedClientErrorIsRetryableApplicationFailure(t *testing.T) {
+	baseURL := stubServer(t, "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"invalid input\"}")
+	_, err := New(baseURL).Embed(context.Background(), "testo qualunque")
+	if err == nil {
+		t.Fatal("atteso errore su status 400")
+	}
+	if IsUnavailable(err) {
+		t.Fatalf("HTTP 400 is an application failure, not dependency unavailability: %v", err)
 	}
 }
 

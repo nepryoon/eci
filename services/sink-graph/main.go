@@ -18,6 +18,8 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 
 	"github.com/eci-project/eci/libs/go/eci/config"
+	"github.com/eci-project/eci/libs/go/eci/kafkaconfig"
+	"github.com/eci-project/eci/libs/go/eci/kafkaready"
 	"github.com/eci-project/eci/libs/go/eci/metrics"
 	"github.com/eci-project/eci/libs/go/eci/observability"
 	"github.com/eci-project/eci/libs/go/eci/resilience"
@@ -80,12 +82,28 @@ func main() {
 	}
 
 	brokers := strings.Split(config.EnvOrDefault("KAFKA_BROKERS", "localhost:9094"), ",")
+	kafkaTransport, err := kafkaconfig.FromEnvironment()
+	if err != nil {
+		log.Fatalf("sink-graph: configurazione Kafka: %v", err)
+	}
+	retryTopicSuffix := ".retry." + consumer.ConsumerName
+	topics := []string{
+		consumer.TopicCodeNode,
+		consumer.TopicCodeRelation,
+		resilience.RetryTopic(consumer.TopicCodeNode, retryTopicSuffix),
+		resilience.RetryTopic(consumer.TopicCodeRelation, retryTopicSuffix),
+	}
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     brokers,
 		GroupID:     consumer.ConsumerName,
-		GroupTopics: []string{consumer.TopicCodeNode, consumer.TopicCodeRelation},
+		GroupTopics: topics,
+		Dialer:      kafkaTransport.Dialer,
 	})
 	defer reader.Close()
+	readiness, err := kafkaready.New(brokers, kafkaTransport.Transport, consumer.ConsumerName, topics)
+	if err != nil {
+		log.Fatalf("sink-graph: configurazione readiness Kafka: %v", err)
+	}
 
 	deps := consumer.Deps{
 		DB:    db,
@@ -96,18 +114,19 @@ func main() {
 	// SPEC-035 §2 (T3.3 parte 1/2): retry con backoff esponenziale + DLQ,
 	// avvolge ProcessMessage senza modificarne la logica applicativa.
 	// Topic del producer VOLUTAMENTE non impostato — ogni messaggio
-	// ripubblicato/instradato in DLQ specifica il proprio Topic (§2:
-	// stesso topic originale per i retry, "{topic}.DLQ" per la coda
-	// morta). BatchTimeout basso: il default di kafka-go (1s) altrimenti
+	// ripubblicato/instradato in DLQ specifica il proprio Topic. ADR-0019
+	// separa i retry per consumer; la DLQ resta "{topic}.DLQ". BatchTimeout
+	// basso: il default di kafka-go (1s) altrimenti
 	// si somma silenziosamente al backoff configurato, scoperto scrivendo
 	// il test di integrazione di libs/go/eci/resilience (SPEC-035 §7).
 	retryProducer := &kafka.Writer{
 		Addr:                   kafka.TCP(brokers...),
-		AllowAutoTopicCreation: true,
+		Transport:              kafkaTransport.Transport,
+		AllowAutoTopicCreation: false,
 		BatchTimeout:           10 * time.Millisecond,
 	}
 	defer retryProducer.Close()
-	process := resilience.WithRetryAndDLQ(resilience.Config{}, retryProducer, func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (resilience.Outcome, error) {
+	process := resilience.WithRetryAndDLQ(resilience.Config{RetryTopicSuffix: retryTopicSuffix}, retryProducer, func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (resilience.Outcome, error) {
 		_, err := consumer.ProcessMessage(ctx, deps, topic, value, headers)
 		return resilience.OutcomeProcessed, err
 	})
@@ -123,6 +142,7 @@ func main() {
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", metrics.Handler())
+		mux.Handle("/ready", kafkaready.Handler(readiness.Check))
 		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
 			log.Printf("sink-graph: server HTTP metriche (%s) non avviato: %v (consume-loop non impattato)", metricsAddr, err)
 		}

@@ -26,7 +26,10 @@ jobs:
         run: pip install ruff
 
       - name: Install go-task
-        run: curl -sL https://taskfile.dev/install.sh | sh -s -- -d -b /usr/local/bin
+        run: |
+          curl -fsSL https://github.com/go-task/task/releases/download/v3.53.1/task_linux_amd64.tar.gz -o /tmp/task.tar.gz
+          echo 'a54a408f6861ff921f6e87774180db31bacd8c1e7c944ca696db9fea49a82fc7  /tmp/task.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/task.tar.gz -C /usr/local/bin task
 
       - name: task build
         run: task build
@@ -57,7 +60,10 @@ jobs:
           python-version: '3.11'
 
       - name: Install go-task
-        run: curl -sL https://taskfile.dev/install.sh | sh -s -- -d -b /usr/local/bin
+        run: |
+          curl -fsSL https://github.com/go-task/task/releases/download/v3.53.1/task_linux_amd64.tar.gz -o /tmp/task.tar.gz
+          echo 'a54a408f6861ff921f6e87774180db31bacd8c1e7c944ca696db9fea49a82fc7  /tmp/task.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/task.tar.gz -C /usr/local/bin task
 
       - name: task guard
         env:
@@ -102,6 +108,7 @@ jobs:
         run: |
           cargo test --manifest-path services/ingestion/Cargo.toml --test persist_integration_test same_parser_ids_remain_isolated_across_tenants -- --ignored --test-threads=1
           cd services/sink-graph && go test -tags=integration ./internal/consumer -run TestSinkGraphConsumer -v
+          cd ../embedding-worker && go test -tags=integration ./internal/consumer -run TestEmbeddingWorkerConsumer -v
           cd ../sink-vector && go test -tags=integration ./internal/consumer -run TestSinkVectorConsumer -v
           cd ../sink-search && go test -tags=integration ./internal/consumer -run TestSinkSearchConsumer -v
 
@@ -146,7 +153,9 @@ jobs:
 
       - name: Install go-task and buf
         run: |
-          curl -sL https://taskfile.dev/install.sh | sh -s -- -d -b /usr/local/bin
+          curl -fsSL https://github.com/go-task/task/releases/download/v3.53.1/task_linux_amd64.tar.gz -o /tmp/task.tar.gz
+          echo 'a54a408f6861ff921f6e87774180db31bacd8c1e7c944ca696db9fea49a82fc7  /tmp/task.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/task.tar.gz -C /usr/local/bin task
           go install github.com/bufbuild/buf/cmd/buf@v1.72.0
 
       - name: T6.6 deterministic Envoy descriptor
@@ -159,3 +168,28 @@ jobs:
 
       - name: T6.6 JSON/gRPC, SSE, auth and rate-limit integration
         run: task test:envoy
+
+  kubernetes-platform-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pinned Kubernetes validation toolchain
+        run: |
+          pip install PyYAML==6.0.3
+          curl -fsSL https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz -o /tmp/helm.tar.gz
+          echo 'a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  /tmp/helm.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/helm.tar.gz --strip-components=1 -C /usr/local/bin linux-amd64/helm
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz -o /tmp/kubeconform.tar.gz
+          echo '9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883  /tmp/kubeconform.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
+          curl -fsSL https://github.com/go-task/task/releases/download/v3.53.1/task_linux_amd64.tar.gz -o /tmp/task.tar.gz
+          echo 'a54a408f6861ff921f6e87774180db31bacd8c1e7c944ca696db9fea49a82fc7  /tmp/task.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/task.tar.gz -C /usr/local/bin task
+
+      - name: T7.1 deterministic Helm, policy and schema validation
+        run: task k8s:validate

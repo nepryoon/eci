@@ -6,6 +6,8 @@ dipendere da una GPU.
 ``POST /embed {"inputs": "testo" | ["testo1", "testo2", ...]}``
 ``-> [[float, ...], ...]`` — un vettore di 1536 elementi per ogni input,
 nello stesso ordine (§2).
+``GET /health -> {"status": "ok"}`` replica il probe nativo TEI senza
+eseguire inferenza.
 
 Determinismo (§2): ``SHA-256(testo)`` esteso via ri-hashing concatenato
 (``h0 = SHA256(testo)``, ``h1 = SHA256(h0)``, ``h2 = SHA256(h1)``, ...)
@@ -34,6 +36,12 @@ app = FastAPI()
 # principio di fakes/vllm-fake, SPEC-017 §8) — nessuna gestione esplicita
 # dello shutdown, il processo è normalmente terminato con kill/Ctrl-C.
 init_tracing(env_or_default("EMBEDDER_FAKE_SERVICE_NAME", "embedder-fake"))
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    """Replicate TEI's native, non-inference health endpoint."""
+    return {"status": "ok"}
 
 
 def _deterministic_vector(text: str) -> list[float]:

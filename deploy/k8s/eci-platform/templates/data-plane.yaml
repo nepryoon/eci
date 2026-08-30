@@ -1,0 +1,265 @@
+{{- if .Values.dataPlane.enabled }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: eci-postgres
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  instances: {{ .Values.dataPlane.postgres.instances }}
+  imageName: {{ include "eci.digestImage" (dict "field" "dataPlane.postgres.image" "value" .Values.dataPlane.postgres.image) | quote }}
+  primaryUpdateStrategy: unsupervised
+  enableSuperuserAccess: false
+  bootstrap:
+    initdb:
+      database: eci
+      owner: eci
+      secret: {name: {{ .Values.global.existingSecret }}}
+  managed:
+    roles:
+      # Keep the passwordless privilege carrier present independently from the
+      # CDC workload. Migration 0005 grants this role once; enabling CDC later
+      # only adds the login role as a member and cannot lose the table grant.
+      - name: eci_cdc_outbox_reader
+        ensure: present
+        login: false
+        replication: false
+        superuser: false
+        createdb: false
+        createrole: false
+        bypassrls: false
+        disablePassword: true
+      {{- if .Values.cdc.enabled }}
+      - name: eci_cdc
+        ensure: present
+        login: true
+        replication: true
+        superuser: false
+        createdb: false
+        createrole: false
+        bypassrls: false
+        inRoles: [eci_cdc_outbox_reader]
+        passwordSecret: {name: {{ .Values.cdc.postgresSecret }}}
+      {{- else }}
+      # CNPG only deletes a previously managed role when it remains declared
+      # with ensure=absent. Omitting it would leave LOGIN+REPLICATION behind
+      # after an enabled -> disabled upgrade.
+      - name: eci_cdc
+        ensure: absent
+      {{- end }}
+  storage:
+    size: {{ .Values.dataPlane.postgres.storage }}
+    {{- if .Values.global.storageClass }}
+    storageClass: {{ .Values.global.storageClass }}
+    {{- end }}
+  monitoring:
+    # T7.3 owns PodMonitor lifecycle; exporter remains available now.
+    enablePodMonitor: false
+  replicationSlots:
+    highAvailability:
+      enabled: true
+      synchronizeLogicalDecoding: true
+  postgresql:
+    parameters:
+      wal_level: logical
+      max_replication_slots: "10"
+      max_wal_senders: "10"
+      hot_standby_feedback: "on"
+      sync_replication_slots: "on"
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: eci-kafka-nodes
+  namespace: data-plane
+  labels:
+    strimzi.io/cluster: eci-kafka
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.dataPlane.kafka.replicas }}
+  roles: [controller, broker]
+  template:
+    pod:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+    kafkaContainer:
+      securityContext:
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+    initContainer:
+      securityContext:
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+  storage:
+    type: persistent-claim
+    size: {{ .Values.dataPlane.kafka.storage }}
+    deleteClaim: false
+    kraftMetadata: shared
+---
+apiVersion: kafka.strimzi.io/v1
+kind: Kafka
+metadata:
+  name: eci-kafka
+  namespace: data-plane
+  annotations:
+    strimzi.io/node-pools: enabled
+    strimzi.io/kraft: enabled
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  kafka:
+    version: {{ .Values.dataPlane.kafka.version | quote }}
+    image: {{ include "eci.digestImage" (dict "field" "dataPlane.kafka.image" "value" .Values.dataPlane.kafka.image) | quote }}
+    metadataVersion: "4.3-IV0"
+    listeners:
+      - name: clients
+        port: 9093
+        type: internal
+        tls: true
+        authentication: {type: tls}
+    authorization:
+      type: simple
+    config:
+      auto.create.topics.enable: false
+      offsets.topic.replication.factor: {{ min 3 .Values.dataPlane.kafka.replicas }}
+      transaction.state.log.replication.factor: {{ min 3 .Values.dataPlane.kafka.replicas }}
+      transaction.state.log.min.isr: {{ min 2 .Values.dataPlane.kafka.replicas }}
+      default.replication.factor: {{ min 3 .Values.dataPlane.kafka.replicas }}
+      min.insync.replicas: {{ min 2 .Values.dataPlane.kafka.replicas }}
+  entityOperator:
+    topicOperator:
+      image: {{ include "eci.digestImage" (dict "field" "dataPlane.kafka.operatorImage" "value" .Values.dataPlane.kafka.operatorImage) | quote }}
+    userOperator:
+      image: {{ include "eci.digestImage" (dict "field" "dataPlane.kafka.operatorImage" "value" .Values.dataPlane.kafka.operatorImage) | quote }}
+    template:
+      pod:
+        securityContext:
+          runAsNonRoot: true
+          seccompProfile: {type: RuntimeDefault}
+      topicOperatorContainer:
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+      userOperatorContainer:
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+---
+apiVersion: opensearch.opster.io/v1
+kind: OpenSearchCluster
+metadata:
+  name: eci-opensearch
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  general:
+    serviceName: eci-opensearch
+    version: {{ .Values.dataPlane.openSearch.version | quote }}
+    image: {{ include "eci.digestImage" (dict "field" "dataPlane.openSearch.image" "value" .Values.dataPlane.openSearch.image) | quote }}
+    httpPort: 9200
+    vendor: opensearch
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      fsGroup: 1000
+      seccompProfile: {type: RuntimeDefault}
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      allowPrivilegeEscalation: false
+      capabilities: {drop: [ALL]}
+  initHelper:
+    image: docker.io/busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+    version: ""
+    imagePullPolicy: IfNotPresent
+  security:
+    config:
+      adminCredentialsSecret:
+        name: {{ .Values.dataPlane.openSearch.adminCredentialsSecret }}
+      securityConfigSecret:
+        name: {{ .Values.dataPlane.openSearch.securityConfigSecret }}
+    tls:
+      transport:
+        generate: true
+      http:
+        generate: true
+  nodePools:
+    - component: masters
+      replicas: {{ .Values.dataPlane.openSearch.replicas }}
+      diskSize: {{ .Values.dataPlane.openSearch.storage }}
+      roles: [cluster_manager, data, ingest]
+      resources:
+        {{- toYaml .Values.dataPlane.openSearch.resources | nindent 8 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qdrant-collection-bootstrap
+  namespace: data-plane
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qdrant-collection-bootstrap
+        app.kubernetes.io/component: bootstrap
+        app.kubernetes.io/part-of: eci
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "eci.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: bootstrap
+          image: "curlimages/curl@sha256:463eaf6072688fe96ac64fa623fe73e1dbe25d8ad6c34404a669ad3ce1f104b6"
+          securityContext:
+            {{- include "eci.containerSecurityContext" . | nindent 12 }}
+          env:
+            - {name: SHARD_NUMBER, value: {{ .Values.dataPlane.qdrant.shardNumber | quote }}}
+            - {name: REPLICATION_FACTOR, value: {{ .Values.dataPlane.qdrant.replicationFactor | quote }}}
+            - {name: VECTOR_SIZE, value: "1536"}
+            - {name: VECTOR_DISTANCE, value: "Cosine"}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              endpoint=http://qdrant.data-plane.svc:6333/collections/code_embeddings
+              body="{\"vectors\":{\"size\":${VECTOR_SIZE},\"distance\":\"${VECTOR_DISTANCE}\"},\"shard_number\":${SHARD_NUMBER},\"replication_factor\":${REPLICATION_FACTOR}}"
+              status="$(curl -sS -o /tmp/current -w '%{http_code}' "$endpoint")"
+              if [ "$status" = 404 ]; then curl -fsS -X PUT -H 'content-type: application/json' --data "$body" "$endpoint"; exit 0; fi
+              test "$status" = 200
+              grep -q "\"shard_number\":${SHARD_NUMBER}" /tmp/current
+              grep -q "\"replication_factor\":${REPLICATION_FACTOR}" /tmp/current
+              tr -d '[:space:]' </tmp/current >/tmp/current.compact
+              vectors_config="$(sed -n 's/.*"vectors":{\([^}]*\)}.*/\1/p' /tmp/current.compact)"
+              test -n "$vectors_config"
+              printf '%s\n' "$vectors_config" | grep -Eq "(^|,)\"size\":${VECTOR_SIZE}(,|$)"
+              printf '%s\n' "$vectors_config" | grep -Eq "(^|,)\"distance\":\"${VECTOR_DISTANCE}\"(,|$)"
+          readinessProbe:
+            exec: {command: ["/bin/sh", "-c", "test -r /proc/self/status"]}
+          livenessProbe:
+            exec: {command: ["/bin/sh", "-c", "test -r /proc/self/status"]}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

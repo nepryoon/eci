@@ -1,0 +1,161 @@
+{{- if .Values.dataPlane.enabled }}
+{{- if and .Values.global.highAvailability (lt (int .Values.dataPlane.minio.replicas) 4) }}
+{{- fail "production-like MinIO requires at least four distributed replicas" }}
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: minio
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-headless
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "eci.selectorLabels" (dict "name" "minio") | nindent 4 }}
+  ports:
+    - {name: api, port: 9000, targetPort: api}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eci.selectorLabels" (dict "name" "minio") | nindent 4 }}
+  ports:
+    - {name: api, port: 9000, targetPort: api}
+    - {name: console, port: 9001, targetPort: console}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+    app.kubernetes.io/name: minio
+spec:
+  replicas: {{ .Values.dataPlane.minio.replicas }}
+  serviceName: minio-headless
+  podManagementPolicy: Parallel
+  updateStrategy: {type: RollingUpdate}
+  selector:
+    matchLabels:
+      {{- include "eci.selectorLabels" (dict "name" "minio") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "eci.selectorLabels" (dict "name" "minio") | nindent 8 }}
+    spec:
+      serviceAccountName: minio
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "eci.selectorLabels" (dict "name" "minio") | nindent 14 }}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "eci.selectorLabels" (dict "name" "minio") | nindent 14 }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "eci.selectorLabels" (dict "name" "minio") | nindent 20 }}
+      containers:
+        - name: minio
+          image: {{ include "eci.digestImage" (dict "field" "dataPlane.minio.image" "value" .Values.dataPlane.minio.image) | quote }}
+          args:
+            - server
+            {{- if gt (int .Values.dataPlane.minio.replicas) 1 }}
+            - {{ printf "http://minio-{0...%d}.minio-headless.data-plane.svc.cluster.local/data" (sub (int .Values.dataPlane.minio.replicas) 1) | quote }}
+            {{- else }}
+            - /data
+            {{- end }}
+            - --console-address
+            - :9001
+          securityContext:
+            {{- include "eci.containerSecurityContext" . | nindent 12 }}
+          ports:
+            - {name: api, containerPort: 9000}
+            - {name: console, containerPort: 9001}
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom: {secretKeyRef: {name: {{ .Values.global.existingSecret }}, key: minio-user}}
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ .Values.global.existingSecret }}, key: minio-password}}
+          startupProbe:
+            httpGet: {path: /minio/health/live, port: api}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /minio/health/ready, port: api}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 12
+          livenessProbe:
+            httpGet: {path: /minio/health/live, port: api}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources.io | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: tmp, emptyDir: {}}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if .Values.global.storageClass }}
+        storageClassName: {{ .Values.global.storageClass }}
+        {{- end }}
+        resources:
+          requests: {storage: {{ .Values.dataPlane.minio.storage }}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: minio
+  namespace: data-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ ternary (sub (int .Values.dataPlane.minio.replicas) 1) 1 (gt (int .Values.dataPlane.minio.replicas) 1) }}
+  selector:
+    matchLabels:
+      {{- include "eci.selectorLabels" (dict "name" "minio") | nindent 6 }}
+{{- end }}

@@ -8,9 +8,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -27,9 +31,38 @@ import (
 )
 
 const defaultMetricsPort = "9106"
+const dependencyCheckTimeout = 2 * time.Second
 
 func newMetricsHandler(gatherer prometheus.Gatherer) http.Handler {
 	return promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{})
+}
+
+func newDependencyReadinessHandler(check func(context.Context) error) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		ctx, cancel := context.WithTimeout(request.Context(), dependencyCheckTimeout)
+		defer cancel()
+		response.Header().Set("Cache-Control", "no-store")
+		if check == nil || check(ctx) != nil {
+			response.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		response.WriteHeader(http.StatusNoContent)
+	})
+}
+
+func redisOptionsFromEnvironment() (*redis.Options, error) {
+	requireAuth, err := strconv.ParseBool(config.EnvOrDefault("REDIS_REQUIRE_AUTH", "false"))
+	if err != nil {
+		return nil, fmt.Errorf("REDIS_REQUIRE_AUTH must be a boolean: %w", err)
+	}
+	password := os.Getenv("REDIS_PASSWORD")
+	if requireAuth && password == "" {
+		return nil, fmt.Errorf("REDIS_PASSWORD is required when Redis authentication is enabled")
+	}
+	return &redis.Options{
+		Addr:     config.EnvOrDefault("REDIS_ADDR", "localhost:6379"),
+		Password: password,
+	}, nil
 }
 
 func main() {
@@ -53,15 +86,23 @@ func main() {
 		log.Fatalf("semantic-cache: inizializzazione OPA: %v", err)
 	}
 	metricsAddr := ":" + config.EnvOrDefault("METRICS_PORT", defaultMetricsPort)
+	redisOptions, err := redisOptionsFromEnvironment()
+	if err != nil {
+		log.Fatalf("semantic-cache: configurazione Redis: %v", err)
+	}
+	redisAddr := redisOptions.Addr
+	rdb := redis.NewClient(redisOptions)
+	defer rdb.Close()
 	go func() {
-		if err := http.ListenAndServe(metricsAddr, newMetricsHandler(prometheus.DefaultGatherer)); err != nil {
-			log.Printf("semantic-cache: server HTTP metriche (%s) non avviato: %v", metricsAddr, err)
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", newMetricsHandler(prometheus.DefaultGatherer))
+		mux.Handle("/ready", newDependencyReadinessHandler(func(ctx context.Context) error {
+			return rdb.Ping(ctx).Err()
+		}))
+		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
+			log.Printf("semantic-cache: server HTTP metriche/readiness (%s) non avviato: %v", metricsAddr, err)
 		}
 	}()
-
-	redisAddr := config.EnvOrDefault("REDIS_ADDR", "localhost:6379")
-	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
-	defer rdb.Close()
 
 	addr := config.EnvOrDefault("SEMANTIC_CACHE_ADDR", ":50054")
 	lis, err := net.Listen("tcp", addr)

@@ -19,6 +19,8 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 
 	"github.com/eci-project/eci/libs/go/eci/config"
+	"github.com/eci-project/eci/libs/go/eci/kafkaconfig"
+	"github.com/eci-project/eci/libs/go/eci/kafkaready"
 	"github.com/eci-project/eci/libs/go/eci/metrics"
 	"github.com/eci-project/eci/libs/go/eci/observability"
 	"github.com/eci-project/eci/libs/go/eci/resilience"
@@ -77,12 +79,23 @@ func main() {
 	}
 
 	brokers := strings.Split(config.EnvOrDefault("KAFKA_BROKERS", "localhost:9094"), ",")
+	kafkaTransport, err := kafkaconfig.FromEnvironment()
+	if err != nil {
+		log.Fatalf("sink-vector: configurazione Kafka: %v", err)
+	}
+	retryTopicSuffix := ".retry." + consumer.ConsumerName
+	topics := []string{consumer.TopicCodeEmbedding, resilience.RetryTopic(consumer.TopicCodeEmbedding, retryTopicSuffix)}
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     brokers,
 		GroupID:     consumer.ConsumerName,
-		GroupTopics: []string{consumer.TopicCodeEmbedding},
+		GroupTopics: topics,
+		Dialer:      kafkaTransport.Dialer,
 	})
 	defer reader.Close()
+	readiness, err := kafkaready.New(brokers, kafkaTransport.Transport, consumer.ConsumerName, topics)
+	if err != nil {
+		log.Fatalf("sink-vector: configurazione readiness Kafka: %v", err)
+	}
 
 	deps := consumer.Deps{
 		DB:     db,
@@ -95,11 +108,12 @@ func main() {
 	// su Topic/BatchTimeout del producer.
 	retryProducer := &kafka.Writer{
 		Addr:                   kafka.TCP(brokers...),
-		AllowAutoTopicCreation: true,
+		Transport:              kafkaTransport.Transport,
+		AllowAutoTopicCreation: false,
 		BatchTimeout:           10 * time.Millisecond,
 	}
 	defer retryProducer.Close()
-	process := resilience.WithRetryAndDLQ(resilience.Config{}, retryProducer, func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (resilience.Outcome, error) {
+	process := resilience.WithRetryAndDLQ(resilience.Config{RetryTopicSuffix: retryTopicSuffix}, retryProducer, func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (resilience.Outcome, error) {
 		_, err := consumer.ProcessMessage(ctx, deps, topic, value, headers)
 		return resilience.OutcomeProcessed, err
 	})
@@ -109,6 +123,7 @@ func main() {
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", metrics.Handler())
+		mux.Handle("/ready", kafkaready.Handler(readiness.Check))
 		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
 			log.Printf("sink-vector: server HTTP metriche (%s) non avviato: %v (consume-loop non impattato)", metricsAddr, err)
 		}

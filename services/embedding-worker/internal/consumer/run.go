@@ -14,6 +14,14 @@ import (
 
 var tracer = otel.Tracer("embedding-worker")
 
+// MessageReader is the minimal kafka-go reader boundary needed by one
+// fetch/process/commit cycle. Keeping it explicit lets the runtime discard a
+// reader after any uncommitted failure before a later offset can overtake it.
+type MessageReader interface {
+	FetchMessage(context.Context) (kafka.Message, error)
+	CommitMessages(context.Context, ...kafka.Message) error
+}
+
 // FetchAndProcess esegue un ciclo fetch->process->commit (SPEC-030 §2/§4):
 // un errore di `process` (chiamata di embedding fallita o infrastruttura
 // irraggiungibile) NON committa l'offset — il messaggio verrà riconsegnato
@@ -28,7 +36,7 @@ var tracer = otel.Tracer("embedding-worker")
 // stessa non conosce né Deps né la logica di retry/DLQ, resta un puro
 // orchestratore fetch/span/commit — nessuna modifica alla logica
 // applicativa di ProcessMessage stessa (SPEC-035 §2).
-func FetchAndProcess(ctx context.Context, reader *kafka.Reader, process resilience.ProcessFunc) (resilience.Outcome, error) {
+func FetchAndProcess(ctx context.Context, reader MessageReader, process resilience.ProcessFunc) (resilience.Outcome, error) {
 	msg, err := reader.FetchMessage(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("fetch message: %w", err)

@@ -43,9 +43,11 @@ tasks:
       - cd tools/migrate-neo4j && go test -tags=integration ./...
       - cd tests/integration/postgres_ddl && go test -tags=integration ./...
       - cd tests/integration/outbox_cdc && go test -tags=integration ./...
+      - cd libs/go && go test -tags=integration ./eci/resilience/... -run TestWithRetryAndDLQ -v
       - cd services/ingestion && cargo test --test persist_integration_test -- --ignored --test-threads=1
       - cd services/ingestion && cargo test --test chunk_persist_integration_test -- --ignored --test-threads=1
       - cd services/sink-graph && go test -tags=integration ./internal/consumer -run TestSinkGraphConsumer -v
+      - cd services/embedding-worker && go test -tags=integration ./internal/consumer -run TestEmbeddingWorkerConsumer -v
       - cd services/sink-vector && go test -tags=integration ./internal/consumer -run TestSinkVectorConsumer -v
       - cd services/sink-search && go test -tags=integration ./internal/consumer -run TestSinkSearchConsumer -v
       - cd services/retrieval-engine && go test -tags=integration ./internal/server -run TestRetrievalEngineServer -v
@@ -159,3 +161,28 @@ tasks:
     desc: Fallisce se contracts/ o docs/add/ sono toccati senza un ADR nello stesso commit
     cmds:
       - bash scripts/guard.sh
+
+  k8s:render:
+    desc: Renderizza il chart ECI production-like senza accesso al cluster
+    cmds:
+      - helm template eci deploy/k8s/eci-platform --namespace query-plane
+
+  k8s:validate:
+    desc: Helm lint/render, policy, schemi kubeconform e test SPEC-062 CPU-only
+    cmds:
+      - bash scripts/k8s-validate.sh
+
+  k8s:dev:up:
+    desc: Crea/aggiorna il solo cluster kind eci-dev con operatori pinned
+    cmds:
+      - bash deploy/k8s/dev-up.sh
+
+  k8s:dev:verify:
+    desc: Verifica readiness e connettività reale nel cluster kind eci-dev
+    cmds:
+      - bash deploy/k8s/dev-verify.sh
+
+  k8s:dev:down:
+    desc: Elimina esclusivamente il cluster kind locale eci-dev
+    cmds:
+      - bash deploy/k8s/dev-down.sh

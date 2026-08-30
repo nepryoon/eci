@@ -1,0 +1,46 @@
+neo4j:
+  name: eci-neo4j
+  edition: enterprise
+  acceptLicenseAgreement: "no"
+  minimumClusterSize: 3
+  passwordFromSecret: eci-runtime
+  resources:
+    cpu: "16"
+    memory: 128Gi
+  operations:
+    image: neo4j/helm-charts-operations@sha256:3b73609fa084906d2f36ca043d78609718c3ce5bdd3e7613db8a92a96b690687
+image:
+  customImage: neo4j@sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f9ce11602f6f9538e17e02c74d
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 7474
+  runAsGroup: 7474
+  fsGroup: 7474
+  seccompProfile: {type: RuntimeDefault}
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 7474
+  runAsGroup: 7474
+  allowPrivilegeEscalation: false
+  capabilities: {drop: [ALL]}
+volumes:
+  data:
+    mode: defaultStorageClass
+    defaultStorageClass:
+      requests:
+        storage: 100Gi
+config:
+  server.metrics.prometheus.enabled: "true"
+  server.metrics.prometheus.endpoint: "0.0.0.0:2004"
+services:
+  neo4j:
+    spec: {type: ClusterIP}
+    cleanup:
+      image:
+        registry: registry.k8s.io
+        repository: kubectl
+        tag: v1.34.0
+        digest: sha256:497d298f891edb7608dfce9dae4bb08dffc4ddcd7f5d24a0512d4bbf33e04f26
+        imagePullPolicy: IfNotPresent
+podSpec:
+  podAntiAffinity: true

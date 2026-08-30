@@ -7,7 +7,7 @@ set -uo pipefail
 
 status=0
 
-GO_SERVICES=(sink-graph sink-vector sink-search retrieval-engine llm-gateway semantic-cache api-gateway)
+GO_SERVICES=(sink-graph embedding-worker sink-vector sink-search retrieval-engine llm-gateway semantic-cache api-gateway)
 GO_TOOLS=(gds-impact)
 RUST_SERVICES=(ingestion)
 PY_SERVICES=(orchestrator verification summarization)

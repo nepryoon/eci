@@ -1,0 +1,172 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opa-policy
+  namespace: query-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+data:
+  eci_authz.rego: |
+{{ .Files.Get "policies/eci_authz.rego" | indent 4 }}
+---
+{{- $items := list
+  (dict "name" "opa" "namespace" "query-plane" "image" "openpolicyagent/opa@sha256:39daf255ae7f25d81103f03a0c18308a50b7b5bb67907bed6166f70e24a970ff" "port" 8181 "replicas" (ternary 2 1 .Values.global.highAvailability) "args" (list "run" "--server" "--addr=0.0.0.0:8181" "/policies/eci_authz.rego"))
+}}
+{{- if eq .Values.global.profile "dev" }}
+{{- $items = append $items (dict "name" "keycloak" "namespace" "ingress" "image" "quay.io/keycloak/keycloak@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067" "port" 8443 "replicas" 1 "args" (list "start-dev" "--health-enabled=true" "--http-enabled=false" "--https-port=8443" "--https-certificate-file=/etc/eci/keycloak/tls/tls.crt" "--https-certificate-key-file=/etc/eci/keycloak/tls/tls.key" "--hostname=https://keycloak.ingress.svc:8443")) }}
+{{- end }}
+{{- range $item := $items }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $item.name }}
+  namespace: {{ $item.namespace }}
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $item.name }}
+  namespace: {{ $item.namespace }}
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+    app.kubernetes.io/name: {{ $item.name }}
+spec:
+  replicas: {{ $item.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  selector:
+    matchLabels:
+      {{- include "eci.selectorLabels" (dict "name" $item.name) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "eci.selectorLabels" (dict "name" $item.name) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $item.name }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "eci.podSecurityContext" $ | nindent 8 }}
+        {{- if eq $item.name "keycloak" }}
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        {{- end }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app.kubernetes.io/name: {{ $item.name }}, app.kubernetes.io/part-of: eci}}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app.kubernetes.io/name: {{ $item.name }}, app.kubernetes.io/part-of: eci}}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector: {matchLabels: {app.kubernetes.io/name: {{ $item.name }}, app.kubernetes.io/part-of: eci}}
+      containers:
+        - name: {{ $item.name }}
+          image: {{ $item.image | quote }}
+          args: {{ toJson $item.args }}
+          securityContext:
+            {{- if eq $item.name "keycloak" }}
+            # start-dev performs a Quarkus augmentation; production supplies an
+            # optimized immutable IdP image and does not render this dev workload.
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            {{- else }}
+            {{- include "eci.containerSecurityContext" $ | nindent 12 }}
+            {{- end }}
+          ports:
+            - {name: service, containerPort: {{ $item.port }}}
+          env:
+            {{- if eq $item.name "keycloak" }}
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              valueFrom: {secretKeyRef: {name: {{ $.Values.global.existingSecret }}, key: keycloak-user}}
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ $.Values.global.existingSecret }}, key: keycloak-password}}
+            {{- end }}
+          readinessProbe:
+            tcpSocket: {port: service}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 12
+          startupProbe:
+            tcpSocket: {port: service}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 60
+          livenessProbe:
+            tcpSocket: {port: service}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            {{- if eq $item.name "keycloak" }}
+            {{- toYaml $.Values.resources.java | nindent 12 }}
+            {{- else }}
+            {{- toYaml $.Values.resources.io | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            {{- if eq $item.name "opa" }}
+            - {name: policy, mountPath: /policies, readOnly: true}
+            {{- else if eq $item.name "keycloak" }}
+            - {name: data, mountPath: /opt/keycloak/data}
+            - {name: tls, mountPath: /etc/eci/keycloak/tls, readOnly: true}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if eq $item.name "opa" }}
+        - name: policy
+          configMap: {name: opa-policy}
+        {{- else if eq $item.name "keycloak" }}
+        - name: data
+          emptyDir: {}
+        - name: tls
+          secret:
+            secretName: {{ required "devIdentity.tlsSecret is required in the dev profile" $.Values.devIdentity.tlsSecret }}
+            defaultMode: 0440
+            items:
+              - {key: tls.crt, path: tls.crt}
+              - {key: tls.key, path: tls.key}
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $item.name }}
+  namespace: {{ $item.namespace }}
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+spec:
+  selector:
+    {{- include "eci.selectorLabels" (dict "name" $item.name) | nindent 4 }}
+  ports:
+    - {name: service, port: {{ $item.port }}, targetPort: service}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $item.name }}
+  namespace: {{ $item.namespace }}
+  labels:
+    {{- include "eci.labels" $ | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "eci.selectorLabels" (dict "name" $item.name) | nindent 6 }}
+{{- end }}

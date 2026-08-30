@@ -12,8 +12,10 @@ Tutti e quattro i sink Kafka del progetto (`sink-graph`, `embedding-worker`, `si
 type ProcessFunc func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (Outcome, error)
 
 type Config struct {
-    MaxRetries  int           // default 5
-    BackoffBase time.Duration // default 1s — raddoppia a ogni tentativo (1s,2s,4s,8s,16s)
+    MaxRetries       int           // default 5
+    BackoffBase      time.Duration // default 1s — raddoppia a ogni tentativo (1s,2s,4s,8s,16s)
+    RetryTopicSuffix string        // empty = historical same-topic behaviour
+    ShouldRetry      func(error) bool // nil = historical retry-all behaviour
 }
 
 // WithRetryAndDLQ avvolge la ProcessFunc di un sink (invariata,
@@ -130,3 +132,21 @@ Nessun requisito nuovo oltre al logging già esistente in ciascun sink — le me
    (~40s) pur esercitando il consume-loop REALE (`consumer.FetchAndProcess`
    + `consumer.ProcessMessage` reali, non una reimplementazione) attraverso
    l'intero percorso retry (retryCount 0→1) poi DLQ (retryCount 1==MaxRetries).
+6. **Hardening di produzione per provenance Kafka (ADR-0019)** — il contratto
+   zero-value verificato resta compatibile e continua a ripubblicare sul topic
+   originario, ma i quattro runtime di produzione impostano
+   `RetryTopicSuffix=".retry.<consumer>"`, consumano il proprio topic retry e
+   non ricevono più ACL `Write` sui topic primari condivisi. La libreria
+   normalizza il topic retry al topic originario prima di invocare
+   `ProcessFunc`, perciò la logica applicativa e la DLQ `{topic}.DLQ` restano
+   invariate. Questa deviazione security-driven evita che un consumer
+   compromesso possa forgiare eventi primari per altri consumer; topic e ACL
+   sono creati esplicitamente e verificati in SPEC-062.
+7. **Errori infrastrutturali non promossi a poison pill (T7.1)** — l'opzione
+   `ShouldRetry` è stata aggiunta in modo backward-compatible: `nil` preserva
+   esattamente il comportamento storico. Embedding Worker la usa per propagare
+   indisponibilità TEI (trasporto, 429, 5xx) senza pubblicare retry/DLQ e senza
+   committare l'offset; errori applicativi 4xx restano soggetti al limite
+   deterministico. Il runtime ricrea inoltre il reader sullo stesso group prima
+   del fetch successivo, impedendo che il commit di un offset posteriore superi
+   il record fallito.

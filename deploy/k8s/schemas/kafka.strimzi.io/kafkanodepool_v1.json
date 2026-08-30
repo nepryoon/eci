@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {"enum": ["kafka.strimzi.io/v1"]},
+    "kind": {"enum": ["KafkaNodePool"]},
+    "metadata": {"type": "object", "required": ["name", "namespace", "labels"]},
+    "spec": {
+      "type": "object", "required": ["replicas", "roles", "storage"],
+      "properties": {
+        "replicas": {"type": "integer", "minimum": 1},
+        "roles": {"type": "array", "minItems": 1},
+        "storage": {"type": "object", "required": ["type", "size"]}
+      }
+    }
+  }
+}

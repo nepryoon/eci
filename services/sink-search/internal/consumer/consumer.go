@@ -11,8 +11,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 
+	"github.com/opensearch-project/opensearch-go/v4"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchutil"
 	kafka "github.com/segmentio/kafka-go"
@@ -69,13 +72,7 @@ func EnsureIndex(ctx context.Context, client *opensearchapi.Client) error {
 	case existsResp == nil:
 		return fmt.Errorf("Indices.Exists(%s): %w", IndexName, err)
 	case existsResp.StatusCode == 200:
-		securityMapping := map[string]any{"properties": securityProperties()}
-		if _, err := client.Indices.Mapping.Put(ctx, opensearchapi.MappingPutReq{
-			Indices: []string{IndexName}, Body: opensearchutil.NewJSONReader(securityMapping),
-		}); err != nil {
-			return fmt.Errorf("Mapping.Put(%s): %w", IndexName, err)
-		}
-		return nil
+		return ensureSecurityMapping(ctx, client)
 	case existsResp.StatusCode != 404:
 		return fmt.Errorf("Indices.Exists(%s): status inatteso %d: %w", IndexName, existsResp.StatusCode, err)
 	}
@@ -94,7 +91,26 @@ func EnsureIndex(ctx context.Context, client *opensearchapi.Client) error {
 		Index: IndexName,
 		Body:  opensearchutil.NewJSONReader(mapping),
 	}); err != nil {
+		var createError *opensearch.StructError
+		if errors.As(err, &createError) &&
+			createError.Status == http.StatusBadRequest &&
+			createError.Err.Type == "resource_already_exists_exception" {
+			// Another identical replica won the 404 -> create race. Reconcile
+			// the required security fields so incompatible mappings still fail;
+			// do not suppress any other OpenSearch error.
+			return ensureSecurityMapping(ctx, client)
+		}
 		return fmt.Errorf("Indices.Create(%s): %w", IndexName, err)
+	}
+	return nil
+}
+
+func ensureSecurityMapping(ctx context.Context, client *opensearchapi.Client) error {
+	securityMapping := map[string]any{"properties": securityProperties()}
+	if _, err := client.Indices.Mapping.Put(ctx, opensearchapi.MappingPutReq{
+		Indices: []string{IndexName}, Body: opensearchutil.NewJSONReader(securityMapping),
+	}); err != nil {
+		return fmt.Errorf("Mapping.Put(%s): %w", IndexName, err)
 	}
 	return nil
 }
@@ -195,11 +211,11 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	}
 	securitylabels.Observe(ConsumerName, "accepted")
 
-	isNew, err := markProcessed(ctx, deps.DB, eventID)
+	processed, err := isProcessed(ctx, deps.DB, eventID)
 	if err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("dedup event_id=%s: %w", eventID, err)
 	}
-	if !isNew {
+	if processed {
 		deps.Logf("sink-search: event_id=%s già in processed_events, skip indicizzazione (redelivery)", eventID)
 		return OutcomeDuplicate, nil
 	}
@@ -207,7 +223,26 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	if err := indexDocument(ctx, deps.OpenSearch, chunk); err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("indicizzazione documento id=%s: %w", chunk.ID, err)
 	}
+	isNew, err := markProcessed(ctx, deps.DB, eventID)
+	if err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("complete dedup event_id=%s after OpenSearch index: %w", eventID, err)
+	}
+	if !isNew {
+		deps.Logf("sink-search: event_id=%s completato concorrentemente, indicizzazione idempotente già applicata", eventID)
+		return OutcomeDuplicate, nil
+	}
 	return OutcomeStored, nil
+}
+
+func isProcessed(ctx context.Context, db *sql.DB, eventID string) (bool, error) {
+	var processed bool
+	err := db.QueryRowContext(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM processed_events WHERE event_id = $1 AND consumer_name = $2
+		)`,
+		eventID, ConsumerName,
+	).Scan(&processed)
+	return processed, err
 }
 
 // eventIDFromHeaders — stessa logica di sink-graph (SPEC-015 §2 punto 1).
@@ -231,7 +266,7 @@ func markProcessed(ctx context.Context, db *sql.DB, eventID string) (isNew bool,
 	err = db.QueryRowContext(ctx,
 		`INSERT INTO processed_events (event_id, consumer_name)
 		 VALUES ($1, $2)
-		 ON CONFLICT (event_id) DO NOTHING
+		 ON CONFLICT (event_id, consumer_name) DO NOTHING
 		 RETURNING event_id`,
 		eventID, ConsumerName,
 	).Scan(&returned)

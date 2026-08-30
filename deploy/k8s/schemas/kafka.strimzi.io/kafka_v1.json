@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {"enum": ["kafka.strimzi.io/v1"]},
+    "kind": {"enum": ["Kafka"]},
+    "metadata": {"type": "object", "required": ["name", "namespace"]},
+    "spec": {"type": "object", "required": ["kafka"]}
+  }
+}

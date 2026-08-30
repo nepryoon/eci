@@ -10,11 +10,13 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 	"sync"
 	"time"
 )
 
 const maxBody = 4 << 20
+const readinessTimeout = 2 * time.Second
 
 type Route struct {
 	Upstream *url.URL
@@ -34,9 +36,10 @@ type breaker struct {
 	probe    bool
 }
 type handler struct {
-	cfg      Config
-	client   *http.Client
-	breakers map[string]*breaker
+	cfg             Config
+	client          *http.Client
+	breakers        map[string]*breaker
+	healthEndpoints []string
 }
 
 func NewHandler(cfg Config, client *http.Client) (http.Handler, error) {
@@ -64,7 +67,28 @@ func NewHandler(cfg Config, client *http.Client) (http.Handler, error) {
 			return nil, err
 		}
 	}
-	return &handler{cfg: cfg, client: client, breakers: bs}, nil
+	uniqueHealthEndpoints := make(map[string]struct{}, len(cfg.Routes)+1)
+	addHealthEndpoint := func(route Route) {
+		if route.Upstream == nil {
+			return
+		}
+		target := *route.Upstream
+		target.Path = path.Join(target.Path, "/health")
+		target.RawPath = ""
+		target.RawQuery = ""
+		target.Fragment = ""
+		uniqueHealthEndpoints[target.String()] = struct{}{}
+	}
+	for _, route := range cfg.Routes {
+		addHealthEndpoint(route)
+	}
+	addHealthEndpoint(cfg.DefaultRoute)
+	healthEndpoints := make([]string, 0, len(uniqueHealthEndpoints))
+	for endpoint := range uniqueHealthEndpoints {
+		healthEndpoints = append(healthEndpoints, endpoint)
+	}
+	sort.Strings(healthEndpoints)
+	return &handler{cfg: cfg, client: client, breakers: bs, healthEndpoints: healthEndpoints}, nil
 }
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/healthz" {
@@ -73,6 +97,21 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(200)
+		return
+	}
+	if r.URL.Path == "/ready" {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), readinessTimeout)
+		defer cancel()
+		w.Header().Set("Cache-Control", "no-store")
+		if h.ready(ctx) != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	if r.URL.Path != "/v1/chat/completions" {
@@ -168,6 +207,31 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A completed 2xx/4xx response closes any half-open probe; client
 	// errors do not indicate an unavailable upstream.
 	b.success()
+}
+
+func (h *handler) ready(ctx context.Context) error {
+	if len(h.healthEndpoints) == 0 {
+		return errors.New("no configured upstream")
+	}
+	for _, endpoint := range h.healthEndpoints {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return err
+		}
+		response, err := h.client.Do(request)
+		if err != nil {
+			return err
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+		closeErr := response.Body.Close()
+		if closeErr != nil {
+			return closeErr
+		}
+		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+			return fmt.Errorf("upstream health status %d", response.StatusCode)
+		}
+	}
+	return nil
 }
 func (b *breaker) allow(open time.Duration) bool {
 	b.mu.Lock()

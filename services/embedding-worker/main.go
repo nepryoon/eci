@@ -8,6 +8,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -17,6 +19,8 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 
 	"github.com/eci-project/eci/libs/go/eci/config"
+	"github.com/eci-project/eci/libs/go/eci/kafkaconfig"
+	"github.com/eci-project/eci/libs/go/eci/kafkaready"
 	"github.com/eci-project/eci/libs/go/eci/metrics"
 	"github.com/eci-project/eci/libs/go/eci/observability"
 	"github.com/eci-project/eci/libs/go/eci/resilience"
@@ -33,6 +37,103 @@ const sinkName = "embedding-worker"
 // SPEC-036 §2: i quattro sink condividono il namespace di rete dell'host,
 // serve una porta di default distinta per ciascuno).
 const defaultMetricsPort = "9102"
+
+const dependencyCheckTimeout = 2 * time.Second
+const dependencyRetryInterval = time.Second
+
+var errReadinessCheckMissing = errors.New("embedding-worker: readiness check missing")
+
+func combinedReadiness(
+	kafkaCheck func(context.Context) error,
+	embedderCheck func(context.Context) error,
+) func(context.Context) error {
+	return func(ctx context.Context) error {
+		if kafkaCheck == nil || embedderCheck == nil {
+			return errReadinessCheckMissing
+		}
+		if err := kafkaCheck(ctx); err != nil {
+			return err
+		}
+		return embedderCheck(ctx)
+	}
+}
+
+func waitUntilDependencyReady(
+	ctx context.Context,
+	retryInterval time.Duration,
+	check func(context.Context) error,
+) error {
+	if check == nil || retryInterval <= 0 {
+		return errReadinessCheckMissing
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if err := check(ctx); err == nil {
+			return nil
+		}
+		timer := time.NewTimer(retryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+type closeableReader interface {
+	consumer.MessageReader
+	Close() error
+}
+
+func consumeLoop(
+	ctx context.Context,
+	retryInterval time.Duration,
+	dependencyCheck func(context.Context) error,
+	newReader func() closeableReader,
+	process resilience.ProcessFunc,
+	logf func(string, ...any),
+) error {
+	if newReader == nil || process == nil || logf == nil {
+		return errReadinessCheckMissing
+	}
+	reader := newReader()
+	readerClosed := false
+	dependencyReady := false
+	defer func() {
+		if !readerClosed {
+			_ = reader.Close()
+		}
+	}()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !dependencyReady {
+			if err := waitUntilDependencyReady(ctx, retryInterval, dependencyCheck); err != nil {
+				return err
+			}
+			dependencyReady = true
+		}
+		if _, err := consumer.FetchAndProcess(ctx, reader, process); err != nil {
+			logf("embedding-worker: elaborazione fallita, offset NON committato; reader ricreato prima del prossimo fetch: %v", err)
+			if closeErr := reader.Close(); closeErr != nil {
+				return fmt.Errorf("embedding-worker: chiusura reader dopo errore non committato: %w", closeErr)
+			}
+			readerClosed = true
+			dependencyReady = false
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			reader = newReader()
+			readerClosed = false
+		}
+	}
+}
 
 func main() {
 	ctx := context.Background()
@@ -64,16 +165,34 @@ func main() {
 	modelID := config.EnvOrDefault("EMBEDDING_MODEL_ID", "jina-code-embeddings-1.5b")
 
 	brokers := strings.Split(config.EnvOrDefault("KAFKA_BROKERS", "localhost:9094"), ",")
-	reader := kafka.NewReader(kafka.ReaderConfig{
+	kafkaTransport, err := kafkaconfig.FromEnvironment()
+	if err != nil {
+		log.Fatalf("embedding-worker: configurazione Kafka: %v", err)
+	}
+	retryTopicSuffix := ".retry." + consumer.ConsumerName
+	topics := []string{consumer.TopicCodeChunk, resilience.RetryTopic(consumer.TopicCodeChunk, retryTopicSuffix)}
+	readerConfig := kafka.ReaderConfig{
 		Brokers:     brokers,
 		GroupID:     consumer.ConsumerName,
-		GroupTopics: []string{consumer.TopicCodeChunk},
-	})
-	defer reader.Close()
+		GroupTopics: topics,
+		Dialer:      kafkaTransport.Dialer,
+	}
+	readiness, err := kafkaready.New(brokers, kafkaTransport.Transport, consumer.ConsumerName, topics)
+	if err != nil {
+		log.Fatalf("embedding-worker: configurazione readiness Kafka: %v", err)
+	}
+
+	embedder := embedclient.New(embeddingServiceURL)
+	startupCtx, cancelStartup := context.WithTimeout(ctx, dependencyCheckTimeout)
+	if err := embedder.Health(startupCtx); err != nil {
+		cancelStartup()
+		log.Fatalf("embedding-worker: embedder non pronto prima del consume-loop: %v", err)
+	}
+	cancelStartup()
 
 	deps := consumer.Deps{
 		DB:      db,
-		Embed:   embedclient.New(embeddingServiceURL),
+		Embed:   embedder,
 		ModelID: modelID,
 		Logf:    log.Printf,
 	}
@@ -83,11 +202,17 @@ func main() {
 	// su Topic/BatchTimeout del producer.
 	retryProducer := &kafka.Writer{
 		Addr:                   kafka.TCP(brokers...),
-		AllowAutoTopicCreation: true,
+		Transport:              kafkaTransport.Transport,
+		AllowAutoTopicCreation: false,
 		BatchTimeout:           10 * time.Millisecond,
 	}
 	defer retryProducer.Close()
-	process := resilience.WithRetryAndDLQ(resilience.Config{}, retryProducer, func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (resilience.Outcome, error) {
+	process := resilience.WithRetryAndDLQ(resilience.Config{
+		RetryTopicSuffix: retryTopicSuffix,
+		ShouldRetry: func(err error) bool {
+			return !embedclient.IsUnavailable(err)
+		},
+	}, retryProducer, func(ctx context.Context, topic string, value []byte, headers []kafka.Header) (resilience.Outcome, error) {
 		_, err := consumer.ProcessMessage(ctx, deps, topic, value, headers)
 		return resilience.OutcomeProcessed, err
 	})
@@ -97,6 +222,7 @@ func main() {
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", metrics.Handler())
+		mux.Handle("/ready", kafkaready.Handler(combinedReadiness(readiness.Check, embedder.Health)))
 		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
 			log.Printf("embedding-worker: server HTTP metriche (%s) non avviato: %v (consume-loop non impattato)", metricsAddr, err)
 		}
@@ -105,9 +231,13 @@ func main() {
 	log.Printf("embedding-worker: avviato, brokers=%v topic=%s group=%s embedding_service_url=%s model_id=%s metrics_addr=%s",
 		brokers, consumer.TopicCodeChunk, consumer.ConsumerName, embeddingServiceURL, modelID, metricsAddr)
 
-	for {
-		if _, err := consumer.FetchAndProcess(ctx, reader, process); err != nil {
-			log.Printf("embedding-worker: elaborazione fallita, offset NON committato: %v", err)
-		}
+	if err := consumeLoop(ctx, dependencyRetryInterval, func(parent context.Context) error {
+		checkCtx, cancel := context.WithTimeout(parent, dependencyCheckTimeout)
+		defer cancel()
+		return embedder.Health(checkCtx)
+	}, func() closeableReader {
+		return kafka.NewReader(readerConfig)
+	}, process, log.Printf); err != nil {
+		log.Fatalf("embedding-worker: consume-loop terminato: %v", err)
 	}
 }

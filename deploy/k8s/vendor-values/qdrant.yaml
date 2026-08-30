@@ -1,0 +1,47 @@
+replicaCount: 3
+image:
+  repository: docker.io/qdrant/qdrant
+  tag: v1.19.0
+  useUnprivilegedImage: true
+chartTests:
+  dbInteraction:
+    image: registry.suse.com/bci/bci-base@sha256:b03880998771ffd522e8808bc01a31098378f82e7c4552273e336de3742109f0
+config:
+  cluster:
+    enabled: true
+persistence:
+  size: 50Gi
+podManagementPolicy: Parallel
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+resources:
+  requests: {cpu: "2", memory: 8Gi}
+  limits: {cpu: "8", memory: 32Gi}
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 2000
+  allowPrivilegeEscalation: false
+  privileged: false
+  readOnlyRootFilesystem: true
+  capabilities: {drop: [ALL]}
+podSecurityContext:
+  fsGroup: 3000
+  seccompProfile: {type: RuntimeDefault}
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector: {matchLabels: {app.kubernetes.io/name: qdrant}}
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector: {matchLabels: {app.kubernetes.io/name: qdrant}}
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector: {matchLabels: {app.kubernetes.io/name: qdrant}}
