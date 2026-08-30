@@ -282,6 +282,22 @@ func markProcessed(ctx context.Context, db *sql.DB, eventID string) (isNew bool,
 // nota a fondo SPEC), payload {node_id: msg.EntityID, domain: "code",
 // provenance?: msg.Provenance}.
 func upsertPoint(ctx context.Context, client *qdrant.Client, msg codeEmbeddingPayload) error {
+	request, err := buildUpsertRequest(msg)
+	if err != nil {
+		return err
+	}
+	result, err := client.Upsert(ctx, request)
+	if err != nil {
+		return err
+	}
+	return validateAppliedUpdate(result)
+}
+
+// buildUpsertRequest makes the durability boundary explicit: the external
+// operation is not complete merely because Qdrant acknowledged the RPC. Wait
+// forces Qdrant to apply the update before ProcessMessage may write its
+// PostgreSQL completion marker (ADR-0022).
+func buildUpsertRequest(msg codeEmbeddingPayload) (*qdrant.UpsertPoints, error) {
 	payloadFields := map[string]any{
 		"node_id": msg.EntityID,
 		"domain":  "code",
@@ -289,7 +305,7 @@ func upsertPoint(ctx context.Context, client *qdrant.Client, msg codeEmbeddingPa
 	if len(msg.Provenance) > 0 {
 		var provenance any
 		if err := json.Unmarshal(msg.Provenance, &provenance); err != nil {
-			return fmt.Errorf("decodifica provenance: %w", err)
+			return nil, fmt.Errorf("decodifica provenance: %w", err)
 		}
 		payloadFields["provenance"] = provenance
 		if p, ok := provenance.(map[string]any); ok {
@@ -300,11 +316,13 @@ func upsertPoint(ctx context.Context, client *qdrant.Client, msg codeEmbeddingPa
 	}
 	qdrantPayload, err := qdrant.TryValueMap(payloadFields)
 	if err != nil {
-		return fmt.Errorf("costruzione payload Qdrant: %w", err)
+		return nil, fmt.Errorf("costruzione payload Qdrant: %w", err)
 	}
 
-	_, err = client.Upsert(ctx, &qdrant.UpsertPoints{
+	wait := true
+	return &qdrant.UpsertPoints{
 		CollectionName: CollectionName,
+		Wait:           &wait,
 		Points: []*qdrant.PointStruct{
 			{
 				Id:      qdrant.NewID(DerivePointID(msg.ID)),
@@ -312,6 +330,15 @@ func upsertPoint(ctx context.Context, client *qdrant.Client, msg codeEmbeddingPa
 				Payload: qdrantPayload,
 			},
 		},
-	})
-	return err
+	}, nil
+}
+
+func validateAppliedUpdate(result *qdrant.UpdateResult) error {
+	if result == nil {
+		return fmt.Errorf("Qdrant upsert returned no update result")
+	}
+	if result.GetStatus() != qdrant.UpdateStatus_Completed {
+		return fmt.Errorf("Qdrant upsert not completed: status=%s", result.GetStatus())
+	}
+	return nil
 }

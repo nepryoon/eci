@@ -82,19 +82,32 @@ func mergeCodeNodeQuery(nodeType string) (string, error) {
 	// lockCodeNodeQuery ha già creato/bloccato n nella stessa transazione. Lo
 	// scope viene letto solo ora, dopo l'acquisizione del lock, quindi due move
 	// concorrenti non possono invalidare una partizione precedente obsoleta.
+	unchanged := "n:" + nodeType +
+		" AND coalesce(n.domain = $domain, false)" +
+		" AND coalesce(n.name = $name, false)" +
+		" AND coalesce(n.ast_hash = $ast_hash, false)" +
+		" AND coalesce(n.tenant_id = $tenant_id, false)" +
+		" AND coalesce(n.repo = $repo, false)" +
+		" AND coalesce(n.acl_group = $acl_group, false)" +
+		" AND coalesce(n.path = $path, false)"
+	if nodeType == "Method" {
+		unchanged += " AND coalesce(n.symbol_id = $id, false)"
+	}
+
 	query := "MATCH (n:CodeNode {id: $id})\n" +
-		"WITH n, n.tenant_id AS old_tenant_id, n.repo AS old_repo, n.acl_group AS old_acl_group\n" +
-		"WITH n, [\n" +
+		"WITH n, NOT (" + unchanged + ") AS changed,\n" +
+		"     n.tenant_id AS old_tenant_id, n.repo AS old_repo, n.acl_group AS old_acl_group\n" +
+		"WITH n, changed, [\n" +
 		"  {tenant_id: old_tenant_id, repo: old_repo, acl_group: old_acl_group},\n" +
 		"  {tenant_id: $tenant_id, repo: $repo, acl_group: $acl_group}\n" +
 		"] AS scopes\n" +
 		"UNWIND scopes AS scope\n" +
-		"WITH DISTINCT n, scope.tenant_id AS scope_tenant_id, scope.repo AS scope_repo, scope.acl_group AS scope_acl_group\n" +
+		"WITH DISTINCT n, changed, scope.tenant_id AS scope_tenant_id, scope.repo AS scope_repo, scope.acl_group AS scope_acl_group\n" +
 		"ORDER BY scope_tenant_id, scope_repo, scope_acl_group\n" +
 		"FOREACH (_ IN CASE WHEN scope_tenant_id IS NOT NULL AND scope_repo IS NOT NULL AND scope_acl_group IS NOT NULL THEN [1] ELSE [] END |\n" +
 		"  MERGE (p:GDSPartition {tenant_id: scope_tenant_id, repo: scope_repo, acl_group: scope_acl_group})\n" +
 		"  ON CREATE SET p.generation = 1, p.write_lock = 0\n" +
-		"  ON MATCH SET p.generation = coalesce(p.generation, 0) + 1\n" +
+		"  ON MATCH SET p.generation = CASE WHEN changed THEN coalesce(p.generation, 0) + 1 ELSE p.generation END\n" +
 		")\n" +
 		"WITH DISTINCT n\n" +
 		"SET n:" + nodeType + ", n.domain = $domain, n.name = $name, n.ast_hash = $ast_hash,\n" +
@@ -117,9 +130,11 @@ func mergeCodeNodeQuery(nodeType string) (string, error) {
 // il peso già aggregato dal parser: SET assoluto rende il MERGE idempotente
 // anche se un crash avviene dopo Neo4j ma prima del marker PostgreSQL
 // (ADR-0022).
-// Ogni mutazione della topologia incrementa inoltre la generation di entrambe
-// le partizioni endpoint: un singolo edge può cambiare lo score di qualunque
-// nodo della proiezione, non soltanto dei suoi estremi (ADR-0015).
+// Ogni mutazione effettiva della topologia incrementa inoltre la generation di
+// entrambe le partizioni endpoint: un singolo edge può cambiare lo score di
+// qualunque nodo della proiezione, non soltanto dei suoi estremi (ADR-0015).
+// Un MERGE identico dopo un marker PostgreSQL fallito lascia invece invariata
+// la generation (ADR-0022).
 func mergeCodeRelationQuery(relType string) (string, error) {
 	if !allowedRelTypes[relType] {
 		return "", fmt.Errorf(
@@ -134,19 +149,21 @@ func mergeCodeRelationQuery(relType string) (string, error) {
 	// precedente al lock.
 	query := "MATCH (from:CodeNode {id: $from_id})\n" +
 		"MATCH (to:CodeNode {id: $to_id})\n" +
-		"WITH from, to, from.tenant_id AS from_tenant_id, from.repo AS from_repo, from.acl_group AS from_acl_group,\n" +
+		"OPTIONAL MATCH (from)-[existing:" + relType + "]->(to)\n" +
+		"WITH from, to, NOT (existing IS NOT NULL AND coalesce(existing.weight = coalesce($weight, 1), false)) AS changed,\n" +
+		"     from.tenant_id AS from_tenant_id, from.repo AS from_repo, from.acl_group AS from_acl_group,\n" +
 		"     to.tenant_id AS to_tenant_id, to.repo AS to_repo, to.acl_group AS to_acl_group\n" +
-		"WITH from, to, [\n" +
+		"WITH from, to, changed, [\n" +
 		"  {tenant_id: from_tenant_id, repo: from_repo, acl_group: from_acl_group},\n" +
 		"  {tenant_id: to_tenant_id, repo: to_repo, acl_group: to_acl_group}\n" +
 		"] AS scopes\n" +
 		"UNWIND scopes AS scope\n" +
-		"WITH DISTINCT from, to, scope.tenant_id AS scope_tenant_id, scope.repo AS scope_repo, scope.acl_group AS scope_acl_group\n" +
+		"WITH DISTINCT from, to, changed, scope.tenant_id AS scope_tenant_id, scope.repo AS scope_repo, scope.acl_group AS scope_acl_group\n" +
 		"ORDER BY scope_tenant_id, scope_repo, scope_acl_group\n" +
 		"FOREACH (_ IN CASE WHEN scope_tenant_id IS NOT NULL AND scope_repo IS NOT NULL AND scope_acl_group IS NOT NULL THEN [1] ELSE [] END |\n" +
 		"  MERGE (p:GDSPartition {tenant_id: scope_tenant_id, repo: scope_repo, acl_group: scope_acl_group})\n" +
 		"  ON CREATE SET p.generation = 1, p.write_lock = 0\n" +
-		"  ON MATCH SET p.generation = coalesce(p.generation, 0) + 1\n" +
+		"  ON MATCH SET p.generation = CASE WHEN changed THEN coalesce(p.generation, 0) + 1 ELSE p.generation END\n" +
 		")\n" +
 		"WITH DISTINCT from, to\n" +
 		"MERGE (from)-[r:" + relType + "]->(to)\n" +

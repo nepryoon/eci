@@ -556,6 +556,27 @@ func scenario2RedeliveryDoesNotDuplicate(t *testing.T, ctx context.Context, st *
 		t.Fatalf("nodi con id=%s dopo la prima consegna = %d, want 1", nodeID, countAfterFirst)
 	}
 
+	// Simula il solo failure window tra MERGE Neo4j riuscito e marker
+	// PostgreSQL: la ripetizione applica nuovamente lo stesso MERGE, ma non deve
+	// invalidare una seconda volta la partizione GDS se il grafo non cambia.
+	generationAfterFirst := readPartitionGeneration(t, ctx, st.driver, aclPlaceholder)
+	if _, err := st.db.ExecContext(ctx,
+		`DELETE FROM processed_events WHERE event_id = $1 AND consumer_name = $2`,
+		eventID, consumer.ConsumerName,
+	); err != nil {
+		t.Fatalf("rimozione marker per simulare failure window: %v", err)
+	}
+	replayOutcome, err := consumer.ProcessMessage(ctx, deps, msg1.Topic, msg1.Value, msg1.Headers)
+	if err != nil {
+		t.Fatalf("ProcessMessage dopo marker failure simulata: %v", err)
+	}
+	if replayOutcome != consumer.OutcomeMerged {
+		t.Fatalf("replay outcome = %v, want OutcomeMerged", replayOutcome)
+	}
+	if generationAfterReplay := readPartitionGeneration(t, ctx, st.driver, aclPlaceholder); generationAfterReplay != generationAfterFirst {
+		t.Fatalf("generation dopo MERGE idempotente = %d, want %d", generationAfterReplay, generationAfterFirst)
+	}
+
 	// "Riavvio": nuovo reader, STESSO group id — l'offset non committato
 	// fa sì che lo stesso messaggio venga riconsegnato.
 	reader2 := newReaderWithGroup(brokers, groupID)

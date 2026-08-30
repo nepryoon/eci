@@ -22,6 +22,12 @@ func TestGDSInvalidationUsesPartitionGenerationWithoutPartitionScan(t *testing.T
 		if strings.Contains(query, "MATCH (stale:CodeNode)") || strings.Contains(query, "REMOVE stale.") {
 			t.Errorf("%s mutation performs an eager full-partition rewrite", name)
 		}
+		if !strings.Contains(query, "CASE WHEN changed") {
+			t.Errorf("%s mutation does not gate generation advancement on a real graph change", name)
+		}
+		if strings.Contains(query, "ON MATCH SET p.generation = coalesce(p.generation, 0) + 1") {
+			t.Errorf("%s mutation advances generation unconditionally on an idempotent retry", name)
+		}
 	}
 }
 

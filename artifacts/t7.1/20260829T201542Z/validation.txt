@@ -26,6 +26,8 @@ postgres_cdc_role_unit=PASS (passwordless NOLOGIN carrier; separate login Secret
 postgres_cdc_migration_integration=PASS (fixed publication + carrier SELECT grant + disabled-to-enabled inherited privilege + down migration)
 processed_events_consumer_scope_integration=PASS (migration 0006 composite key; same-event fan-out; same-consumer dedup; fail-closed rollback)
 sink_external_write_failure_marker_integration=PASS (Neo4j, Qdrant, OpenSearch failures leave no processed marker)
+qdrant_completion_boundary_unit_integration=PASS (wait=true; only Completed accepted; real Qdrant applied before marker)
+neo4j_idempotent_generation_integration=PASS (simulated post-MERGE marker loss; identical retry preserves GDS generation)
 dev_connectivity_probe_image_digest=PASS (registry-resolved netshoot multi-arch digest)
 opensearch_data_node_image_digest=PASS (CR general.image and recreated live pod spec/imageID)
 qdrant_unauthenticated_ingress_isolation=PASS (peer/bootstrap/client allow-list; unrelated data-plane pod denied)

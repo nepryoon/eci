@@ -375,7 +375,9 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       eccezione CIDR esterna viene renderizzata.
 - [x] I sink graph/vector/search registrano `processed_events` soltanto dopo
       il write esterno idempotente riuscito; un write fallito resta ritentabile
-      e non viene trasformato in falso duplicato.
+      e non viene trasformato in falso duplicato. Qdrant richiede applicazione
+      sincrona `Completed`; i MERGE Neo4j identici non avanzano la generation
+      GDS se nessun dato/topologia cambia.
 - [x] Kubeconform valida built-in e CRD contro schemi pinned.
 - [x] Cluster dev realmente creato; operatori/store Ready e connettività
       in-cluster verificata, oppure eventuale limite esterno/risorse è riportato

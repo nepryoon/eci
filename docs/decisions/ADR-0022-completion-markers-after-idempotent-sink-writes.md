@@ -32,8 +32,13 @@ di sink idempotenti.
 scoped definito da ADR-0021. Se assente eseguono rispettivamente `MERGE`, Qdrant
 upsert o OpenSearch index con ID deterministico. Il `MERGE` delle relazioni
 imposta il peso assoluto già aggregato nel payload e non lo risomma a ogni
-redelivery. Inseriscono il marker soltanto dopo il successo esterno. Un errore
-di inserimento del marker viene ritornato: la riconsegna ripete in sicurezza il
+redelivery. Qdrant usa `wait=true` e accetta come successo soltanto
+`UpdateStatus_Completed`, non un semplice acknowledge asincrono. Le mutation
+Neo4j calcolano `changed` sotto gli stessi lock degli entity endpoint e
+incrementano la generation GDS soltanto quando proprietà, label, topology o
+weight cambiano realmente; un MERGE identico ripetuto non invalida gli score.
+Inseriscono il marker soltanto dopo il successo esterno applicato. Un errore di
+inserimento del marker viene ritornato: la riconsegna ripete in sicurezza il
 write idempotente.
 
 Due consegne concorrenti possono entrambe eseguire il write; la chiave composta
@@ -47,6 +52,8 @@ viene introdotta.
 - Un outage esterno non lascia un marker e il retry/DLQ resta operativo.
 - Un crash tra write e marker può causare un write ripetuto, mai una perdita;
   MERGE/upsert/index per ID rendono la ripetizione convergente.
+- Un acknowledge Qdrant non applicato non diventa completion marker; un retry
+  Neo4j senza cambiamento materiale non avanza la generation GDS.
 - I payload permanentemente invalidi continuano a essere scartati e committati
   senza marker, come previsto dalle SPEC storiche.
 - Nessun contratto protobuf, schema dati o ACL cambia.
@@ -62,4 +69,6 @@ La sequenza non amplia lo scope: tenant, repository e ACL continuano a
 provenire dal payload CDC autenticato/validato e i client datastore conservano
 le identità least-privilege. Regressioni con PostgreSQL reale e backend
 irraggiungibili provano che Neo4j, Qdrant e OpenSearch non lasciano marker dopo
-un write fallito.
+un write fallito. Qdrant reale prova l'upsert blocking/completed; Neo4j reale
+simula la perdita del marker e prova che il MERGE identico conserva la
+generation della partizione.

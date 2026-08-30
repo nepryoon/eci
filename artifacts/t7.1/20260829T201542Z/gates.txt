@@ -11,6 +11,8 @@ task k8s:dev:verify=PASS after revision 23 (readiness, stateful Redis, connectiv
 task k8s:dev:verify=PASS after revision 24 (passwordless CDC carrier membership/inherited SELECT, readiness, connectivity, OPA, Keycloak HTTPS/OIDC discovery and Kafka mTLS ACL smoke)
 postgres DDL integration=PASS (migration 0005 publication/upgrade-safe privilege carrier; migration 0006 consumer-scoped dedup/fail-closed rollback)
 sink-search fan-out integration=PASS (embedding-worker processed row cannot suppress sink-search copy)
+sink-vector completion integration=PASS (blocking Qdrant Completed result before marker)
+sink-graph marker-loss integration=PASS (identical MERGE preserves partition generation)
 live Debezium registration=PASS (connector/task RUNNING; pgoutput slot active)
 go test -tags=integration ./eci/resilience/... -run TestWithRetryAndDLQ=PASS (including ADR-0019 scoped retry)
 OpenSearch operator digest-pinned atomic upgrade=PASS (revision 9; live spec/imageID verified)

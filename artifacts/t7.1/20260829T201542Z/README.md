@@ -174,7 +174,10 @@ value-driven runtime image, and changes all three materialization sinks to
 record `processed_events` only after a successful idempotent external write.
 Real Postgres-backed failure-path regressions prove that unreachable Neo4j,
 Qdrant and OpenSearch writes leave no processed marker and therefore remain
-retryable. These are CPU/Docker integration and deterministic render evidence;
+retryable. Qdrant additionally waits for an applied `Completed` result before
+the marker; a real Neo4j marker-loss replay proves that an identical MERGE does
+not advance GDS partition generation. These are CPU/Docker integration and
+deterministic render evidence;
 they do not rewrite the earlier live-cluster observations.
 The final CDC upgrade regression keeps only the passwordless NOLOGIN privilege
 carrier when Connect is disabled, with no `eci_cdc` login role or CDC Secret

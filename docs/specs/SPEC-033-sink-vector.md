@@ -17,8 +17,9 @@ Consumare `outbox.event.CodeEmbedding` (ora completo di `node_id`/`domain`(impli
 **Consumer**: stesso scheletro di `sink-graph`/`embedding-worker` — consuma `outbox.event.CodeEmbedding`, dedup via `processed_events` (stessa tabella condivisa, stesso principio), per ciascun messaggio upsert di UN punto Qdrant con payload `{node_id: <entity_id del messaggio>, domain: "code", provenance: <provenance del messaggio, propagato invariato>}` — `domain` hardcoded qui (mai propagato attraverso la catena, per decisione già presa prima di SPEC-032: è sempre stata la costante `'code'`).
 
 ADR-0022 precisa la sequenza fail-safe: check del marker, upsert idempotente,
-quindi marker di completamento. Un upsert fallito non deve mai apparire come
-evento già processato al retry.
+quindi marker di completamento dopo applicazione reale. L'upsert richiede
+`wait=true` e `UpdateStatus_Completed`: acknowledge asincrono, timeout o status
+non-completed non devono mai apparire come evento già processato al retry.
 
 ## 3. Comportamento (scenari)
 
@@ -26,12 +27,14 @@ evento già processato al retry.
 2. **Dato** lo stesso messaggio consumato una seconda volta (ridelivery), **quando** il servizio lo riprocessa, **allora** nessun nuovo punto duplicato — dedup via `processed_events`, stesso principio già stabilito.
 3. **Dato** il servizio avviato per la prima volta contro un'istanza Qdrant senza la collection `code_embeddings`, **quando** parte, **allora** la crea con `Size: 1536`/`Distance: Cosine` prima di iniziare a consumare.
 4. **Dato** il servizio riavviato con la collection già esistente, **quando** parte, **allora** non tenta di ricrearla (nessun errore "collection già esistente" che blocchi l'avvio).
+5. **Dato** un upsert Qdrant, **quando** l'RPC risponde, **allora** il marker è scritto soltanto se la request aveva `wait=true` e il risultato è `Completed`; ogni altro status è errore ritentabile.
 
 ## 4. Errori & edge case
 
 | Condizione | Comportamento atteso |
 |---|---|
 | Qdrant irraggiungibile all'avvio (setup collection) | Errore esplicito, il servizio non parte silenziosamente in uno stato inconsistente |
+| Upsert acknowledged ma non applicato / wait timeout | Errore esplicito, nessun marker `processed_events`; retry consentito |
 | Un messaggio `CodeEmbedding` senza `provenance` (caso limite già ammesso da SPEC-032 §4 — entità non nel batch al momento della scrittura) | Punto Qdrant scritto comunque, senza la chiave `provenance` nel payload — nessun crash, nessun valore fabbricato |
 
 ## 5. Non-goals
