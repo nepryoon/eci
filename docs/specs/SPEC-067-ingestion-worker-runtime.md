@@ -109,9 +109,10 @@ pub fn persist_ingestion_command(
    durante una transazione gia' iniziata, la receipt rende l'eventuale replay
    del nuovo owner idempotente e il vecchio owner non committa l'offset. Le
    nuove assignment osservate durante il retry sono immediatamente pausate; il
-   buffer applicativo e' limitato a 64 record, oltre il quale
-   il worker continua a pollare solo timer/shutdown lasciando agire il limite
-   della coda librdkafka.
+   buffer applicativo e' limitato a 64 record. A capacita' piena il worker
+   continua a servire `StreamConsumer::recv()` per mantenere viva la membership:
+   qualunque record prefetched esposto dopo il pause viene riavvolto allo stesso
+   offset, mai aggiunto oltre il limite, scartato o acknowledged.
 6. **Provenance completa.** Given un comando applicato, When si leggono
    CodeNode/CodeRelation/CodeChunk e relativi eventi, Then provenance contiene
    scope trusted, `repo`, `commit_sha`, `path`, un solo `ingested_at` DB e non
@@ -119,7 +120,9 @@ pub fn persist_ingestion_command(
 7. **Lifecycle reale.** Given dipendenze sane e consumer assegnato, When si
    chiamano i probe, Then `/live=204`, `/ready=204` e `/metrics` espone dati;
    dipendenza/assignment assente rende solo readiness 503 e non causa restart
-   storm tramite liveness.
+   storm tramite liveness. La readiness PostgreSQL verifica anche presenza
+   delle tabelle migrate e tutti i privilegi richiesti dalla transazione;
+   raggiungibilita' o `SELECT 1` da soli non rendono il pod ready.
 8. **Deployment worker pool.** Given render standard con applicazioni abilitate,
    When si ispeziona Helm, Then esiste `Deployment/ingestion` a 4 repliche con
    Service metrics, PDB/probe/resources, identita' Kafka propria, Secret
@@ -141,7 +144,8 @@ pub fn persist_ingestion_command(
 | MinIO header/body timeout o 5xx, Kafka transport, PostgreSQL unavailable | transient; no commit, readiness 503, retry bounded |
 | endpoint MinIO HTTP, CA PostgreSQL/MinIO assente o non valida | startup fail-closed; HTTPS/TLS con hostname e CA verificati obbligatori |
 | rebalance durante fetch/retry/persist/DLQ publish | record invalidato dall'epoch; ownership riverificata dopo ogni await e prima dell'offset commit |
-| nuova assignment durante backoff | assignment pausata; buffer applicativo massimo 64 record; poi nessun drain ulteriore |
+| nuova assignment durante backoff | assignment pausata; buffer applicativo massimo 64 record; a cap piena il poll continua e ogni record prefetched viene riavvolto allo stesso offset |
+| migration receipt/tabella canonica assente o ruolo senza un privilegio runtime | readiness PostgreSQL 503 anche se la connessione e `SELECT 1` funzionano |
 | PostgreSQL auth/connect/query/lock/commit stall | connect 5s, statement/TCP 10s e lock 5s; transient senza offset commit |
 | parse panic per input ostile | catturato al command boundary, permanent `parse_failed`; il processo resta vivo |
 | receipt esistente con fingerprint uguale | `Duplicate` prima di MinIO/parser, zero nuove righe outbox |
@@ -276,3 +280,8 @@ contratto di scope o la semantica at-least-once. Il runner E2E storico invoca
 ora esplicitamente `oneshot`; il runtime non reintroduce path positional
 ambigui. Il receipt preflight elimina dipendenza da MinIO per replay gia'
 completati, mentre la persistenza conserva advisory lock e verifica finale.
+Il retry a buffer pieno conserva la membership Kafka senza oltrepassare il cap:
+un record prefetched e' riavvolto prima di continuare. La readiness PostgreSQL
+interroga deterministicamente tabelle e privilegi effettivamente richiesti;
+un test PostgreSQL 17 con ruolo least-privilege verifica il pass e il fail dopo
+revoca di `SELECT` sulla receipt.
