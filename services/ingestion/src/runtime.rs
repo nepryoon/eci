@@ -837,6 +837,7 @@ fn connect_postgres_with_deadlines(dsn: &str, ca_pem: &[u8]) -> Result<postgres:
 
 enum CommandPersistenceError {
     Conflict,
+    Invalid,
     Transient,
 }
 
@@ -921,6 +922,7 @@ async fn process_message<M: Message>(
                 dependency: "postgres",
             }
         }
+        Err(CommandPersistenceError::Invalid) => unreachable!("receipt lookup is read-only"),
         Err(CommandPersistenceError::Conflict) => unreachable!("receipt lookup is read-only"),
     };
     let source_span = tracing::info_span!(
@@ -979,6 +981,8 @@ async fn process_message<M: Message>(
                 .map_err(|error| {
                     if error.is_command_id_conflict() {
                         CommandPersistenceError::Conflict
+                    } else if error.is_invalid_command_data() {
+                        CommandPersistenceError::Invalid
                     } else {
                         CommandPersistenceError::Transient
                     }
@@ -995,6 +999,9 @@ async fn process_message<M: Message>(
         },
         Err(CommandPersistenceError::Conflict) => ProcessAction::Dlq {
             reason: "command_id_conflict",
+        },
+        Err(CommandPersistenceError::Invalid) => ProcessAction::Dlq {
+            reason: "parse_failed",
         },
         Err(CommandPersistenceError::Transient) => ProcessAction::Retry {
             dependency: "postgres",

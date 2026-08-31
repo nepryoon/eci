@@ -103,6 +103,10 @@ pub fn persist_ingestion_command(
    rappresentazione UUID RFC 4122 con gruppi `8-4-4-4-12` richiesta dal format
    JSON Schema (hex case-insensitive), non le forme compact, braced o URN che
    il parser UUID permissivo saprebbe altrimenti normalizzare.
+   L'output parser viene inoltre validato prima di aprire la transazione:
+   entity ID e coppie `(entity_id, chunk_index)` devono essere unici e ogni
+   chunk deve appartenere a un nodo del file; una violazione deterministica è
+   `parse_failed`, mai un retry PostgreSQL infinito.
 5. **Errore transitorio/backpressure.** Given Kafka, PostgreSQL o MinIO
    indisponibile, When un comando e' in-flight, Then nessun offset viene
    committato, la partizione non avanza, il consumer continua a pollare mentre
@@ -158,6 +162,7 @@ pub fn persist_ingestion_command(
 | migration receipt/tabella canonica assente o ruolo senza un privilegio runtime | readiness PostgreSQL 503 anche se la connessione e `SELECT 1` funzionano |
 | PostgreSQL auth/connect/query/lock/commit stall | connect 5s, statement/TCP 10s e lock 5s; transient senza offset commit |
 | parse panic per input ostile | catturato al command boundary, permanent `parse_failed`; il processo resta vivo |
+| dichiarazioni duplicate producono entity/chunk key uguali | reject pre-transazione, permanent `parse_failed`; nessun pause/retry infinito |
 | receipt esistente con fingerprint uguale | `Duplicate` prima di MinIO/parser, zero nuove righe outbox |
 | receipt esistente con fingerprint diverso | `command_id_conflict` prima di MinIO/parser, zero write canonici |
 | DLQ publish fallisce | original offset non committato |
@@ -206,7 +211,8 @@ separato emerso dall'audit di completezza.
 - Unit Rust: schema/header/path/key/fingerprint; UUID hyphenated lowercase e
   uppercase positivo, compact/braced/URN negativi; path ASCII e multibyte ai
   boundary 1024/1025 code point con key S3 bounded; scope body rifiutato; ordering
-  stabile; DLQ reason allow-list; payload/failure non compaiono in log/metric;
+  stabile; dichiarazioni JS duplicate riproducono ID/chunk duplicati e sono
+  rifiutate prima della transazione; DLQ reason allow-list; payload/failure non compaiono in log/metric;
   endpoint MinIO plaintext e CA PostgreSQL invalida sono rifiutati.
 - Unit runtime con fake Kafka/object fetch/persistence: offset success,
   transient no-commit, DLQ-before-commit, shutdown e readiness transitions.
@@ -334,3 +340,8 @@ diventano nuove root scollegate. L'ultimo controllo contract/runtime conserva
 la rappresentazione UUID originale durante la deserializzazione abbastanza a
 lungo da rifiutare compact, braced e URN; la forma hyphenated rimane valida con
 hex maiuscolo o minuscolo, come il format JSON Schema.
+La review finale ha anche riprodotto due dichiarazioni JavaScript top-level con
+lo stesso nome: parser e chunker generavano chiavi deterministiche duplicate e
+il vincolo PostgreSQL veniva erroneamente classificato transitorio. Il boundary
+di persistenza valida ora unicità e ownership dei chunk prima della transazione;
+`InvalidCommandData` è mappato a `parse_failed` permanente.

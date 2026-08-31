@@ -4,7 +4,7 @@
 //! sostituzione (delete+insert) delle relazioni emananti da questo file, e
 //! una riga `outbox` per ciascuna entità toccata (SPEC-014 §2).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
@@ -110,6 +110,10 @@ pub struct PersistError(PersistErrorKind);
 impl PersistError {
     pub fn is_command_id_conflict(&self) -> bool {
         matches!(self.0, PersistErrorKind::CommandIdConflict)
+    }
+
+    pub fn is_invalid_command_data(&self) -> bool {
+        matches!(self.0, PersistErrorKind::InvalidCommandData)
     }
 }
 
@@ -234,9 +238,7 @@ pub fn persist_ingestion_command(
         ingestion.outcome = tracing::field::Empty
     );
     let _entered = span.enter();
-    let result = persist_ingestion_command_inner(
-        client, scope, command, nodes, relations, chunks,
-    );
+    let result = persist_ingestion_command_inner(client, scope, command, nodes, relations, chunks);
     let outcome = match &result {
         Ok(CommandOutcome::Applied(_)) => "applied",
         Ok(CommandOutcome::Duplicate) => "duplicate",
@@ -254,7 +256,7 @@ fn persist_ingestion_command_inner(
     relations: Vec<CodeRelation>,
     chunks: &[CodeChunk],
 ) -> Result<CommandOutcome, PersistError> {
-    if nodes.iter().any(|node| node.file_path != command.path()) {
+    if !parsed_command_data_is_valid(command.path(), &nodes, chunks) {
         return Err(PersistError(PersistErrorKind::InvalidCommandData));
     }
     let trace_id = eci_common::observability::current_trace_id_hex();
@@ -315,6 +317,27 @@ fn persist_ingestion_command_inner(
     )?;
     tx.commit()?;
     Ok(CommandOutcome::Applied(summary))
+}
+
+fn parsed_command_data_is_valid(
+    command_path: &str,
+    nodes: &[CodeNode],
+    chunks: &[CodeChunk],
+) -> bool {
+    let mut node_ids = HashSet::with_capacity(nodes.len());
+    if nodes.is_empty()
+        || nodes
+            .iter()
+            .any(|node| node.file_path != command_path || !node_ids.insert(node.id.as_str()))
+    {
+        return false;
+    }
+
+    let mut chunk_keys = HashSet::with_capacity(chunks.len());
+    chunks.iter().all(|chunk| {
+        node_ids.contains(chunk.entity_id.as_str())
+            && chunk_keys.insert((chunk.entity_id.as_str(), chunk.chunk_index))
+    })
 }
 
 fn persist_parsed_file_in_transaction(
@@ -512,4 +535,27 @@ fn provenance_json(
         value["ingested_at"] = serde_json::Value::String(commit.ingested_at.to_owned());
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_parser_entities_and_chunks_are_invalid_command_data() {
+        let source = "function duplicate() {}\nfunction duplicate() {}\n";
+        let (nodes, _relations, chunks) = crate::parse_file_full_private("duplicate.js", source);
+        assert!(
+            nodes
+                .iter()
+                .enumerate()
+                .any(|(index, node)| nodes[..index].iter().any(|prior| prior.id == node.id)),
+            "fixture must reproduce duplicate deterministic parser IDs"
+        );
+        assert!(!parsed_command_data_is_valid(
+            "duplicate.js",
+            &nodes,
+            &chunks,
+        ));
+    }
 }
