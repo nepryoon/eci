@@ -51,12 +51,17 @@ identita' distinta read-only sul topic/gruppo e write-only sulla DLQ.
 
 Il bucket e l'endpoint MinIO sono configurazione trusted del workload. La key
 e' derivata deterministicamente come
-`sources/v1/<sha256(scope)>/<commit_sha>/<percent-encoded-path>` e deve
-coincidere con quella usata dal producer. Il worker rifiuta path assoluti,
-segmenti `.`/`..`, NUL/control character, backslash, path oltre 1024 byte,
-commit non SHA-1 lower-hex, digest non SHA-256 lower-hex e file oltre il limite
-configurato. Scarica con un client S3 autenticato, applica un limite streaming,
-verifica byte count, SHA-256 e UTF-8 prima del parser.
+`sources/v1/<sha256(lp(scope))>/<commit_sha>/<sha256(lp(path-utf8))>` e deve coincidere
+con quella usata dal producer. Entrambi gli hash usano componenti con lunghezza
+prefissata. La key ha sempre 181 byte ASCII, resta entro il limite S3 di 1024
+byte anche per nomi multibyte e non espone il path del repository. Il worker
+rifiuta path assoluti, segmenti `.`/`..`, NUL/control character, backslash e
+path oltre 1024 code point Unicode, esattamente la semantica `maxLength` di JSON
+Schema 2020-12; conserva i path UTF-8 supportati dai repository senza confondere
+byte e caratteri. Rifiuta inoltre commit non SHA-1 lower-hex, digest non SHA-256
+lower-hex e file oltre il limite configurato. Scarica con un client S3
+autenticato, applica un limite streaming, verifica byte count, SHA-256 e UTF-8
+prima del parser.
 
 Ogni replica consuma con `enable.auto.commit=false` e al massimo un comando per
 partizione in elaborazione. Il write canonico e una receipt
@@ -104,6 +109,16 @@ cancella dati canonici. Credenziali Kafka/MinIO/PostgreSQL provengono solo da
 Secret per-workload. Mancanza di header, TLS, ACL, bucket o receipt table
 fallisce chiuso; nessun fallback plaintext, bucket/path locale o scope di
 default e' consentito.
+
+La derivazione hash del path sostituisce la precedente key percent-encoded
+prima del merge di T7.1a; non esiste evidenza di oggetti di produzione con il
+layout precedente. Un producer candidato gia' avviato deve ripubblicare il blob
+sotto la key hash prima di inviare il comando. Un rollout futuro con oggetti
+legacy richiederebbe dual-write o una migrazione esplicita producer-side: il
+worker non tenta key alternative, per non trasformare input non fidato in una
+superficie di probing. Il rollback applicativo deve quindi ripristinare insieme
+producer e worker; le receipt gia' completate restano valide perche' il loro
+fingerprint canonico include il path originale, non la key MinIO derivata.
 
 ## Review avversariale
 

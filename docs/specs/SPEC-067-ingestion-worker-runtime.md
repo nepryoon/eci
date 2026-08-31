@@ -97,7 +97,9 @@ pub fn persist_ingestion_command(
 4. **Sorgente vincolata.** Given key/path/size/digest inatteso, symlink/URL o
    blob non UTF-8, When il comando e' validato/scaricato, Then nessun parser o
    PostgreSQL write parte; l'errore permanente sanitizzato va in DLQ senza
-   contenuto, scope o path.
+   contenuto, scope o path. `maxLength=1024` e il runtime misurano entrambi code
+   point Unicode; la key MinIO usa un digest fisso del path UTF-8 e non puo'
+   superare il limite S3 per un path valido.
 5. **Errore transitorio/backpressure.** Given Kafka, PostgreSQL o MinIO
    indisponibile, When un comando e' in-flight, Then nessun offset viene
    committato, la partizione non avanza, il consumer continua a pollare mentre
@@ -140,7 +142,8 @@ pub fn persist_ingestion_command(
 | message key assente o diversa dalla key derivata | permanent `invalid_message_key`; impedisce di eludere l'ordinamento per path |
 | scope presente anche nel body/additional property | schema reject; il body non diventa autorita' |
 | payload >64 KiB o JSON/schema/versione invalida | permanent deny/DLQ; nessun echo del payload |
-| path assoluto, `.`/`..`, backslash, control o >1024 byte | permanent deny prima di costruire la key |
+| path assoluto, `.`/`..`, backslash, control o >1024 code point Unicode | permanent `invalid_path` prima di costruire la key |
+| path multibyte valido entro 1024 code point | accettato; key S3 ASCII fissa di 181 byte derivata dal digest del path |
 | commit/digest/UUID/size invalido o size oltre config | permanent deny |
 | object key configurabile dal messaggio o endpoint non trusted | impossibile per tipo/schema; key derivata e endpoint solo env |
 | GET object 404/digest/size/UTF-8 mismatch | permanent failure/DLQ; nessun write |
@@ -197,7 +200,8 @@ separato emerso dall'audit di completezza.
 
 ## 7. Test plan
 
-- Unit Rust: schema/header/path/key/fingerprint; scope body rifiutato; ordering
+- Unit Rust: schema/header/path/key/fingerprint; path ASCII e multibyte ai
+  boundary 1024/1025 code point con key S3 bounded; scope body rifiutato; ordering
   stabile; DLQ reason allow-list; payload/failure non compaiono in log/metric;
   endpoint MinIO plaintext e CA PostgreSQL invalida sono rifiutati.
 - Unit runtime con fake Kafka/object fetch/persistence: offset success,
@@ -312,3 +316,7 @@ la `terminationGracePeriodSeconds: 30` verificata nel render Helm.
 Una volta latched SIGTERM il worker non avvia piu' publish DLQ o commit offset:
 un'eventuale transazione completata durante il drain viene ripresa come replay
 idempotente tramite receipt dal nuovo owner.
+La review finale ha corretto il mismatch Unicode: contratto e runtime contano
+code point, mentre la key oggetto usa un digest length-prefixed del path UTF-8.
+Path multibyte contract-valid non finiscono piu' in DLQ e la key resta sempre
+entro il limite S3 senza rivelare il nome del file.

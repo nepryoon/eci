@@ -37,6 +37,13 @@ fn valid_headers() -> Vec<(String, Vec<u8>)> {
     ]
 }
 
+fn payload_with_path(path: &str) -> Vec<u8> {
+    let mut payload: serde_json::Value =
+        serde_json::from_slice(&valid_payload()).expect("valid test payload");
+    payload["path"] = serde_json::Value::String(path.to_owned());
+    serde_json::to_vec(&payload).expect("serialize path test payload")
+}
+
 #[test]
 fn checked_in_command_contract_is_closed_and_matches_runtime_limits() {
     let path = concat!(
@@ -156,15 +163,53 @@ fn paths_identifiers_and_size_are_strictly_bounded() {
 }
 
 #[test]
+fn path_length_matches_json_schema_unicode_semantics_and_s3_key_limit() {
+    let multibyte = format!("src/{}.go", "é".repeat(600));
+    let (scope, command) = parse_authenticated_command(
+        &payload_with_path(&multibyte),
+        &valid_headers(),
+        16 * 1024 * 1024,
+    )
+    .expect("600 multibyte code points are contract-valid");
+    let object_key = source_object_key(&scope, &command);
+    assert!(
+        object_key.len() <= 1024,
+        "S3 object keys are at most 1024 bytes"
+    );
+    assert!(
+        !object_key.contains('é'),
+        "object key does not disclose the path"
+    );
+
+    let exact_boundary = format!("{}.go", "界".repeat(1021));
+    parse_authenticated_command(
+        &payload_with_path(&exact_boundary),
+        &valid_headers(),
+        16 * 1024 * 1024,
+    )
+    .expect("JSON Schema maxLength=1024 counts Unicode code points");
+
+    let beyond_boundary = format!("{}.go", "界".repeat(1022));
+    let error = parse_authenticated_command(
+        &payload_with_path(&beyond_boundary),
+        &valid_headers(),
+        16 * 1024 * 1024,
+    )
+    .expect_err("1025 code points exceed the contract boundary");
+    assert_eq!(error.kind(), CommandErrorKind::InvalidPath);
+}
+
+#[test]
 fn object_key_and_partition_key_are_deterministic_and_non_disclosing() {
     let (scope, command) =
         parse_authenticated_command(&valid_payload(), &valid_headers(), 16 * 1024 * 1024).unwrap();
     let object_key = source_object_key(&scope, &command);
     assert!(object_key.starts_with("sources/v1/"));
-    assert!(object_key.ends_with("/src/order%20service.go"));
+    assert_eq!(object_key.len(), 181);
     assert!(object_key.contains(command.commit_sha()));
     assert!(!object_key.contains("tenant-a"));
     assert!(!object_key.contains("orders"));
+    assert!(!object_key.contains("order service.go"));
 
     let key = command_message_key(&scope, &command);
     assert_eq!(key.len(), 64);

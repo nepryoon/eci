@@ -8,7 +8,10 @@ use uuid::Uuid;
 
 const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 const SCHEMA_MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_PATH_BYTES: usize = 1024;
+// JSON Schema maxLength is measured in Unicode scalar values. Keep this
+// predicate identical so contract-valid multibyte and ASCII paths share the
+// same boundary.
+const MAX_PATH_CODE_POINTS: usize = 1024;
 const REQUIRED_SCOPE_HEADERS: [&str; 3] = ["eci-tenant-id", "eci-repository", "eci-acl-group"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,7 +177,7 @@ fn lower_hex(value: &str, len: usize) -> bool {
 
 fn validate_path(path: &str) -> Result<(), CommandError> {
     if path.is_empty()
-        || path.len() > MAX_PATH_BYTES
+        || path.chars().count() > MAX_PATH_CODE_POINTS
         || path.starts_with('/')
         || path.contains('\\')
         || path.chars().any(char::is_control)
@@ -198,10 +201,11 @@ pub fn source_object_key(
     command: &IngestionFileCommand,
 ) -> String {
     let scope_hash = digest_components(&[scope.tenant_id(), scope.repository(), scope.acl_group()]);
+    let path_hash = digest_components(&[command.path()]);
     format!(
         "sources/v1/{scope_hash}/{}/{}",
         command.commit_sha(),
-        percent_encode_path(command.path())
+        path_hash
     )
 }
 
@@ -246,17 +250,4 @@ fn digest_components(components: &[&str]) -> String {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn percent_encode_path(path: &str) -> String {
-    let mut encoded = String::with_capacity(path.len());
-    for byte in path.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'/') {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push('%');
-            encoded.push_str(&format!("{byte:02X}"));
-        }
-    }
-    encoded
 }

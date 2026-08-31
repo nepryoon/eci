@@ -16,7 +16,12 @@
     "schema_version": {"const": "1"},
     "command_id": {"type": "string", "format": "uuid"},
     "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-    "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "description": "Repository-relative UTF-8 path; length is Unicode code points per JSON Schema 2020-12"
+    },
     "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "source_size_bytes": {
       "type": "integer",
