@@ -54,7 +54,8 @@ python3 -m unittest tests.unit.envoy_descriptor.test_envoy_descriptor
 
 ## 7. Test plan
 
-- Unit Python con `google.protobuf.descriptor_pb2.FileDescriptorSet`.
+- Unit Python con decoder strutturale stdlib di `FileDescriptorSet` (campi
+  file/package/service), senza dipendenza Python globale non dichiarata.
 - Rigenerazione Buf path-scoped ripetuta e clean-diff.
 - `task verify:generated`, full CPU/security/guard.
 
