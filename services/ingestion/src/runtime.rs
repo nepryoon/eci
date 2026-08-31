@@ -932,6 +932,8 @@ async fn process_message<M: Message>(
             persist_ingestion_delete_command(&mut postgres, &scope, &command).map_err(|error| {
                 if error.is_command_id_conflict() {
                     CommandPersistenceError::Conflict
+                } else if error.is_invalid_command_data() {
+                    CommandPersistenceError::Invalid
                 } else {
                     CommandPersistenceError::Transient
                 }
@@ -948,6 +950,9 @@ async fn process_message<M: Message>(
             },
             Err(CommandPersistenceError::Conflict) => ProcessAction::Dlq {
                 reason: "command_id_conflict",
+            },
+            Err(CommandPersistenceError::Invalid) => ProcessAction::Dlq {
+                reason: "parse_failed",
             },
             Err(CommandPersistenceError::Transient) => ProcessAction::Retry {
                 dependency: "postgres",
