@@ -94,7 +94,10 @@ tasks:
     desc: Valida il bootstrap TLS con l'immagine Envoy T6.6 pinned (richiede Docker e OpenSSL)
     cmds:
       - |
-        ECI_ENVOY_TLS_DIR="$(mktemp -d)"
+        # Docker Desktop only bind-mounts configured host shares. Keep the
+        # ephemeral identity below the already shared repository root rather
+        # than the host /tmp directory; the trap still removes it on every exit.
+        ECI_ENVOY_TLS_DIR="$(mktemp -d -p '{{.ROOT_DIR}}' .tmp-envoy-validate.XXXXXX)"
         trap 'rm -rf -- "${ECI_ENVOY_TLS_DIR}"' EXIT
         openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 \
           -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
