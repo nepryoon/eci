@@ -323,4 +323,7 @@ entro il limite S3 senza rivelare il nome del file.
 La review automatizzata sul medesimo head ha inoltre provato due regressioni:
 un NUL nel sorgente UTF-8 non e' persistibile in `TEXT` e viene ora classificato
 permanente prima del parser, mentre il bootstrap dev valida e prova la leaf
-MinIO contro lo stesso FQDN configurato dal client invece del solo nome corto.
+MinIO contro lo stesso FQDN configurato dal client invece del solo nome corto
+e richiede esplicitamente lo scopo TLS server. Il parent span del comando viene
+inoltre catturato ed entrato nel thread blocking, cosi' gli span del parser non
+diventano nuove root scollegate.

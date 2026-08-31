@@ -115,7 +115,8 @@ default e' consentito.
 
 Il bootstrap dev riusa una leaf MinIO soltanto se la SAN valida esattamente
 `minio.data-plane.svc.cluster.local`, hostname configurato nel client runtime;
-una leaf valida solo per il nome abbreviato viene ruotata prima del rollout.
+una leaf valida solo per il nome abbreviato o priva dello scopo TLS
+`serverAuth` viene ruotata prima del rollout.
 
 La derivazione hash del path sostituisce la precedente key percent-encoded
 prima del merge di T7.1a; non esiste evidenza di oggetti di produzione con il

@@ -957,7 +957,7 @@ async fn process_message<M: Message>(
         return ProcessAction::Dlq { reason };
     }
     let parse_path = command.path().to_owned();
-    let parsed = tokio::task::spawn_blocking(move || {
+    let parsed = spawn_blocking_with_current_span(move || {
         std::panic::catch_unwind(AssertUnwindSafe(|| {
             let source_text = std::str::from_utf8(&source)
                 .expect("source UTF-8 was validated before entering blocking parser");
@@ -1000,6 +1000,18 @@ async fn process_message<M: Message>(
             dependency: "postgres",
         },
     }
+}
+
+fn spawn_blocking_with_current_span<F, R>(operation: F) -> tokio::task::JoinHandle<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let parent = tracing::Span::current();
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    tokio::task::spawn_blocking(move || {
+        tracing::dispatcher::with_default(&dispatch, || parent.in_scope(operation))
+    })
 }
 
 fn validate_source_text(source: &[u8]) -> Result<&str, &'static str> {
@@ -1256,6 +1268,74 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+    use tracing_core::span::Current;
+
+    thread_local! {
+        static TEST_SPAN_STACK: RefCell<Vec<(Id, &'static Metadata<'static>)>> =
+            const { RefCell::new(Vec::new()) };
+    }
+
+    #[derive(Default)]
+    struct TestSubscriber {
+        next_id: AtomicU64,
+        metadata: Mutex<HashMap<u64, &'static Metadata<'static>>>,
+        observed_consume_parent: Arc<AtomicBool>,
+    }
+
+    impl Subscriber for TestSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            let id = Id::from_u64(self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
+            self.metadata
+                .lock()
+                .expect("test subscriber metadata lock")
+                .insert(id.clone().into_u64(), _span.metadata());
+            id
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, _event: &Event<'_>) {
+            TEST_SPAN_STACK.with(|stack| {
+                if stack.borrow().last().is_some_and(|(_, metadata)| {
+                    metadata.name() == "ingestion.command.consume.test"
+                }) {
+                    self.observed_consume_parent.store(true, Ordering::Relaxed);
+                }
+            });
+        }
+        fn enter(&self, span: &Id) {
+            let metadata = self.metadata.lock().expect("test subscriber metadata lock")
+                [&span.clone().into_u64()];
+            TEST_SPAN_STACK.with(|stack| stack.borrow_mut().push((span.clone(), metadata)));
+        }
+
+        fn exit(&self, _span: &Id) {
+            TEST_SPAN_STACK.with(|stack| {
+                stack.borrow_mut().pop();
+            });
+        }
+
+        fn current_span(&self) -> Current {
+            TEST_SPAN_STACK.with(|stack| {
+                stack
+                    .borrow()
+                    .last()
+                    .map(|(id, metadata)| Current::new(id.clone(), metadata))
+                    .unwrap_or_else(Current::none)
+            })
+        }
+    }
 
     #[test]
     fn readiness_is_fail_closed_per_real_dependency() {
@@ -1334,6 +1414,22 @@ mod tests {
         .await;
 
         assert!(result.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_parser_work_inherits_the_consume_span() {
+        let subscriber = TestSubscriber::default();
+        let observed_consume_parent = subscriber.observed_consume_parent.clone();
+        let task = tracing::subscriber::with_default(subscriber, || {
+            let consume_span = tracing::info_span!("ingestion.command.consume.test");
+            let _entered = consume_span.enter();
+            spawn_blocking_with_current_span(|| {
+                tracing::info!("blocking parser test event");
+            })
+        });
+
+        task.await.expect("blocking task completes");
+        assert!(observed_consume_parent.load(Ordering::Relaxed));
     }
 
     #[tokio::test(flavor = "current_thread")]

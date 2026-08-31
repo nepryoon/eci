@@ -72,7 +72,7 @@ if "$KUBECTL_BIN" -n data-plane get secret eci-minio-tls >/dev/null 2>&1; then
      ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio.crt" -noout -text | grep -q 'CA:FALSE' || \
      ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio-ca.crt" -checkend 86400 -noout >/dev/null 2>&1 || \
      ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio-ca.crt" -noout -text | grep -q 'CA:TRUE' || \
-     ! openssl verify -CAfile "$ECI_DEV_TMP_DIR/minio-ca.crt" "$ECI_DEV_TMP_DIR/minio.crt" >/dev/null 2>&1 || \
+     ! openssl verify -purpose sslserver -CAfile "$ECI_DEV_TMP_DIR/minio-ca.crt" "$ECI_DEV_TMP_DIR/minio.crt" >/dev/null 2>&1 || \
      ! eci_tls_private_key_matches_certificate "$ECI_DEV_TMP_DIR/minio.crt" "$ECI_DEV_TMP_DIR/minio.key"; then
     ECI_MINIO_TLS_ROTATED=true
   fi

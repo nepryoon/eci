@@ -851,7 +851,11 @@ class PlatformChartTests(unittest.TestCase):
         self.assertIn("create secret generic eci-minio-ca", up)
         self.assertIn("basicConstraints=critical,CA:FALSE", up)
         self.assertIn("--from-file=ca.crt=\"$ECI_DEV_TMP_DIR/minio-ca.crt\"", up)
-        self.assertIn("openssl verify -CAfile", up)
+        self.assertIn(
+            "openssl verify -purpose sslserver -CAfile "
+            '"$ECI_DEV_TMP_DIR/minio-ca.crt"',
+            up,
+        )
         self.assertIn(
             "openssl x509 -in \"$ECI_DEV_TMP_DIR/minio.crt\" "
             "-checkhost minio.data-plane.svc.cluster.local",
@@ -987,6 +991,72 @@ class PlatformChartTests(unittest.TestCase):
         up = (ROOT / "deploy/k8s/dev-up.sh").read_text()
         self.assertIn("eci_tls_private_key_matches_certificate", up)
         self.assertIn("jsonpath={.data.tls\\.key}", up)
+
+    def test_review_minio_tls_reuse_requires_server_auth_purpose(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            ca_cert = temp / "ca.crt"
+            ca_key = temp / "ca.key"
+            leaf_key = temp / "leaf.key"
+            leaf_csr = temp / "leaf.csr"
+            client_cert = temp / "client-only.crt"
+            server_cert = temp / "server.crt"
+            subprocess.run(
+                [
+                    "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-days", "1", "-subj", "/CN=eci-test-ca",
+                    "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
+                    "-keyout", str(ca_key), "-out", str(ca_cert),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes",
+                    "-subj", "/CN=minio.data-plane.svc.cluster.local",
+                    "-keyout", str(leaf_key), "-out", str(leaf_csr),
+                ],
+                check=True,
+                capture_output=True,
+            )
+
+            def signed_leaf(purpose: str, output: Path, createserial: bool) -> None:
+                extensions = temp / f"{purpose}.ext"
+                extensions.write_text(
+                    "basicConstraints=critical,CA:FALSE\n"
+                    f"extendedKeyUsage={purpose}\n"
+                    "subjectAltName=DNS:minio.data-plane.svc.cluster.local\n"
+                )
+                command = [
+                    "openssl", "x509", "-req", "-in", str(leaf_csr),
+                    "-CA", str(ca_cert), "-CAkey", str(ca_key),
+                ]
+                if createserial:
+                    command.append("-CAcreateserial")
+                else:
+                    command.extend(["-CAserial", str(temp / "ca.srl")])
+                command.extend([
+                    "-days", "1", "-sha256", "-extfile", str(extensions),
+                    "-out", str(output),
+                ])
+                subprocess.run(command, check=True, capture_output=True)
+
+            signed_leaf("clientAuth", client_cert, True)
+            signed_leaf("serverAuth", server_cert, False)
+
+            def verifies_for_server(cert: Path) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [
+                        "openssl", "verify", "-purpose", "sslserver",
+                        "-CAfile", str(ca_cert), str(cert),
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+
+            self.assertNotEqual(verifies_for_server(client_cert).returncode, 0)
+            self.assertEqual(verifies_for_server(server_cert).returncode, 0)
 
     def test_review_existing_kind_cluster_must_match_pinned_image_and_version(self) -> None:
         policy = ROOT / "deploy/k8s/lib/kind-cluster.sh"
