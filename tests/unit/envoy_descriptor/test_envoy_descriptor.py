@@ -31,6 +31,12 @@ class EnvoyDescriptorTests(unittest.TestCase):
             taskfile,
         )
 
+    def test_structural_decoder_rejects_empty_and_truncated_artifacts(self) -> None:
+        for payload in (b"", b"\x0a\x05bad"):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    decode_descriptor_set(payload)
+
 
 def decode_descriptor_set(payload: bytes) -> list[tuple[str, str, list[str]]]:
     files: list[tuple[str, str, list[str]]] = []

@@ -86,9 +86,9 @@ tasks:
       - buf breaking --against '../.git#branch=main,subdir=contracts'
 
   envoy:descriptor:
-    desc: Rigenera deterministicamente il descriptor Envoy dal contratto retrieval
+    desc: Rigenera deterministicamente il solo descriptor Retrieval esposto da Envoy
     cmds:
-      - buf build contracts --as-file-descriptor-set -o deploy/envoy/retrieval.pb
+      - buf build contracts --path contracts/proto/eci/retrieval/v1/retrieval.proto --as-file-descriptor-set -o deploy/envoy/retrieval.pb
 
   envoy:validate:
     desc: Valida il bootstrap TLS con l'immagine Envoy T6.6 pinned (richiede Docker e OpenSSL)
