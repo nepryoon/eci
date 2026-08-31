@@ -248,7 +248,7 @@ fn path_length_matches_json_schema_unicode_semantics_and_s3_key_limit() {
         16 * 1024 * 1024,
     )
     .expect("600 multibyte code points are contract-valid");
-    let object_key = source_object_key(&scope, &command);
+    let object_key = source_object_key(&scope, &command).expect("upsert source key");
     assert!(
         object_key.len() <= 1024,
         "S3 object keys are at most 1024 bytes"
