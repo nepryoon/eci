@@ -99,7 +99,10 @@ pub fn persist_ingestion_command(
    PostgreSQL write parte; l'errore permanente sanitizzato va in DLQ senza
    contenuto, scope o path. `maxLength=1024` e il runtime misurano entrambi code
    point Unicode; la key MinIO usa un digest fisso del path UTF-8 e non puo'
-   superare il limite S3 per un path valido.
+   superare il limite S3 per un path valido. `command_id` accetta soltanto la
+   rappresentazione UUID RFC 4122 con gruppi `8-4-4-4-12` richiesta dal format
+   JSON Schema (hex case-insensitive), non le forme compact, braced o URN che
+   il parser UUID permissivo saprebbe altrimenti normalizzare.
 5. **Errore transitorio/backpressure.** Given Kafka, PostgreSQL o MinIO
    indisponibile, When un comando e' in-flight, Then nessun offset viene
    committato, la partizione non avanza, il consumer continua a pollare mentre
@@ -144,7 +147,7 @@ pub fn persist_ingestion_command(
 | payload >64 KiB o JSON/schema/versione invalida | permanent deny/DLQ; nessun echo del payload |
 | path assoluto, `.`/`..`, backslash, control o >1024 code point Unicode | permanent `invalid_path` prima di costruire la key |
 | path multibyte valido entro 1024 code point | accettato; key S3 ASCII fissa di 181 byte derivata dal digest del path |
-| commit/digest/UUID/size invalido o size oltre config | permanent deny |
+| commit/digest/UUID/size invalido o size oltre config | permanent deny; UUID compact/braced/URN rifiutato prima di fetch/write |
 | object key configurabile dal messaggio o endpoint non trusted | impossibile per tipo/schema; key derivata e endpoint solo env |
 | GET object 404/digest/size/UTF-8 mismatch o sorgente UTF-8 con NUL | permanent failure/DLQ (`source_contains_nul` per NUL); nessun parse/write |
 | MinIO header/body timeout o 5xx, Kafka transport, PostgreSQL unavailable | transient; no commit, readiness 503, retry bounded |
@@ -200,7 +203,8 @@ separato emerso dall'audit di completezza.
 
 ## 7. Test plan
 
-- Unit Rust: schema/header/path/key/fingerprint; path ASCII e multibyte ai
+- Unit Rust: schema/header/path/key/fingerprint; UUID hyphenated lowercase e
+  uppercase positivo, compact/braced/URN negativi; path ASCII e multibyte ai
   boundary 1024/1025 code point con key S3 bounded; scope body rifiutato; ordering
   stabile; DLQ reason allow-list; payload/failure non compaiono in log/metric;
   endpoint MinIO plaintext e CA PostgreSQL invalida sono rifiutati.
@@ -326,4 +330,7 @@ permanente prima del parser, mentre il bootstrap dev valida e prova la leaf
 MinIO contro lo stesso FQDN configurato dal client invece del solo nome corto
 e richiede esplicitamente lo scopo TLS server. Il parent span del comando viene
 inoltre catturato ed entrato nel thread blocking, cosi' gli span del parser non
-diventano nuove root scollegate.
+diventano nuove root scollegate. L'ultimo controllo contract/runtime conserva
+la rappresentazione UUID originale durante la deserializzazione abbastanza a
+lungo da rifiutare compact, braced e URN; la forma hyphenated rimane valida con
+hex maiuscolo o minuscolo, come il format JSON Schema.

@@ -2,7 +2,7 @@
 //! (SPEC-067). This module deliberately owns validation and canonical key
 //! derivation; runtime transports must not reconstruct scope or object paths.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -78,11 +78,31 @@ impl AuthenticatedCommitScope {
 #[serde(deny_unknown_fields)]
 pub struct IngestionFileCommand {
     schema_version: String,
+    #[serde(deserialize_with = "deserialize_schema_uuid")]
     command_id: Uuid,
     commit_sha: String,
     path: String,
     source_sha256: String,
     source_size_bytes: u64,
+}
+
+fn deserialize_schema_uuid<'de, D>(deserializer: D) -> Result<Uuid, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    let bytes = value.as_bytes();
+    let has_schema_shape = bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        });
+    if !has_schema_shape {
+        return Err(serde::de::Error::custom(
+            "UUID must use the RFC 4122 hyphenated string representation",
+        ));
+    }
+    Uuid::parse_str(&value).map_err(serde::de::Error::custom)
 }
 
 impl IngestionFileCommand {

@@ -44,6 +44,13 @@ fn payload_with_path(path: &str) -> Vec<u8> {
     serde_json::to_vec(&payload).expect("serialize path test payload")
 }
 
+fn payload_with_command_id(command_id: &str) -> Vec<u8> {
+    let mut payload: serde_json::Value =
+        serde_json::from_slice(&valid_payload()).expect("valid test payload");
+    payload["command_id"] = serde_json::Value::String(command_id.to_owned());
+    serde_json::to_vec(&payload).expect("serialize command ID test payload")
+}
+
 #[test]
 fn checked_in_command_contract_is_closed_and_matches_runtime_limits() {
     let path = concat!(
@@ -160,6 +167,31 @@ fn paths_identifiers_and_size_are_strictly_bounded() {
     let err = parse_authenticated_command(&valid_payload(), &valid_headers(), 1024)
         .expect_err("configured source limit must be authoritative");
     assert_eq!(err.kind(), CommandErrorKind::SourceTooLarge);
+}
+
+#[test]
+fn command_id_matches_json_schema_uuid_string_representation() {
+    let canonical_uppercase = "018F0806-3D73-7A8F-B5A5-C4B25F9D4701";
+    parse_authenticated_command(
+        &payload_with_command_id(canonical_uppercase),
+        &valid_headers(),
+        16 * 1024 * 1024,
+    )
+    .expect("JSON Schema UUID hex digits are case-insensitive");
+
+    for invalid in [
+        "018f08063d737a8fb5a5c4b25f9d4701",
+        "{018f0806-3d73-7a8f-b5a5-c4b25f9d4701}",
+        "urn:uuid:018f0806-3d73-7a8f-b5a5-c4b25f9d4701",
+    ] {
+        let error = parse_authenticated_command(
+            &payload_with_command_id(invalid),
+            &valid_headers(),
+            16 * 1024 * 1024,
+        )
+        .expect_err("non-hyphenated UUID spellings are outside the JSON Schema format");
+        assert_eq!(error.kind(), CommandErrorKind::InvalidPayload);
+    }
 }
 
 #[test]
