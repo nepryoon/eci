@@ -852,10 +852,19 @@ class PlatformChartTests(unittest.TestCase):
         self.assertIn("basicConstraints=critical,CA:FALSE", up)
         self.assertIn("--from-file=ca.crt=\"$ECI_DEV_TMP_DIR/minio-ca.crt\"", up)
         self.assertIn("openssl verify -CAfile", up)
+        self.assertIn(
+            "openssl x509 -in \"$ECI_DEV_TMP_DIR/minio.crt\" "
+            "-checkhost minio.data-plane.svc.cluster.local",
+            up,
+        )
         self.assertIn("create secret generic eci-postgres-ca", up)
         self.assertIn("--from-file=tls.key", up)
         self.assertIn("https://keycloak.ingress.svc:8443", verify)
         self.assertIn("--cacert /etc/eci/keycloak/ca.crt", verify)
+        self.assertIn(
+            "https://minio.data-plane.svc.cluster.local:9000/minio/health/ready",
+            verify,
+        )
         self.assertIn("rollout status statefulset/redis", verify)
         self.assertNotIn("deployment/redis", verify)
 

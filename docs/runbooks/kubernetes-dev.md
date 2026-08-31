@@ -121,6 +121,9 @@ MinIO CA from `eci-minio-ca` and the CloudNativePG public CA from
 `eci-postgres-ca`; do not copy the producer identity, `ca.key`, or the MinIO
 server key into its namespace. `POSTGRES_DSN` must name the certificate-bound
 cluster Service and MinIO must remain HTTPS; plaintext endpoints fail startup.
+The dev bootstrap validates and the smoke probe uses the exact configured
+MinIO hostname `minio.data-plane.svc.cluster.local`; a reusable certificate
+that covers only the abbreviated Service name is rotated before rollout.
 A trusted commit producer must use
 `eci-kafka-ingestion-commit-producer`, publish the closed
 `contracts/jsonschema/ingestion-file-command.json` value and set exactly one

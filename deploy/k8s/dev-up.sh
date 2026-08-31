@@ -68,7 +68,7 @@ if "$KUBECTL_BIN" -n data-plane get secret eci-minio-tls >/dev/null 2>&1; then
   "$KUBECTL_BIN" -n data-plane get secret eci-minio-tls \
     -o 'jsonpath={.data.tls\.key}' | base64 --decode >"$ECI_DEV_TMP_DIR/minio.key"
   if ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio.crt" -checkend 86400 -noout >/dev/null 2>&1 || \
-     ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio.crt" -checkhost minio.data-plane.svc -noout >/dev/null 2>&1 || \
+     ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio.crt" -checkhost minio.data-plane.svc.cluster.local -noout >/dev/null 2>&1 || \
      ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio.crt" -noout -text | grep -q 'CA:FALSE' || \
      ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio-ca.crt" -checkend 86400 -noout >/dev/null 2>&1 || \
      ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio-ca.crt" -noout -text | grep -q 'CA:TRUE' || \

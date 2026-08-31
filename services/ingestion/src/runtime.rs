@@ -946,17 +946,15 @@ async fn process_message<M: Message>(
             source_span.record("ingestion.outcome", "retry");
             return ProcessAction::Retry {
                 dependency: "minio",
-            }
+            };
         }
     };
     metrics
         .source_bytes
         .with_label_values(&["verified"])
         .inc_by(source.len() as u64);
-    if std::str::from_utf8(&source).is_err() {
-        return ProcessAction::Dlq {
-            reason: "source_not_utf8",
-        };
+    if let Err(reason) = validate_source_text(&source) {
+        return ProcessAction::Dlq { reason };
     }
     let parse_path = command.path().to_owned();
     let parsed = tokio::task::spawn_blocking(move || {
@@ -1002,6 +1000,14 @@ async fn process_message<M: Message>(
             dependency: "postgres",
         },
     }
+}
+
+fn validate_source_text(source: &[u8]) -> Result<&str, &'static str> {
+    let text = std::str::from_utf8(source).map_err(|_| "source_not_utf8")?;
+    if text.contains('\0') {
+        return Err("source_contains_nul");
+    }
+    Ok(text)
 }
 
 struct TraceparentExtractor<'a> {
@@ -1387,6 +1393,18 @@ mod tests {
     }
 
     #[test]
+    fn source_text_validation_rejects_postgres_nul_permanently() {
+        assert_eq!(
+            validate_source_text(b"package orders\nvar value = \"before\0after\"\n"),
+            Err("source_contains_nul")
+        );
+        assert_eq!(
+            validate_source_text(b"package orders\nvar value = \"valid\"\n"),
+            Ok("package orders\nvar value = \"valid\"\n")
+        );
+        assert_eq!(validate_source_text(&[0xff, 0xfe]), Err("source_not_utf8"));
+    }
+    #[test]
     fn rebalance_context_invalidates_detached_record_epoch() {
         let context = IngestionConsumerContext::default();
         let detached_epoch = context.epoch();
@@ -1411,7 +1429,6 @@ mod tests {
             }
         }
     }
-
 
     #[test]
     fn dlq_envelope_contains_only_bounded_coordinates_and_reason() {

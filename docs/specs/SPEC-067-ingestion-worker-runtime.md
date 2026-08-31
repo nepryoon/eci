@@ -146,9 +146,9 @@ pub fn persist_ingestion_command(
 | path multibyte valido entro 1024 code point | accettato; key S3 ASCII fissa di 181 byte derivata dal digest del path |
 | commit/digest/UUID/size invalido o size oltre config | permanent deny |
 | object key configurabile dal messaggio o endpoint non trusted | impossibile per tipo/schema; key derivata e endpoint solo env |
-| GET object 404/digest/size/UTF-8 mismatch | permanent failure/DLQ; nessun write |
+| GET object 404/digest/size/UTF-8 mismatch o sorgente UTF-8 con NUL | permanent failure/DLQ (`source_contains_nul` per NUL); nessun parse/write |
 | MinIO header/body timeout o 5xx, Kafka transport, PostgreSQL unavailable | transient; no commit, readiness 503, retry bounded |
-| endpoint MinIO HTTP, CA PostgreSQL/MinIO assente o non valida | startup fail-closed; HTTPS/TLS con hostname e CA verificati obbligatori |
+| endpoint MinIO HTTP, CA PostgreSQL/MinIO assente o non valida | startup fail-closed; HTTPS/TLS con CA e hostname runtime completo `minio.data-plane.svc.cluster.local` verificati obbligatori |
 | rebalance durante fetch/retry/persist/DLQ publish | record invalidato dall'epoch; ownership riverificata dopo ogni await e prima dell'offset commit |
 | parse/persist di un comando valido supera un ciclo di poll | elaborazione isolata in task; il consume-loop continua a pollare, pausa e bufferizza/riavvolge deterministicamente |
 | nuova assignment durante backoff | assignment pausata; buffer applicativo massimo 64 record; a cap piena il poll continua e ogni record prefetched viene riavvolto allo stesso offset |
@@ -320,3 +320,7 @@ La review finale ha corretto il mismatch Unicode: contratto e runtime contano
 code point, mentre la key oggetto usa un digest length-prefixed del path UTF-8.
 Path multibyte contract-valid non finiscono piu' in DLQ e la key resta sempre
 entro il limite S3 senza rivelare il nome del file.
+La review automatizzata sul medesimo head ha inoltre provato due regressioni:
+un NUL nel sorgente UTF-8 non e' persistibile in `TEXT` e viene ora classificato
+permanente prima del parser, mentre il bootstrap dev valida e prova la leaf
+MinIO contro lo stesso FQDN configurato dal client invece del solo nome corto.

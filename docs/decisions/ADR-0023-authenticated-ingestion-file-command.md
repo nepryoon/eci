@@ -61,7 +61,10 @@ Schema 2020-12; conserva i path UTF-8 supportati dai repository senza confondere
 byte e caratteri. Rifiuta inoltre commit non SHA-1 lower-hex, digest non SHA-256
 lower-hex e file oltre il limite configurato. Scarica con un client S3
 autenticato, applica un limite streaming, verifica byte count, SHA-256 e UTF-8
-prima del parser.
+prima del parser. Un sorgente UTF-8 che contiene NUL e' rifiutato come errore
+permanente `source_contains_nul` prima del parsing e della transazione: il tipo
+PostgreSQL `TEXT` non puo' rappresentarlo e una riconsegna non potrebbe
+risolvere l'errore.
 
 Ogni replica consuma con `enable.auto.commit=false` e al massimo un comando per
 partizione in elaborazione. Il write canonico e una receipt
@@ -109,6 +112,10 @@ cancella dati canonici. Credenziali Kafka/MinIO/PostgreSQL provengono solo da
 Secret per-workload. Mancanza di header, TLS, ACL, bucket o receipt table
 fallisce chiuso; nessun fallback plaintext, bucket/path locale o scope di
 default e' consentito.
+
+Il bootstrap dev riusa una leaf MinIO soltanto se la SAN valida esattamente
+`minio.data-plane.svc.cluster.local`, hostname configurato nel client runtime;
+una leaf valida solo per il nome abbreviato viene ruotata prima del rollout.
 
 La derivazione hash del path sostituisce la precedente key percent-encoded
 prima del merge di T7.1a; non esiste evidenza di oggetti di produzione con il

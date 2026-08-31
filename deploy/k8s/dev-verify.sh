@@ -106,7 +106,7 @@ spec:
             http://opa.query-plane.svc:8181/v1/data/eci/authz/decision | grep -q '"reason":"missing_tenant"'
           echo 'OPA allow and fail-closed decisions: PASS'
           curl -fsS --cacert /etc/eci/minio/ca.crt \
-            https://minio.data-plane.svc:9000/minio/health/ready
+            https://minio.data-plane.svc.cluster.local:9000/minio/health/ready
           echo 'MinIO HTTPS health with hostname-bound trust: PASS'
           curl -fsS --cacert /etc/eci/keycloak/ca.crt \
             https://keycloak.ingress.svc:8443/realms/master/.well-known/openid-configuration | \
