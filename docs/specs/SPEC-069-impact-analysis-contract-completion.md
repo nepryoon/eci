@@ -62,8 +62,9 @@ func StreamImpact(context.Context, neo4j.DriverWithContext, string, Options,
 6. **Dato** `include_source_text=true`, **quando** un livello e' pronto,
    **allora** i chunk autorizzati OpenSearch sono idratati con paginazione
    PIT+`search_after` e ordinati per
-   `(entity_id, chunk_index, chunk_id)`; `chunk_id` e' il tie-breaker univoco
-   keyword per vecchie/nuove proiezioni della stessa coordinata logica. Livelli
+   `(entity_id, chunk_index, event_sequence, chunk_id)`; la sequenza seleziona
+   l'ultima proiezione della coordinata logica e `chunk_id` e' il tie-breaker
+   univoco keyword. Duplicati logici sono collassati prima della concatenazione. Livelli
    oltre 1.000 chunk restano completi e false non chiama OpenSearch.
 7. **Dato** un percorso, **quando** il nodo viene convertito, **allora** i
    campi base Neo4j, provenance, score e `ImpactKind` seguono ADR-0024.
@@ -164,8 +165,10 @@ stati aggiunti log o attributi con scope, ID, path o sorgente.
 
 La review di paginazione ha inoltre riprodotto lo skip possibile quando due
 documenti hanno gli stessi `entity_id` e `chunk_index` al confine pagina. Ogni
-ricerca apre ora un PIT con TTL di un minuto e usa il `chunk_id` canonico,
-duplicato da `_id` in un campo keyword con doc values, come terza coordinata.
+ricerca apre ora un PIT con TTL di un minuto, ordina prima per la sequenza
+outbox canonica e usa il `chunk_id`, duplicato da `_id` in un campo keyword con
+doc values, come coordinata univoca finale. Per ogni `(entity_id, chunk_index)`
+resta solo il documento con sequenza maggiore prima di comporre `SourceText`.
 OpenSearch 2.11.1 reale ha confermato il percorso: `_shard_doc` e `_id` non sono
 sort key portabili per questo indice. La chiusura PIT usa un context separato
 bounded, quindi sopravvive alla cancellazione client senza lasciare risorse

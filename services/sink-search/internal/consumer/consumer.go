@@ -87,6 +87,9 @@ func EnsureIndex(ctx context.Context, client *opensearchapi.Client) error {
 				// canonical chunk UUID as a doc-valued keyword so PIT/search_after
 				// readers have a stable, unique final cursor coordinate.
 				"chunk_id": map[string]any{"type": "keyword"},
+				// Canonical outbox order lets readers select the current document
+				// while replacement DELETE/UPSERT events converge asynchronously.
+				"event_sequence": map[string]any{"type": "long"},
 			}, securityProperties()),
 		},
 	}
@@ -114,6 +117,7 @@ func ensureSecurityMapping(ctx context.Context, client *opensearchapi.Client) er
 	// rolling sink deployment keeps new writes and readers compatible.
 	properties := securityProperties()
 	properties["chunk_id"] = map[string]any{"type": "keyword"}
+	properties["event_sequence"] = map[string]any{"type": "long"}
 	securityMapping := map[string]any{"properties": properties}
 	if _, err := client.Indices.Mapping.Put(ctx, opensearchapi.MappingPutReq{
 		Indices: []string{IndexName}, Body: opensearchutil.NewJSONReader(securityMapping),
@@ -242,7 +246,7 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	}
 	defer guard.Abort()
 
-	if err := indexDocument(ctx, deps.OpenSearch, chunk); err != nil {
+	if err := indexDocument(ctx, deps.OpenSearch, chunk, metadata.Sequence); err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("indicizzazione documento id=%s: %w", chunk.ID, err)
 	}
 	if err := guard.Complete(ctx); err != nil {
@@ -292,12 +296,13 @@ func processDelete(ctx context.Context, deps Deps, value []byte, metadata outbox
 // di `Document.Create` (endpoint `_create`, verificato nel sorgente del
 // client: fallisce con 409 su id duplicato), `Index` è la scelta corretta
 // qui per la stessa idempotenza upsert-by-id già scelta per Qdrant/T3.1.
-func indexDocument(ctx context.Context, client *opensearchapi.Client, chunk codeChunkPayload) error {
+func indexDocument(ctx context.Context, client *opensearchapi.Client, chunk codeChunkPayload, eventSequence int64) error {
 	body := map[string]any{
-		"text":        chunk.Text,
-		"entity_id":   chunk.EntityID,
-		"chunk_index": chunk.ChunkIndex,
-		"chunk_id":    chunk.ID,
+		"text":           chunk.Text,
+		"entity_id":      chunk.EntityID,
+		"chunk_index":    chunk.ChunkIndex,
+		"chunk_id":       chunk.ID,
+		"event_sequence": eventSequence,
 	}
 	if len(chunk.Provenance) > 0 {
 		var provenance any

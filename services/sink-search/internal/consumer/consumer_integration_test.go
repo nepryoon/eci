@@ -303,6 +303,12 @@ func scenario1DocumentIndexedWithShaHexID(t *testing.T, ctx context.Context, st 
 	if doc["entity_id"] != entityID {
 		t.Errorf("doc['entity_id'] = %v, want %q", doc["entity_id"], entityID)
 	}
+	if doc["chunk_id"] != chunkID {
+		t.Errorf("doc['chunk_id'] = %v, want %q", doc["chunk_id"], chunkID)
+	}
+	if sequence, ok := doc["event_sequence"].(float64); !ok || sequence <= 0 {
+		t.Errorf("doc['event_sequence'] = %v, want positive canonical sequence", doc["event_sequence"])
+	}
 	if doc["tenant_id"] != "tenant-test" || doc["repo"] != "sample-repo" || doc["acl_group"] != "developers" {
 		t.Errorf("security labels = (%v,%v,%v), want (%q,%q,%q)",
 			doc["tenant_id"], doc["repo"], doc["acl_group"],

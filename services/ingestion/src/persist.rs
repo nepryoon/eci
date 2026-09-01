@@ -598,6 +598,10 @@ fn persist_parsed_file_in_transaction(
 ) -> Result<PersistSummary, PersistError> {
     let mut nodes_upserted = 0usize;
     let mut outbox_rows_written = 0usize;
+    let file_path_by_node_id: HashMap<String, &str> = nodes
+        .iter()
+        .map(|node| (scoped_node_id(scope, &node.id), node.file_path.as_str()))
+        .collect();
 
     for node in &nodes {
         let node_id = scoped_node_id(scope, &node.id);
@@ -654,6 +658,37 @@ fn persist_parsed_file_in_transaction(
         .map(|node| scoped_node_id(scope, &node.id))
         .collect();
     let file_node_ids: Vec<&str> = file_node_ids_owned.iter().map(String::as_str).collect();
+
+    // Re-ingestion replaces canonical rows whose projection identities may be
+    // different from the replacements. Publish the old logical edges before
+    // removing them so Neo4j cannot retain relationships that disappeared
+    // from the new parse. DELETE and subsequent UPSERT sequences are allocated
+    // in this same transaction and therefore preserve replacement order.
+    let old_relation_rows = tx.query(
+        "SELECT id::text, rel_type, from_id, to_id
+         FROM code_relation
+         WHERE domain = 'code' AND from_id = ANY($1)
+         ORDER BY id FOR UPDATE",
+        &[&file_node_ids],
+    )?;
+    for row in &old_relation_rows {
+        let id: String = row.get(0);
+        let rel_type: String = row.get(1);
+        let from_id: String = row.get(2);
+        let to_id: String = row.get(3);
+        let path = file_path_by_node_id.get(&from_id).copied().unwrap_or("");
+        insert_delete_outbox(
+            tx,
+            "CodeRelation",
+            &id,
+            serde_json::json!({
+                "id": id, "rel_type": rel_type, "from_id": from_id,
+                "to_id": to_id, "provenance": provenance_json(scope, path, commit)
+            }),
+            trace_id,
+        )?;
+        outbox_rows_written += 1;
+    }
     tx.execute(
         "DELETE FROM code_relation WHERE domain = 'code' AND from_id = ANY($1)",
         &[&file_node_ids],
@@ -706,18 +741,67 @@ fn persist_parsed_file_in_transaction(
     // Scope del DELETE: SOLO entity_id tra i nodi appena prodotti da questo
     // file (SPEC-029 §2 — stesso pattern già stabilito per code_relation
     // sopra, non un ON CONFLICT: il numero di chunk di un'entità può
-    // cambiare tra un parse e l'altro).
+    // cambiare tra un parse e l'altro). Capture dependent embeddings and old
+    // chunk UUIDs first: they are distinct projection aggregates and must be
+    // tombstoned atomically before their canonical rows are removed.
+    let old_chunk_rows = tx.query(
+        "SELECT id, entity_id FROM code_chunk
+         WHERE entity_id = ANY($1) ORDER BY id FOR UPDATE",
+        &[&file_node_ids],
+    )?;
+    let old_chunk_ids: Vec<uuid::Uuid> = old_chunk_rows.iter().map(|row| row.get(0)).collect();
+    let old_embedding_rows = tx.query(
+        "SELECT e.id::text, c.entity_id
+         FROM code_embedding e JOIN code_chunk c ON c.id = e.chunk_id
+         WHERE e.chunk_id = ANY($1) ORDER BY e.id FOR UPDATE",
+        &[&old_chunk_ids],
+    )?;
+    for row in &old_embedding_rows {
+        let id: String = row.get(0);
+        let entity_id: String = row.get(1);
+        let path = file_path_by_node_id
+            .get(&entity_id)
+            .copied()
+            .unwrap_or("");
+        insert_delete_outbox(
+            tx,
+            "CodeEmbedding",
+            &id,
+            serde_json::json!({
+                "id": id, "entity_id": entity_id,
+                "provenance": provenance_json(scope, path, commit)
+            }),
+            trace_id,
+        )?;
+        outbox_rows_written += 1;
+    }
+    for row in &old_chunk_rows {
+        let id = row.get::<_, uuid::Uuid>(0).to_string();
+        let entity_id: String = row.get(1);
+        let path = file_path_by_node_id
+            .get(&entity_id)
+            .copied()
+            .unwrap_or("");
+        insert_delete_outbox(
+            tx,
+            "CodeChunk",
+            &id,
+            serde_json::json!({
+                "id": id, "entity_id": entity_id,
+                "provenance": provenance_json(scope, path, commit)
+            }),
+            trace_id,
+        )?;
+        outbox_rows_written += 1;
+    }
+    tx.execute(
+        "DELETE FROM code_embedding WHERE chunk_id = ANY($1)",
+        &[&old_chunk_ids],
+    )?;
     tx.execute(
         "DELETE FROM code_chunk WHERE entity_id = ANY($1)",
         &[&file_node_ids],
     )?;
-
-    // Lookup in memoria file_path per id (SPEC-032 §2): nessuna nuova
-    // query, `nodes` è già ricevuto nella STESSA chiamata di `chunks`.
-    let file_path_by_node_id: HashMap<String, &str> = nodes
-        .iter()
-        .map(|n| (scoped_node_id(scope, &n.id), n.file_path.as_str()))
-        .collect();
 
     for chunk in chunks {
         let entity_id = scoped_node_id(scope, &chunk.entity_id);

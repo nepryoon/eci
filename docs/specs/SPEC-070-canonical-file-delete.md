@@ -63,6 +63,11 @@ Tombstone payload:
 9. **Dato** UPSERT e DELETE con command ID distinti sullo stesso file,
    **quando** si sovrappongono, **allora** il lock scope/path li serializza e
    ogni tombstone DELETE ha `event_sequence` maggiore degli UPSERT precedenti.
+10. **Dato** un secondo UPSERT dello stesso file dopo che esistono embedding e
+    viste per i chunk precedenti, **quando** sostituisce relazioni e chunk,
+    **allora** emette atomicamente tombstone CodeRelation, CodeEmbedding e
+    CodeChunk prima dei nuovi UPSERT, elimina i dipendenti in ordine FK e non
+    lascia UUID storici ricercabili.
 
 ## 4. Errori & edge case
 
@@ -100,6 +105,8 @@ Tombstone payload:
 - Integration PostgreSQL: grafo completo e cross-scope, tombstone payload,
   FK order, duplicate/conflict/absent, rollback forzato; suite due volte sullo
   stesso stato per replay.
+- Regressione re-ingestion con embedding reale gia' referenziante il vecchio
+  chunk: successo transazionale e un tombstone per embedding/chunk/relazione.
 - Migration up/down e JSON Schema fixture/codegen consistency.
 - Concurrency PostgreSQL con failpoint: DELETE osservata in attesa sul lock
   same-file e boundary `max(UPSERT sequence) < min(DELETE sequence)`.

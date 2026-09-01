@@ -86,6 +86,15 @@ length-prefixed della stessa tripla logica. In questo modo un tombstone tardivo
 per una vecchia riga UUID non puo' eliminare una relazione reingerita con UUID
 diverso e sequenza piu' recente.
 
+La stessa regola vale per la sostituzione durante un UPSERT dello stesso file.
+Prima di cancellare le vecchie relazioni, embedding e chunk canonici, la
+transazione enumera le righe sotto lock ed emette i rispettivi tombstone;
+elimina poi embedding prima dei chunk per rispettare la FK e inserisce le
+nuove relazioni/chunk. I DELETE ricevono sequenze inferiori agli UPSERT di
+sostituzione nella medesima transazione. In questo modo una re-ingestion non
+lascia documenti o archi storici nelle viste e non fallisce quando il worker
+embedding ha gia' materializzato un dipendente.
+
 ## Conseguenze
 
 - Nessun nuovo writer canonico o topic: PostgreSQL+outbox/CDC restano l'unico
@@ -94,6 +103,8 @@ diverso e sequenza piu' recente.
   redelivery e' un no-op deterministico.
 - Una relazione cross-file che punta a un nodo eliminato viene anch'essa
   rimossa e tombstonata, evitando FK e archi orfani.
+- La normale re-ingestion produce tombstone per ogni proiezione sostituita;
+  non si affida a una successiva DELETE file per ripulire UUID storici.
 - La sequenza e' globale per semplicita' operativa, mentre il watermark resta
   per-consumer/per-aggregate: nessun consumer dipende dalla continuita' della
   sequenza o da eventi di altri aggregate.

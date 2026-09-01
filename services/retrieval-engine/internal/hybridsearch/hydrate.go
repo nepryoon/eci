@@ -94,9 +94,11 @@ func hydrateNames(ctx context.Context, driver neo4j.DriverWithContext, nodes []R
 // chunkHit rispecchia i campi del documento code_chunks (SPEC-034 §2)
 // necessari qui: entity_id/chunk_index/text.
 type chunkHit struct {
-	EntityID   string `json:"entity_id"`
-	ChunkIndex int    `json:"chunk_index"`
-	Text       string `json:"text"`
+	ChunkID       string `json:"chunk_id"`
+	EntityID      string `json:"entity_id"`
+	ChunkIndex    int    `json:"chunk_index"`
+	EventSequence int64  `json:"event_sequence"`
+	Text          string `json:"text"`
 }
 
 // HydrateSourceText popola RetrievedNode.SourceText leggendo i chunk da
@@ -162,11 +164,13 @@ func HydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes 
 		},
 		// Re-ingestion can leave two projection documents for the same logical
 		// chunk until reconciliation. PIT freezes the result set and the indexed
-		// canonical chunk UUID is its unique sortable tiebreaker, so search_after
-		// cannot skip a logical-coordinate tie. OpenSearch forbids sorting on _id.
+		// canonical event order selects the latest logical chunk, while chunk UUID
+		// is the unique final tiebreaker so search_after cannot skip a tie.
+		// OpenSearch forbids sorting on _id.
 		"sort": []any{
 			map[string]any{"entity_id": "asc"},
 			map[string]any{"chunk_index": "asc"},
+			map[string]any{"event_sequence": map[string]any{"order": "asc", "missing": 0}},
 			map[string]any{"chunk_id": "asc"},
 		},
 	}
@@ -206,6 +210,9 @@ func HydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes 
 			if err := json.Unmarshal(hit.Source, &c); err != nil {
 				continue // documento malformato: scartato, non un errore fatale della ricerca
 			}
+			if c.ChunkID == "" {
+				c.ChunkID = hit.ID
+			}
 			byEntity[c.EntityID] = append(byEntity[c.EntityID], c)
 		}
 		if len(seenIDs) == expectedTotal {
@@ -215,13 +222,30 @@ func HydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes 
 			return fmt.Errorf("ricerca batch code_chunks: paginazione incompleta")
 		}
 		lastSort := resp.Hits.Hits[len(resp.Hits.Hits)-1].Sort
-		if len(lastSort) != 3 {
+		if len(lastSort) != 4 {
 			return fmt.Errorf("ricerca batch code_chunks: cursore di paginazione non valido")
 		}
 		query["search_after"] = lastSort
 	}
-	for _, chunks := range byEntity {
-		sort.Slice(chunks, func(i, j int) bool { return chunks[i].ChunkIndex < chunks[j].ChunkIndex })
+	for entityID, chunks := range byEntity {
+		sort.Slice(chunks, func(i, j int) bool {
+			if chunks[i].ChunkIndex != chunks[j].ChunkIndex {
+				return chunks[i].ChunkIndex < chunks[j].ChunkIndex
+			}
+			if chunks[i].EventSequence != chunks[j].EventSequence {
+				return chunks[i].EventSequence < chunks[j].EventSequence
+			}
+			return chunks[i].ChunkID < chunks[j].ChunkID
+		})
+		current := chunks[:0]
+		for _, chunk := range chunks {
+			if len(current) > 0 && current[len(current)-1].ChunkIndex == chunk.ChunkIndex {
+				current[len(current)-1] = chunk
+				continue
+			}
+			current = append(current, chunk)
+		}
+		byEntity[entityID] = current
 	}
 
 	for i := range nodes {

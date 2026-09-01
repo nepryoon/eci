@@ -90,7 +90,7 @@ func TestHydrateSourceTextPaginatesBeyondOneThousandChunks(t *testing.T) {
 			hits = append(hits, map[string]any{
 				"_id":     fmt.Sprintf("chunk-%04d", i),
 				"_source": map[string]any{"entity_id": "n", "chunk_index": i, "text": fmt.Sprintf("C%d", i)},
-				"sort":    []any{"n", i, i},
+				"sort":    []any{"n", i, i + 1, fmt.Sprintf("chunk-%04d", i)},
 			})
 		}
 		w.Header().Set("content-type", "application/json")
@@ -142,7 +142,7 @@ func TestHydrateSourceTextUsesSnapshotAndUniqueCursorAtLogicalTie(t *testing.T) 
 				t.Errorf("decode PIT search: %v", err)
 			}
 			sortFields, _ := body["sort"].([]any)
-			if len(sortFields) != 3 {
+			if len(sortFields) != 4 {
 				t.Errorf("sort=%v, want logical coordinates plus unique tiebreaker", sortFields)
 			}
 			pit, _ := body["pit"].(map[string]any)
@@ -151,7 +151,7 @@ func TestHydrateSourceTextUsesSnapshotAndUniqueCursorAtLogicalTie(t *testing.T) 
 			}
 			if call == 2 {
 				cursor, _ := body["search_after"].([]any)
-				if len(cursor) != 3 || cursor[2] != "old-0999" {
+				if len(cursor) != 4 || cursor[2] != float64(10) || cursor[3] != "old-0999" {
 					t.Errorf("second-page cursor=%v, want unique third coordinate", cursor)
 				}
 			}
@@ -161,15 +161,17 @@ func TestHydrateSourceTextUsesSnapshotAndUniqueCursorAtLogicalTie(t *testing.T) 
 				for i := 0; i < 1000; i++ {
 					hits = append(hits, map[string]any{
 						"_id": fmt.Sprintf("old-%04d", i), "_source": map[string]any{
-							"entity_id": "n", "chunk_index": i, "text": fmt.Sprintf("C%d", i),
-						}, "sort": []any{"n", i, fmt.Sprintf("old-%04d", i)},
+							"chunk_id": fmt.Sprintf("old-%04d", i), "entity_id": "n",
+							"chunk_index": i, "event_sequence": 10, "text": fmt.Sprintf("C%d", i),
+						}, "sort": []any{"n", i, 10, fmt.Sprintf("old-%04d", i)},
 					})
 				}
 			} else {
 				hits = append(hits, map[string]any{
 					"_id": "replacement-999", "_source": map[string]any{
-						"entity_id": "n", "chunk_index": 999, "text": "replacement",
-					}, "sort": []any{"n", 999, "replacement-999"},
+						"chunk_id": "replacement-999", "entity_id": "n", "chunk_index": 999,
+						"event_sequence": 11, "text": "replacement",
+					}, "sort": []any{"n", 999, 11, "replacement-999"},
 				})
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -189,6 +191,9 @@ func TestHydrateSourceTextUsesSnapshotAndUniqueCursorAtLogicalTie(t *testing.T) 
 	}
 	if searchCalls.Load() != 2 {
 		t.Fatalf("search calls=%d want 2", searchCalls.Load())
+	}
+	if strings.Contains(nodes[0].SourceText, "C999") || !strings.HasSuffix(nodes[0].SourceText, "\nreplacement") {
+		t.Fatalf("logical duplicate was not collapsed to latest event: %q", nodes[0].SourceText)
 	}
 }
 

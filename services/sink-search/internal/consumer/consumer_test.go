@@ -103,7 +103,7 @@ func TestIndexWaitsForSearchVisibilityBeforeCompletion(t *testing.T) {
 			http.Error(response, "invalid body", http.StatusBadRequest)
 			return
 		}
-		if body["chunk_id"] != "chunk-id" {
+		if body["chunk_id"] != "chunk-id" || body["event_sequence"] != float64(42) {
 			http.Error(response, "missing sortable chunk identity", http.StatusBadRequest)
 			return
 		}
@@ -120,7 +120,7 @@ func TestIndexWaitsForSearchVisibilityBeforeCompletion(t *testing.T) {
 	}
 	if err := indexDocument(context.Background(), client, codeChunkPayload{
 		ID: "chunk-id", EntityID: "entity-id", Text: "source",
-	}); err != nil {
+	}, 42); err != nil {
 		t.Fatal(err)
 	}
 }
