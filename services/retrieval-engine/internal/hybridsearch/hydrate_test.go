@@ -31,7 +31,7 @@ func TestHydrateSourceTextBatchesSortsAndCarriesAuthenticatedScope(t *testing.T)
 			t.Errorf("missing authenticated scope headers: %v", request.Header)
 		}
 		w.Header().Set("content-type", "application/json")
-		_, _ = fmt.Fprint(w, `{"took":1,"timed_out":false,"_shards":{"total":1,"successful":1,"skipped":0,"failed":0},"hits":{"total":{"value":2,"relation":"eq"},"hits":[{"_id":"2","_source":{"entity_id":"n","chunk_index":1,"text":"B"}},{"_id":"1","_source":{"entity_id":"n","chunk_index":0,"text":"A"}}]}}`)
+		_, _ = fmt.Fprint(w, `{"took":1,"timed_out":false,"_shards":{"total":1,"successful":1,"skipped":0,"failed":0},"hits":{"total":{"value":2,"relation":"eq"},"hits":[{"_id":"2","_source":{"chunk_id":"2","entity_id":"n","chunk_index":1,"event_sequence":0,"text":"B"}},{"_id":"1","_source":{"chunk_id":"1","entity_id":"n","chunk_index":0,"event_sequence":0,"text":"A"}}]}}`)
 	}))
 	t.Cleanup(server.Close)
 
@@ -89,7 +89,7 @@ func TestHydrateSourceTextPaginatesBeyondOneThousandChunks(t *testing.T) {
 		for i := first; i < last; i++ {
 			hits = append(hits, map[string]any{
 				"_id":     fmt.Sprintf("chunk-%04d", i),
-				"_source": map[string]any{"entity_id": "n", "chunk_index": i, "text": fmt.Sprintf("C%d", i)},
+				"_source": map[string]any{"chunk_id": fmt.Sprintf("chunk-%04d", i), "entity_id": "n", "chunk_index": i, "event_sequence": i + 1, "text": fmt.Sprintf("C%d", i)},
 				"sort":    []any{"n", i, i + 1, fmt.Sprintf("chunk-%04d", i)},
 			})
 		}
@@ -110,6 +110,24 @@ func TestHydrateSourceTextPaginatesBeyondOneThousandChunks(t *testing.T) {
 	}
 	if calls.Load() != 2 || !strings.HasPrefix(nodes[0].SourceText, "C0\nC1\n") || !strings.HasSuffix(nodes[0].SourceText, "\nC1000") {
 		t.Fatalf("calls=%d source prefix/suffix unexpected", calls.Load())
+	}
+}
+
+func TestHydrateSourceTextRejectsUnmigratedLegacyDocument(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if serveTestPIT(w, request) {
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		_, _ = fmt.Fprint(w, `{"took":1,"timed_out":false,"_shards":{"total":1,"successful":1,"skipped":0,"failed":0},"hits":{"total":{"value":1,"relation":"eq"},"hits":[{"_id":"legacy","_source":{"entity_id":"n","chunk_index":0,"text":"stale"}}]}}`)
+	}))
+	t.Cleanup(server.Close)
+	nodes := []RetrievedNode{{NodeID: "n"}}
+	if err := HydrateSourceText(hydrationContext(t), openSearchTestClient(t, server.URL), nodes); err == nil {
+		t.Fatal("legacy document without canonical cursor was accepted")
+	}
+	if nodes[0].SourceText != "" {
+		t.Fatalf("legacy text escaped fail-closed hydration: %q", nodes[0].SourceText)
 	}
 }
 

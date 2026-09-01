@@ -40,6 +40,10 @@ func validateDeleteResponse(resp *opensearchapi.DocumentDeleteByQueryResp) error
    **allora** il backend non viene richiamato e l'esito e' duplicate.
 8. **Dato** un UPSERT vecchio dal retry topic dopo una DELETE piu' recente,
    **quando** la sequence e' sotto watermark, **allora** non ricrea il documento.
+9. **Dato** un indice creato prima dei cursori ordinati, **quando** il nuovo sink
+   parte, **allora** popola `chunk_id=_id` ed `event_sequence=0` per ogni
+   documento storico e pubblica il marker di schema solo dopo una migrazione
+   sincrona completa; il reader rifiuta avvio e documenti senza tale invariante.
 
 ## 4. Errori & edge case
 
@@ -51,6 +55,7 @@ func validateDeleteResponse(resp *opensearchapi.DocumentDeleteByQueryResp) error
 | `timed_out`, version conflict o failures non vuote | errore, niente marker |
 | total/deleted incoerenti o oltre un documento | errore, niente marker |
 | deadline/cancel | errore propagato, niente marker |
+| backfill timeout/conflitto/failure parziale | nessun marker di schema; retrieval fail-closed |
 
 ## 5. Non-goals
 
@@ -58,7 +63,7 @@ func validateDeleteResponse(resp *opensearchapi.DocumentDeleteByQueryResp) error
 - Eliminare Qdrant/Neo4j o invalidare cache e summary.
 - Fare GET seguito da DELETE, soggetto a TOCTOU.
 - Inferire scope dal documento o operation dal payload.
-- Cambiare mapping, analyzer o contratto evento.
+- Cambiare analyzer o contratto evento.
 
 ## 6. Vincoli dall'ADD
 
@@ -72,7 +77,8 @@ func validateDeleteResponse(resp *opensearchapi.DocumentDeleteByQueryResp) error
 - Unit HTTP/request: query bool con ID e tre label, refresh e completion
   sincrona; risposta parziale/timed-out rifiutata; metadata fail-closed.
 - Integration OpenSearch+PostgreSQL: delete, cross-scope, replay assente,
-  marker failure window, backend irraggiungibile e DELETE-newer/UPSERT-older.
+  marker failure window, backend irraggiungibile, DELETE-newer/UPSERT-older e
+  backfill reale dei cursori storici.
 - Go test/vet/race, integration compile e aggregate gates.
 
 ## 8. Osservabilita'

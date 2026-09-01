@@ -72,6 +72,9 @@ func TestSinkSearchConsumer(t *testing.T) {
 	t.Run("Scenario4_EnsureIndexIdempotent", func(t *testing.T) {
 		scenario4EnsureIndexIdempotent(t, ctx, st)
 	})
+	t.Run("Review_LegacyCursorFieldsAreBackfilled", func(t *testing.T) {
+		reviewLegacyCursorFieldsAreBackfilled(t, ctx, st)
+	})
 	t.Run("Scenario5_DistinctConsumerGroupFanOut", func(t *testing.T) {
 		scenario5DistinctConsumerGroupFanOut(t, ctx, st)
 	})
@@ -435,6 +438,28 @@ func scenario4EnsureIndexIdempotent(t *testing.T, ctx context.Context, st *stack
 	// ricrearlo (SPEC-034 §3 scenario 4).
 	if err := consumer.EnsureIndex(ctx, st.opensearch); err != nil {
 		t.Fatalf("EnsureIndex su indice già esistente deve essere un no-op, non un errore: %v", err)
+	}
+}
+
+func reviewLegacyCursorFieldsAreBackfilled(t *testing.T, ctx context.Context, st *stack) {
+	legacyID := uuid.NewString()
+	legacy := map[string]any{
+		"entity_id": "legacy-entity", "chunk_index": 0, "text": "legacy",
+		"tenant_id": "tenant-test", "repo": "local", "acl_group": "developers",
+	}
+	if _, err := st.opensearch.Document.Create(ctx, opensearchapi.DocumentCreateReq{
+		Index: consumer.IndexName, DocumentID: legacyID,
+		Body: opensearchutil.NewJSONReader(legacy),
+	}); err != nil {
+		t.Fatalf("create legacy document: %v", err)
+	}
+	refreshIndex(t, ctx, st.opensearch)
+	if err := consumer.EnsureIndex(ctx, st.opensearch); err != nil {
+		t.Fatalf("migrate legacy document: %v", err)
+	}
+	got := getDocument(t, ctx, st.opensearch, legacyID)
+	if got["chunk_id"] != legacyID || got["event_sequence"] != float64(0) {
+		t.Fatalf("legacy cursor=%v/%v want %s/0", got["chunk_id"], got["event_sequence"], legacyID)
 	}
 }
 

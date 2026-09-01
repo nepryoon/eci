@@ -46,6 +46,9 @@ class OPAClient:
    **allora** il processo fallisce chiuso.
 7. **Dato** una decisione, **quando** serializzata, **allora** OPA riceve solo
    subject autenticato e full method; mai request, prompt, trace ID o payload.
+8. **Dato** un PDP che invia header o body a goccia, **quando** ogni singola
+   lettura resta sotto il socket timeout ma il budget totale scade, **allora**
+   il socket viene chiuso alla deadline monotona e la decisione fallisce chiusa.
 
 ## 4. Errori & edge case
 
@@ -57,6 +60,7 @@ class OPAClient:
 | risposta OPA oltre 64 KiB | Unavailable |
 | allow=true con reason diverso da `allow` | Unavailable |
 | reason ignota su deny | normalizzata `policy_denied` |
+| risposta drip-fed | Unavailable entro il minore tra timeout OPA e deadline RPC |
 
 ## 5. Non-goals
 
@@ -77,7 +81,7 @@ class OPAClient:
 
 - Unit con handler gRPC reali in-process per unary e server-streaming.
 - Fake DecisionClient per allow/deny/error e registrazione input.
-- HTTP server locale per schema OPA, limite, redirect e timeout.
+- HTTP server locale per schema OPA, limite, redirect, timeout e drip-feed.
 - Ruff e pytest `libs/py`, aggregate build/lint/test/security.
 
 ## 8. Osservabilita'

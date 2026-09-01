@@ -85,6 +85,9 @@ func TestOpenSearchTarget(t *testing.T) {
 	t.Run("EdgeCase_RowDeletedBeforeRepublishReturnsExplicitError", func(t *testing.T) {
 		edgeCaseRowDeletedBeforeRepublishReturnsExplicitError(t, ctx, st)
 	})
+	t.Run("Review_LegacyDocumentWithMatchingTextStillRepublishes", func(t *testing.T) {
+		reviewLegacyDocumentWithMatchingTextStillRepublishes(t, ctx, st)
+	})
 }
 
 // ============================================================
@@ -462,9 +465,8 @@ func readOutboxPayload(t *testing.T, ctx context.Context, db *sql.DB, aggregateI
 func createOpenSearchDocument(t *testing.T, ctx context.Context, client *opensearchapi.Client, chunkID, text, entityID string) {
 	t.Helper()
 	body := map[string]any{
-		"text":        text,
-		"entity_id":   entityID,
-		"chunk_index": 0,
+		"chunk_id": chunkID, "event_sequence": 1,
+		"text": text, "entity_id": entityID, "chunk_index": 0,
 	}
 	if _, err := client.Index(ctx, opensearchapi.IndexReq{
 		Index:      indexName,
@@ -474,6 +476,26 @@ func createOpenSearchDocument(t *testing.T, ctx context.Context, client *opensea
 		t.Fatalf("Index documento id=%s: %v", chunkID, err)
 	}
 	refreshIndex(t, ctx, client)
+}
+
+func reviewLegacyDocumentWithMatchingTextStillRepublishes(t *testing.T, ctx context.Context, st *stack) {
+	entityID := hash64("review-legacy-cursor-entity")
+	text := "func LegacyCursor() {}"
+	chunkID := insertFullRow(t, ctx, st.db, entityID, text)
+	body := map[string]any{"text": text, "entity_id": entityID, "chunk_index": 0}
+	if _, err := st.opensearch.Index(ctx, opensearchapi.IndexReq{
+		Index: indexName, DocumentID: chunkID, Body: opensearchutil.NewJSONReader(body),
+	}); err != nil {
+		t.Fatalf("Index legacy document: %v", err)
+	}
+	refreshIndex(t, ctx, st.opensearch)
+	report, err := framework.Reconcile(ctx, st.db, opensearchtarget.New(st.opensearch, st.db))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Republished == 0 || countOutboxRowsFor(t, ctx, st.db, chunkID) == 0 {
+		t.Fatalf("legacy document with matching text was incorrectly accepted: %+v", report)
+	}
 }
 
 func refreshIndex(t *testing.T, ctx context.Context, client *opensearchapi.Client) {

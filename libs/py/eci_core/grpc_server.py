@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import http.client
+import math
 import os
 import re
+import socket
+import ssl
+import threading
+import time
 import unicodedata
-import urllib.error
 import urllib.parse
-import urllib.request
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Protocol
@@ -221,11 +225,6 @@ class AuthenticatedServerInterceptor(grpc.ServerInterceptor):
         )
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
 def _parse_timeout(raw: str) -> float:
     match = _DURATION_PATTERN.fullmatch(raw)
     if not match:
@@ -279,9 +278,71 @@ class OPAClient:
         ):
             raise ValueError("invalid OPA configuration")
         self._base_url = endpoint.rstrip("/")
-        self._decision_url = self._base_url + decision_path
+        self._parsed_endpoint = parsed
+        self._decision_path = decision_path
         self._timeout = timeout_seconds
-        self._opener = urllib.request.build_opener(_NoRedirect())
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        timeout: float,
+        body: bytes | None = None,
+    ) -> tuple[int, bytes]:
+        """Execute one OPA exchange under a true total wall-clock budget.
+
+        ``http.client``'s socket timeout, like urllib's, is per blocking
+        operation. A peer can otherwise drip one byte before every timeout and
+        occupy an authorization worker indefinitely. A monotonic timer closes
+        (and first shuts down) the live socket at the absolute deadline, which
+        bounds DNS/connect, headers, and the complete body together.
+        """
+
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise TimeoutError("OPA request deadline exceeded")
+        parsed = self._parsed_endpoint
+        connection_type = (
+            http.client.HTTPSConnection
+            if parsed.scheme == "https"
+            else http.client.HTTPConnection
+        )
+        kwargs: dict = {"timeout": timeout}
+        if parsed.scheme == "https":
+            kwargs["context"] = ssl.create_default_context()
+        connection = connection_type(parsed.hostname, parsed.port, **kwargs)
+        deadline = time.monotonic() + timeout
+        # HTTP/1.0 responses without Content-Length transfer ownership of the
+        # socket from the connection object to HTTPResponse. Retain the concrete
+        # socket as soon as request() connects so the absolute-deadline timer can
+        # still interrupt a drip-fed body after getresponse() detaches it.
+        active_socket: list[socket.socket | None] = [None]
+
+        def expire() -> None:
+            sock = active_socket[0] or connection.sock
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            connection.close()
+
+        timer = threading.Timer(timeout, expire)
+        timer.daemon = True
+        timer.start()
+        try:
+            headers = {"Accept": "application/json"}
+            if body is not None:
+                headers["Content-Type"] = "application/json"
+            connection.request(method, path, body=body, headers=headers)
+            active_socket[0] = connection.sock
+            response = connection.getresponse()
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("OPA request deadline exceeded")
+            return response.status, raw
+        finally:
+            timer.cancel()
+            connection.close()
 
     @classmethod
     def from_environment(cls, service: str) -> OPAClient:
@@ -303,13 +364,11 @@ class OPAClient:
             raise ValueError("invalid OPA configuration") from exc
 
     def preflight(self) -> None:
-        request = urllib.request.Request(self._base_url + "/health", method="GET")
         try:
-            with self._opener.open(request, timeout=self._timeout) as response:
-                if response.status != 200:
-                    raise AuthorizationUnavailable("OPA health check failed")
-                response.read(4096)
-        except (OSError, urllib.error.URLError, urllib.error.HTTPError) as exc:
+            status, raw = self._request("GET", "/health", self._timeout)
+            if status != 200 or len(raw) > MAX_RESPONSE_BYTES:
+                raise AuthorizationUnavailable("OPA health check failed")
+        except (OSError, http.client.HTTPException) as exc:
             raise AuthorizationUnavailable("OPA health check failed") from exc
 
     def decide(
@@ -324,7 +383,7 @@ class OPAClient:
         except (AttributeError, TypeError):
             remaining = None
         if remaining is not None:
-            if remaining <= 0:
+            if not isinstance(remaining, (int, float)) or not math.isfinite(remaining) or remaining <= 0:
                 raise AuthorizationUnavailable("OPA decision deadline exceeded")
             timeout = min(timeout, remaining)
         body = json.dumps(
@@ -341,18 +400,11 @@ class OPAClient:
             },
             separators=(",", ":"),
         ).encode()
-        request = urllib.request.Request(
-            self._decision_url,
-            data=body,
-            method="POST",
-            headers={"Accept": "application/json", "Content-Type": "application/json"},
-        )
         try:
-            with self._opener.open(request, timeout=timeout) as response:
-                if response.status != 200:
-                    raise AuthorizationUnavailable("OPA decision failed")
-                raw = response.read(MAX_RESPONSE_BYTES + 1)
-        except (OSError, urllib.error.URLError, urllib.error.HTTPError) as exc:
+            status, raw = self._request("POST", self._decision_path, timeout, body)
+            if status != 200:
+                raise AuthorizationUnavailable("OPA decision failed")
+        except (OSError, http.client.HTTPException) as exc:
             raise AuthorizationUnavailable("OPA decision failed") from exc
         if len(raw) > MAX_RESPONSE_BYTES:
             raise AuthorizationUnavailable("OPA decision failed")

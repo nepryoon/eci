@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -163,6 +164,12 @@ func TestEnsureIndexToleratesConcurrentCreation(t *testing.T) {
 		case request.Method == http.MethodPut && request.URL.Path == "/"+IndexName+"/_mapping":
 			response.Header().Set("Content-Type", "application/json")
 			_, _ = response.Write([]byte(`{"acknowledged":true}`))
+		case request.Method == http.MethodPost && request.URL.Path == "/"+IndexName+"/_update_by_query":
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = response.Write([]byte(`{"timed_out":false,"total":0,"updated":0,"noops":0,"version_conflicts":0,"failures":[]}`))
+		case request.Method == http.MethodPost && request.URL.Path == "/"+IndexName+"/_refresh":
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = response.Write([]byte(`{"_shards":{"total":1,"successful":1,"failed":0}}`))
 		default:
 			http.Error(response, fmt.Sprintf("unexpected request %s %s", request.Method, request.URL.Path), http.StatusInternalServerError)
 		}
@@ -187,5 +194,92 @@ func TestEnsureIndexToleratesConcurrentCreation(t *testing.T) {
 	}
 	if got := createCount.Load(); got != 2 {
 		t.Fatalf("create attempts = %d, want 2 to exercise already-exists race", got)
+	}
+}
+
+func TestEnsureIndexBackfillsLegacyCursorBeforePublishingMarker(t *testing.T) {
+	var operations []string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.Method == http.MethodHead && request.URL.Path == "/"+IndexName:
+			response.WriteHeader(http.StatusOK)
+		case request.Method == http.MethodPut && request.URL.Path == "/"+IndexName+"/_mapping":
+			var body map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Errorf("decode mapping: %v", err)
+			}
+			if _, marker := body["_meta"]; marker {
+				operations = append(operations, "marker")
+			} else {
+				operations = append(operations, "mapping")
+			}
+			_, _ = response.Write([]byte(`{"acknowledged":true}`))
+		case request.Method == http.MethodPost && request.URL.Path == "/"+IndexName+"/_update_by_query":
+			operations = append(operations, "backfill")
+			var body map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Fatalf("decode migration: %v", err)
+			}
+			script, _ := body["script"].(map[string]any)
+			source, _ := script["source"].(string)
+			if !strings.Contains(source, "ctx._id") || !strings.Contains(source, "0L") {
+				t.Errorf("migration script does not derive historical cursor safely: %q", source)
+			}
+			_, _ = response.Write([]byte(`{"timed_out":false,"total":2,"updated":2,"noops":0,"version_conflicts":0,"failures":[]}`))
+		case request.Method == http.MethodPost && request.URL.Path == "/"+IndexName+"/_refresh":
+			operations = append(operations, "refresh")
+			_, _ = response.Write([]byte(`{"_shards":{"total":1,"successful":1,"failed":0}}`))
+		default:
+			http.Error(response, fmt.Sprintf("unexpected request %s %s", request.Method, request.URL.Path), http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	client, err := opensearchapi.NewClient(opensearchapi.Config{Client: opensearch.Config{Addresses: []string{server.URL}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureIndex(context.Background(), client); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"mapping", "refresh", "backfill", "marker"}
+	if fmt.Sprint(operations) != fmt.Sprint(want) {
+		t.Fatalf("operations=%v want=%v", operations, want)
+	}
+}
+
+func TestEnsureIndexDoesNotPublishMarkerAfterPartialBackfill(t *testing.T) {
+	markerWritten := false
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.Method == http.MethodHead:
+			response.WriteHeader(http.StatusOK)
+		case request.Method == http.MethodPut && request.URL.Path == "/"+IndexName+"/_mapping":
+			var body map[string]any
+			_ = json.NewDecoder(request.Body).Decode(&body)
+			if _, markerWritten = body["_meta"]; markerWritten {
+				t.Error("migration marker was written after a partial backfill")
+			}
+			_, _ = response.Write([]byte(`{"acknowledged":true}`))
+		case request.Method == http.MethodPost && request.URL.Path == "/"+IndexName+"/_update_by_query":
+			_, _ = response.Write([]byte(`{"timed_out":false,"total":2,"updated":1,"noops":0,"version_conflicts":1,"failures":[]}`))
+		case request.Method == http.MethodPost && request.URL.Path == "/"+IndexName+"/_refresh":
+			_, _ = response.Write([]byte(`{"_shards":{"total":1,"successful":1,"failed":0}}`))
+		default:
+			http.Error(response, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	client, err := opensearchapi.NewClient(opensearchapi.Config{Client: opensearch.Config{Addresses: []string{server.URL}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureIndex(context.Background(), client); err == nil {
+		t.Fatal("partial historical cursor backfill was accepted")
+	}
+	if markerWritten {
+		t.Fatal("marker written")
 	}
 }

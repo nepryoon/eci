@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/opensearch-project/opensearch-go/v4"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
@@ -41,6 +42,10 @@ const TopicCodeChunk = "outbox.event.CodeChunk"
 
 // IndexName è il nome dichiarato dell'indice OpenSearch (SPEC-034 §2).
 const IndexName = "code_chunks"
+
+const chunkCursorSchemaVersion = 1
+
+const indexMigrationTimeout = 2 * time.Minute
 
 // EnsureIndex verifica se IndexName esiste già (SPEC-034 §3 scenario 4);
 // se no, lo crea con un mapping minimo: `text` analizzato per full-text,
@@ -71,7 +76,7 @@ func EnsureIndex(ctx context.Context, client *opensearchapi.Client) error {
 	case existsResp == nil:
 		return fmt.Errorf("Indices.Exists(%s): %w", IndexName, err)
 	case existsResp.StatusCode == 200:
-		return ensureSecurityMapping(ctx, client)
+		return migrateExistingIndex(ctx, client)
 	case existsResp.StatusCode != 404:
 		return fmt.Errorf("Indices.Exists(%s): status inatteso %d: %w", IndexName, existsResp.StatusCode, err)
 	}
@@ -79,6 +84,7 @@ func EnsureIndex(ctx context.Context, client *opensearchapi.Client) error {
 
 	mapping := map[string]any{
 		"mappings": map[string]any{
+			"_meta": map[string]any{"eci_chunk_cursor_schema": chunkCursorSchemaVersion},
 			"properties": mergeProperties(map[string]any{
 				"text":        map[string]any{"type": "text"},
 				"entity_id":   map[string]any{"type": "keyword"},
@@ -104,9 +110,81 @@ func EnsureIndex(ctx context.Context, client *opensearchapi.Client) error {
 			// Another identical replica won the 404 -> create race. Reconcile
 			// the required security fields so incompatible mappings still fail;
 			// do not suppress any other OpenSearch error.
-			return ensureSecurityMapping(ctx, client)
+			return migrateExistingIndex(ctx, client)
 		}
 		return fmt.Errorf("Indices.Create(%s): %w", IndexName, err)
+	}
+	return nil
+}
+
+// migrateExistingIndex makes the cursor fields introduced for replacement
+// ordering real for every historical document before publishing the mapping
+// marker consumed by retrieval-engine. Mapping updates alone do not populate
+// _source. A legacy document therefore receives its canonical identity from
+// _id and the reserved sequence 0; every real outbox event has a positive
+// sequence and deterministically supersedes it. The marker is written last,
+// so readers cannot enable the new cursor path over a partially migrated
+// index. The whole operation is bounded and fails closed on timeout,
+// conflicts, partial failures, or an unacknowledged marker.
+func migrateExistingIndex(ctx context.Context, client *opensearchapi.Client) error {
+	migrationCtx, cancel := context.WithTimeout(ctx, indexMigrationTimeout)
+	defer cancel()
+	if err := ensureSecurityMapping(migrationCtx, client); err != nil {
+		return err
+	}
+	// Make writes completed by an older sink replica visible to the migration
+	// search before establishing the marker. Without this barrier a just-written
+	// legacy document could be absent from the update-by-query snapshot.
+	refreshResponse, err := client.Indices.Refresh(migrationCtx, &opensearchapi.IndicesRefreshReq{
+		Index: []string{IndexName},
+	})
+	if err != nil || refreshResponse == nil {
+		return fmt.Errorf("Indices.Refresh before legacy cursor migration (%s): %w", IndexName, err)
+	}
+	var shards struct {
+		Failed int `json:"failed"`
+	}
+	if err := json.Unmarshal(refreshResponse.Shards, &shards); err != nil || shards.Failed != 0 {
+		return fmt.Errorf("Indices.Refresh before legacy cursor migration (%s): partial response", IndexName)
+	}
+	body := map[string]any{
+		"query": map[string]any{
+			"bool": map[string]any{
+				"minimum_should_match": 1,
+				"should": []any{
+					map[string]any{"bool": map[string]any{"must_not": map[string]any{"exists": map[string]any{"field": "chunk_id"}}}},
+					map[string]any{"bool": map[string]any{"must_not": map[string]any{"exists": map[string]any{"field": "event_sequence"}}}},
+				},
+			},
+		},
+		"script": map[string]any{
+			"lang":   "painless",
+			"source": "if (ctx._source.chunk_id == null) { ctx._source.chunk_id = ctx._id; } if (ctx._source.event_sequence == null) { ctx._source.event_sequence = 0L; }",
+		},
+	}
+	refresh, wait := true, true
+	response, err := client.UpdateByQuery(migrationCtx, opensearchapi.UpdateByQueryReq{
+		Indices: []string{IndexName},
+		Body:    opensearchutil.NewJSONReader(body),
+		Params: opensearchapi.UpdateByQueryParams{
+			Refresh: &refresh, WaitForCompletion: &wait, Timeout: indexMigrationTimeout,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("UpdateByQuery legacy cursor fields (%s): %w", IndexName, err)
+	}
+	if response == nil || response.TimedOut || response.VersionConflicts != 0 || len(response.Failures) != 0 || response.Updated+response.Noops != response.Total {
+		return fmt.Errorf("UpdateByQuery legacy cursor fields (%s): incomplete migration", IndexName)
+	}
+	marker := map[string]any{"_meta": map[string]any{"eci_chunk_cursor_schema": chunkCursorSchemaVersion}}
+	markerResponse, err := client.Indices.Mapping.Put(migrationCtx, opensearchapi.MappingPutReq{
+		Indices: []string{IndexName}, Body: opensearchutil.NewJSONReader(marker),
+	})
+	if err != nil {
+		return fmt.Errorf("Mapping.Put migration marker (%s): %w", IndexName, err)
+	}
+	if markerResponse == nil || !markerResponse.Acknowledged {
+		return fmt.Errorf("Mapping.Put migration marker (%s): unacknowledged", IndexName)
 	}
 	return nil
 }

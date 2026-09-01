@@ -138,6 +138,18 @@ consumer che la richiedono. Il rollback dei consumer precede quello del
 connector e della migration. La sequenza non contiene tenant, repository,
 path, payload o credenziali e non viene usata come autorita' ACL.
 
+OpenSearch richiede inoltre una migrazione applicativa esplicita: aggiungere i
+campi al mapping non modifica `_source` dei documenti esistenti. Prima di
+pubblicare il marker mapping `eci_chunk_cursor_schema=1`, sink-search esegue un
+`update_by_query` sincrono e bounded che assegna a ogni documento storico
+`chunk_id=_id` ed `event_sequence=0`. Zero e' riservato alla vista storica;
+ogni sequenza outbox canonica e' positiva e la supersede. Timeout, conflitti o
+failure parziali impediscono il marker. Retrieval-engine richiede il marker
+prima di aprire il listener e valida comunque su ogni hit identita', presenza
+e non negativita' del cursore, fallendo chiuso. Il rollback conserva i campi
+aggiunti e il marker innocui; rimuoverli richiederebbe ricostruire la vista da
+PostgreSQL, mai una down migration distruttiva in-place.
+
 ## Review avversariale
 
 Il design evita offset-before-effect, marker-before-effect e dual write verso

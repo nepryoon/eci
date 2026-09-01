@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from concurrent import futures
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import ClassVar
@@ -279,3 +280,41 @@ def test_opa_redirect_is_not_followed(monkeypatch, opa_server):
     OPAHandler.response_status = 302
     with pytest.raises(AuthorizationUnavailable):
         client.preflight()
+
+
+def test_opa_body_drip_cannot_extend_total_rpc_deadline(monkeypatch):
+    class DripHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            payload = json.dumps({"result": {"allow": True, "reason": "allow"}}).encode()
+            try:
+                for byte in payload:
+                    self.wfile.write(bytes([byte]))
+                    self.wfile.flush()
+                    time.sleep(0.02)  # each byte is faster than the old socket timeout
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, format, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), DripHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("OPA_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("OPA_ALLOW_INSECURE_HTTP", "true")
+    monkeypatch.setenv("OPA_TIMEOUT", "120ms")
+    client = OPAClient.from_environment("orchestrator")
+    started = time.monotonic()
+    try:
+        with pytest.raises(AuthorizationUnavailable):
+            client.decide(DeadlineContext(), valid_subject(), "/service/Ask")
+    finally:
+        elapsed = time.monotonic() - started
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert elapsed < 0.4

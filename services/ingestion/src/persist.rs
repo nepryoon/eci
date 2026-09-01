@@ -602,6 +602,22 @@ fn persist_parsed_file_in_transaction(
         .iter()
         .map(|node| (scoped_node_id(scope, &node.id), node.file_path.as_str()))
         .collect();
+    let file_node_ids_owned: Vec<String> = nodes
+        .iter()
+        .map(|node| scoped_node_id(scope, &node.id))
+        .collect();
+    let file_node_ids: Vec<&str> = file_node_ids_owned.iter().map(String::as_str).collect();
+    // Capture the scope that owns every existing projection before the node
+    // UPSERT can replace provenance (ACL is intentionally not part of node ID).
+    let previous_node_rows = tx.query(
+        "SELECT id, provenance FROM code_node
+         WHERE id = ANY($1) ORDER BY id FOR UPDATE",
+        &[&file_node_ids],
+    )?;
+    let previous_node_provenance: HashMap<String, serde_json::Value> = previous_node_rows
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
 
     for node in &nodes {
         let node_id = scoped_node_id(scope, &node.id);
@@ -653,19 +669,13 @@ fn persist_parsed_file_in_transaction(
     // Scope del DELETE: SOLO from_id, mai to_id (SPEC-014 §2) — id di
     // TUTTI i nodi appena prodotti da questo file, File incluso (le sue
     // CONTAINS hanno from_id = id del File).
-    let file_node_ids_owned: Vec<String> = nodes
-        .iter()
-        .map(|node| scoped_node_id(scope, &node.id))
-        .collect();
-    let file_node_ids: Vec<&str> = file_node_ids_owned.iter().map(String::as_str).collect();
-
     // Re-ingestion replaces canonical rows whose projection identities may be
     // different from the replacements. Publish the old logical edges before
     // removing them so Neo4j cannot retain relationships that disappeared
     // from the new parse. DELETE and subsequent UPSERT sequences are allocated
     // in this same transaction and therefore preserve replacement order.
     let old_relation_rows = tx.query(
-        "SELECT id::text, rel_type, from_id, to_id
+        "SELECT id::text, rel_type, from_id, to_id, provenance
          FROM code_relation
          WHERE domain = 'code' AND from_id = ANY($1)
          ORDER BY id FOR UPDATE",
@@ -676,14 +686,14 @@ fn persist_parsed_file_in_transaction(
         let rel_type: String = row.get(1);
         let from_id: String = row.get(2);
         let to_id: String = row.get(3);
-        let path = file_path_by_node_id.get(&from_id).copied().unwrap_or("");
+        let previous_provenance: serde_json::Value = row.get(4);
         insert_delete_outbox(
             tx,
             "CodeRelation",
             &id,
             serde_json::json!({
                 "id": id, "rel_type": rel_type, "from_id": from_id,
-                "to_id": to_id, "provenance": provenance_json(scope, path, commit)
+                "to_id": to_id, "provenance": previous_provenance
             }),
             trace_id,
         )?;
@@ -759,17 +769,17 @@ fn persist_parsed_file_in_transaction(
     for row in &old_embedding_rows {
         let id: String = row.get(0);
         let entity_id: String = row.get(1);
-        let path = file_path_by_node_id
+        let previous_provenance = previous_node_provenance
             .get(&entity_id)
-            .copied()
-            .unwrap_or("");
+            .cloned()
+            .ok_or_else(|| PersistError(PersistErrorKind::InvalidCommandData))?;
         insert_delete_outbox(
             tx,
             "CodeEmbedding",
             &id,
             serde_json::json!({
                 "id": id, "entity_id": entity_id,
-                "provenance": provenance_json(scope, path, commit)
+                "provenance": previous_provenance
             }),
             trace_id,
         )?;
@@ -778,17 +788,17 @@ fn persist_parsed_file_in_transaction(
     for row in &old_chunk_rows {
         let id = row.get::<_, uuid::Uuid>(0).to_string();
         let entity_id: String = row.get(1);
-        let path = file_path_by_node_id
+        let previous_provenance = previous_node_provenance
             .get(&entity_id)
-            .copied()
-            .unwrap_or("");
+            .cloned()
+            .ok_or_else(|| PersistError(PersistErrorKind::InvalidCommandData))?;
         insert_delete_outbox(
             tx,
             "CodeChunk",
             &id,
             serde_json::json!({
                 "id": id, "entity_id": entity_id,
-                "provenance": provenance_json(scope, path, commit)
+                "provenance": previous_provenance
             }),
             trace_id,
         )?;

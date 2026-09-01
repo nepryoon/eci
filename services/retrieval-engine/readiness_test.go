@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+
+	"github.com/opensearch-project/opensearch-go/v4"
+	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 )
 
 func TestDependencyReadinessRequiresEveryBackend(t *testing.T) {
@@ -25,6 +29,38 @@ func TestDependencyReadinessRequiresEveryBackend(t *testing.T) {
 		return errors.New("backend secret detail")
 	}); err == nil {
 		t.Fatal("failed dependency reported ready")
+	}
+}
+
+func TestChunkCursorMigrationMarkerIsRequiredBeforeReaderStarts(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		mapping string
+		wantErr bool
+	}{
+		{name: "verified", mapping: `{"code_chunks":{"mappings":{"_meta":{"eci_chunk_cursor_schema":1}}}}`},
+		{name: "legacy mapping", mapping: `{"code_chunks":{"mappings":{"properties":{"chunk_id":{"type":"keyword"}}}}}`, wantErr: true},
+		{name: "wrong generation", mapping: `{"code_chunks":{"mappings":{"_meta":{"eci_chunk_cursor_schema":2}}}}`, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.Method != http.MethodGet || request.URL.Path != "/code_chunks/_mapping" {
+					http.Error(response, fmt.Sprintf("unexpected %s %s", request.Method, request.URL.Path), http.StatusBadRequest)
+					return
+				}
+				response.Header().Set("Content-Type", "application/json")
+				_, _ = response.Write([]byte(test.mapping))
+			}))
+			defer server.Close()
+			client, err := opensearchapi.NewClient(opensearchapi.Config{Client: opensearch.Config{Addresses: []string{server.URL}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = requireChunkCursorMigration(context.Background(), client)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("error=%v wantErr=%v", err, test.wantErr)
+			}
+		})
 	}
 }
 

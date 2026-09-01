@@ -255,7 +255,14 @@ fn chunk_persist_scenarios_1_2_4_validate_single_chunk_and_outbox() {
 
     // --- Scenario 2: ri-parso e ri-persisto SENZA modifiche -> il conteggio resta lo stesso. ---
     let (nodes2, relations2, chunks2) = parse_file_full("order_service.go", &source);
-    let _summary2 = persist_parsed_file(&mut client, nodes2, relations2, &chunks2)
+    let replacement_scope = IngestionScope::new("tenant-test", "sample-repo", "security").unwrap();
+    let _summary2 = persist_scoped(
+        &mut client,
+        &replacement_scope,
+        nodes2,
+        relations2,
+        &chunks2,
+    )
         .expect("persist_parsed_file scenario 2");
     assert_eq!(
         chunk_count_for_entity(&mut client, &persisted_validate_id),
@@ -279,6 +286,19 @@ fn chunk_persist_scenarios_1_2_4_validate_single_chunk_and_outbox() {
         assert_eq!(
             count, 1,
             "re-ingestion must emit one {aggregate_type} tombstone for {aggregate_id}"
+        );
+        let tombstone_acl: String = client
+            .query_one(
+                "SELECT payload->'provenance'->>'acl_group' FROM outbox
+                 WHERE event_type = 'DELETE' AND aggregate_type = $1
+                   AND aggregate_id = $2",
+                &[&aggregate_type, &aggregate_id],
+            )
+            .expect("query replacement tombstone ACL")
+            .get(0);
+        assert_eq!(
+            tombstone_acl, "developers",
+            "replacement tombstone must retain the projection's previous ACL"
         );
     }
 }

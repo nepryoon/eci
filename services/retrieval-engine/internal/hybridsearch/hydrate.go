@@ -97,7 +97,7 @@ type chunkHit struct {
 	ChunkID       string `json:"chunk_id"`
 	EntityID      string `json:"entity_id"`
 	ChunkIndex    int    `json:"chunk_index"`
-	EventSequence int64  `json:"event_sequence"`
+	EventSequence *int64 `json:"event_sequence"`
 	Text          string `json:"text"`
 }
 
@@ -208,10 +208,10 @@ func HydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes 
 			seenIDs[hit.ID] = struct{}{}
 			var c chunkHit
 			if err := json.Unmarshal(hit.Source, &c); err != nil {
-				continue // documento malformato: scartato, non un errore fatale della ricerca
+				return fmt.Errorf("ricerca batch code_chunks: documento malformato")
 			}
-			if c.ChunkID == "" {
-				c.ChunkID = hit.ID
+			if c.ChunkID == "" || c.ChunkID != hit.ID || c.EntityID == "" || c.ChunkIndex < 0 || c.EventSequence == nil || *c.EventSequence < 0 {
+				return fmt.Errorf("ricerca batch code_chunks: documento senza cursore canonico")
 			}
 			byEntity[c.EntityID] = append(byEntity[c.EntityID], c)
 		}
@@ -232,8 +232,8 @@ func HydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes 
 			if chunks[i].ChunkIndex != chunks[j].ChunkIndex {
 				return chunks[i].ChunkIndex < chunks[j].ChunkIndex
 			}
-			if chunks[i].EventSequence != chunks[j].EventSequence {
-				return chunks[i].EventSequence < chunks[j].EventSequence
+			if *chunks[i].EventSequence != *chunks[j].EventSequence {
+				return *chunks[i].EventSequence < *chunks[j].EventSequence
 			}
 			return chunks[i].ChunkID < chunks[j].ChunkID
 		})
