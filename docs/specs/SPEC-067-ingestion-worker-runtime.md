@@ -1,5 +1,5 @@
 # SPEC-067 — Runtime worker ingestion durabile e autenticato
-Stato: implemented
+Stato: verified
 Task-tree: T7.1a · Servizio: `services/ingestion` · ADD: Modulo 3 §1.1–§1.2, §2.1, D8
 Contratti: nuovo `contracts/jsonschema/ingestion-file-command.json`; `contracts/jsonschema/hybrid-graph.json`; nuova migration SQL receipt
 ADR: ADR-0023
@@ -271,7 +271,7 @@ separato emerso dall'audit di completezza.
 - [x] PostgreSQL e MinIO sono TLS-only con CA/hostname verificati; il chart
       monta al worker esclusivamente certificati CA pubblici.
 - [x] Nessun secret, scope o sorgente in log, metriche, span o DLQ.
-- [ ] `task build`, `task lint`, `task test`, `task test:integration`,
+- [x] `task build`, `task lint`, `task test`, `task test:integration`,
       `task guard`, `task k8s:validate` verdi; CI verde.
 
 ## 10. Review di approvazione e deviazioni
@@ -345,3 +345,13 @@ lo stesso nome: parser e chunker generavano chiavi deterministiche duplicate e
 il vincolo PostgreSQL veniva erroneamente classificato transitorio. Il boundary
 di persistenza valida ora unicità e ownership dei chunk prima della transazione;
 `InvalidCommandData` è mappato a `parse_failed` permanente.
+
+Evidenza finale del 2026-09-01 sul commit `73692c9415f6426b1acf2cf037d57c65603f986d`:
+`task guard`, `task build`, `task lint`, `task test`,
+`task test:integration`, `task k8s:validate`, `task envoy:validate` e
+`task test:envoy` sono PASS localmente; Rustfmt e Clippy con warning negati
+sono PASS. GitHub Actions run `33451930010` è verde in tutti i sei job
+(build/lint/test, guard, datastore-security, Envoy, Kubernetes e WORM).
+La review automatizzata ha ispezionato lo stesso SHA senza trovare nuovi
+problemi sostanziali e tutte le review thread della PR #76 risultano risolte
+solo dopo la relativa regressione e remediation.
