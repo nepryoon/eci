@@ -8,7 +8,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -122,6 +121,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("retrieval-engine: creazione client OpenSearch (url=%s): %v", openSearchURL, err)
 	}
+	startupCtx, startupCancel := context.WithTimeout(ctx, dependencyCheckTimeout)
+	if err := requireChunkCursorMigration(startupCtx, openSearchClient); err != nil {
+		startupCancel()
+		log.Fatalf("retrieval-engine: migrazione OpenSearch richiesta: %v", err)
+	}
+	startupCancel()
 
 	addr := config.EnvOrDefault("RETRIEVAL_ENGINE_ADDR", ":50053")
 	lis, err := net.Listen("tcp", addr)
@@ -143,22 +148,7 @@ func main() {
 				}
 				return nil
 			},
-			func(ctx context.Context) error {
-				response, err := openSearchClient.Indices.Exists(ctx, opensearchapi.IndicesExistsReq{
-					Indices: []string{retrievalIndexName},
-				})
-				if response != nil {
-					defer response.Body.Close()
-					_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-				}
-				if err != nil {
-					return err
-				}
-				if response == nil || response.StatusCode != http.StatusOK {
-					return fmt.Errorf("OpenSearch index %q is unavailable", retrievalIndexName)
-				}
-				return nil
-			},
+			func(ctx context.Context) error { return requireChunkCursorMigration(ctx, openSearchClient) },
 			embedder.Health,
 			reranker.Health,
 		))

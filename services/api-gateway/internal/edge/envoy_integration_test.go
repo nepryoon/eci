@@ -32,6 +32,7 @@ import (
 	"github.com/eci-project/eci/services/api-gateway/internal/authn"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/testcontainers/testcontainers-go"
+	tcnetwork "github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel/propagation"
@@ -46,6 +47,7 @@ import (
 )
 
 const envoyImage = "envoyproxy/envoy:v1.39.0@sha256:d59f7f5fa10cff6d5892b6c5e7df5c9297ddfb2c3683e33fbfb82da24de4fa66"
+const curlImage = "curlimages/curl@sha256:463eaf6072688fe96ac64fa623fe73e1dbe25d8ad6c34404a669ad3ce1f104b6"
 
 type integrationAuthenticator struct {
 	calls atomic.Int64
@@ -221,7 +223,7 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 	}}}
 	t.Cleanup(func() { http.DefaultClient = oldDefaultClient })
 	configPath := renderIntegrationEnvoyConfig(t, root, helperPort, grpcPort)
-	baseURL, gatewayAddress := startIntegrationEnvoy(t, ctx, root, configPath, certificatePath, keyPath, helperPort, grpcPort)
+	baseURL, gatewayAddress, gatewayNetwork := startIntegrationEnvoy(t, ctx, root, configPath, certificatePath, keyPath, helperPort, grpcPort)
 
 	t.Run("health is public and bounded", func(t *testing.T) {
 		response, err := http.Get(baseURL + "/healthz")
@@ -647,33 +649,46 @@ func TestEnvoyGatewayEndToEnd(t *testing.T) {
 			t.Fatal("unauthenticated flood reached backend")
 		}
 
-		otherSourceTransport := &http.Transport{
-			TLSClientConfig: &tls.Config{
-				MinVersion: tls.VersionTLS12,
-				RootCAs:    roots,
-				ServerName: "localhost",
-			},
-			DialContext: (&net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.2")}}).DialContext,
+		status := http.StatusInternalServerError
+		if gatewayNetwork != nil {
+			status = postFromIsolatedContainer(
+				t,
+				ctx,
+				gatewayNetwork,
+				certificatePath,
+				"/eci.retrieval.v1.RetrievalEngine/GetNode",
+				"Bearer invalid-other-source",
+			)
+		} else {
+			otherSourceTransport := &http.Transport{
+				TLSClientConfig: &tls.Config{
+					MinVersion: tls.VersionTLS12,
+					RootCAs:    roots,
+					ServerName: "localhost",
+				},
+				DialContext: (&net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.2")}}).DialContext,
+			}
+			defer otherSourceTransport.CloseIdleConnections()
+			otherSourceClient := &http.Client{Transport: otherSourceTransport}
+			request, _ := http.NewRequest(http.MethodPost, baseURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", strings.NewReader(`{}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer invalid-other-source")
+			response, err := otherSourceClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			status = response.StatusCode
 		}
-		defer otherSourceTransport.CloseIdleConnections()
-		otherSourceClient := &http.Client{Transport: otherSourceTransport}
-		request, _ := http.NewRequest(http.MethodPost, baseURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", strings.NewReader(`{}`))
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("Authorization", "Bearer invalid-other-source")
-		response, err := otherSourceClient.Do(request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer response.Body.Close()
-		if response.StatusCode != http.StatusUnauthorized {
-			t.Fatalf("one source exhausted another source's pre-auth bucket: status=%d", response.StatusCode)
+		if status != http.StatusUnauthorized {
+			t.Fatalf("one source exhausted another source's pre-auth bucket: status=%d", status)
 		}
 	})
 
 	t.Run("auth helper outage fails closed", func(t *testing.T) {
 		deadHelperPort := availablePort(t)
 		outageConfigPath := renderIntegrationEnvoyConfig(t, root, deadHelperPort, grpcPort)
-		outageURL, _ := startIntegrationEnvoy(t, ctx, root, outageConfigPath, certificatePath, keyPath, deadHelperPort, grpcPort)
+		outageURL, _, _ := startIntegrationEnvoy(t, ctx, root, outageConfigPath, certificatePath, keyPath, deadHelperPort, grpcPort)
 		before := len(backend.snapshot())
 		response := postJSON(t, outageURL+"/eci.retrieval.v1.RetrievalEngine/GetNode", `{}`, "Bearer integration-valid")
 		defer response.Body.Close()
@@ -737,7 +752,7 @@ func startIntegrationHelper(t *testing.T, retrievalAddress string, authenticator
 	return listener, server
 }
 
-func startIntegrationEnvoy(t *testing.T, ctx context.Context, root, configPath, certificatePath, keyPath string, helperPort, grpcPort int) (string, string) {
+func startIntegrationEnvoy(t *testing.T, ctx context.Context, root, configPath, certificatePath, keyPath string, helperPort, grpcPort int) (string, string, *testcontainers.DockerNetwork) {
 	t.Helper()
 	if binary := os.Getenv("ECI_ENVOY_BINARY"); binary != "" {
 		publicPort := availablePort(t)
@@ -771,8 +786,14 @@ func startIntegrationEnvoy(t *testing.T, ctx context.Context, root, configPath, 
 		})
 		baseURL := "https://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(publicPort))
 		waitForEnvoyHealth(t, baseURL, output)
-		return baseURL, net.JoinHostPort("127.0.0.1", strconv.Itoa(publicPort))
+		return baseURL, net.JoinHostPort("127.0.0.1", strconv.Itoa(publicPort)), nil
 	}
+
+	gatewayNetwork, err := tcnetwork.New(ctx, tcnetwork.WithAttachable())
+	if err != nil {
+		t.Fatalf("create isolated Envoy test network: %v", err)
+	}
+	t.Cleanup(func() { _ = gatewayNetwork.Remove(context.Background()) })
 
 	containerRequest := testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
@@ -793,6 +814,9 @@ func startIntegrationEnvoy(t *testing.T, ctx context.Context, root, configPath, 
 	if err := testcontainers.WithHostPortAccess(helperPort, grpcPort)(&containerRequest); err != nil {
 		t.Fatal(err)
 	}
+	if err := tcnetwork.WithNetwork([]string{"envoy"}, gatewayNetwork)(&containerRequest); err != nil {
+		t.Fatal(err)
+	}
 	container, err := testcontainers.GenericContainer(ctx, containerRequest)
 	if err != nil {
 		t.Fatalf("start %s: %v", envoyImage, err)
@@ -809,7 +833,60 @@ func startIntegrationEnvoy(t *testing.T, ctx context.Context, root, configPath, 
 	address := net.JoinHostPort(host, mapped.Port())
 	baseURL := "https://" + address
 	waitForEnvoyHealth(t, baseURL, new(strings.Builder))
-	return baseURL, address
+	return baseURL, address, gatewayNetwork
+}
+
+func postFromIsolatedContainer(
+	t *testing.T,
+	ctx context.Context,
+	gatewayNetwork *testcontainers.DockerNetwork,
+	certificatePath, path, authorization string,
+) int {
+	t.Helper()
+	client, err := testcontainers.Run(
+		ctx,
+		curlImage,
+		tcnetwork.WithNetwork([]string{"isolated-client"}, gatewayNetwork),
+		testcontainers.WithFiles(testcontainers.ContainerFile{
+			HostFilePath:      certificatePath,
+			ContainerFilePath: "/tmp/eci-envoy-ca.crt",
+			FileMode:          0o644,
+		}),
+		testcontainers.WithCmd(
+			"--silent",
+			"--show-error",
+			"--output", "/dev/null",
+			"--write-out", "%{http_code}",
+			"--connect-timeout", "5",
+			"--cacert", "/tmp/eci-envoy-ca.crt",
+			"--connect-to", "localhost:8080:envoy:8080",
+			"--header", "Content-Type: application/json",
+			"--header", "Authorization: "+authorization,
+			"--data", "{}",
+			"https://localhost:8080"+path,
+		),
+		testcontainers.WithWaitStrategy(wait.ForExit()),
+	)
+	if client != nil {
+		t.Cleanup(func() { _ = testcontainers.TerminateContainer(client) })
+	}
+	if err != nil {
+		t.Fatalf("run isolated source client %s: %v", curlImage, err)
+	}
+	logs, err := client.Logs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logs.Close()
+	payload, err := io.ReadAll(io.LimitReader(logs, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := strconv.Atoi(strings.TrimSpace(string(payload)))
+	if err != nil {
+		t.Fatalf("isolated source status %q: %v", payload, err)
+	}
+	return status
 }
 
 func writeIntegrationTLSIdentity(t *testing.T) (string, string, *x509.CertPool) {

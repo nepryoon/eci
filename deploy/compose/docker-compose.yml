@@ -237,14 +237,14 @@ services:
       start_period: 20s
 
   kafka-connect:
-    # SPEC-007 §2 chiede debezium/connect:latest, ma quel repository/tag
+    # La prima versione di SPEC-007 chiedeva debezium/connect:latest, ma quel repository/tag
     # non esiste su Docker Hub (solo tag di versione esplicita, es.
     # 2.7.3.Final, mai "latest" — verificato al momento dell'implementazione,
     # `docker pull debezium/connect:latest` fallisce con "not found").
     # L'immagine ufficiale equivalente con tag :latest è pubblicata su Quay
     # (stessi plugin Debezium preinstallati, incluso il connector
     # PostgreSQL). Deviazione annotata in SPEC-007 §10.
-    image: quay.io/debezium/connect:latest
+    image: quay.io/debezium/connect@sha256:698f0559e667a242f962221079e75917b2b7a3ad4de62661e977628da0e33b45
     environment:
       BOOTSTRAP_SERVERS: kafka:9092
       GROUP_ID: eci-connect

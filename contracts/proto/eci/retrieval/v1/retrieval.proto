@@ -173,11 +173,11 @@ message ImpactAnalysisRequest {
   bool include_source_text = 8;
   // Estensione additiva T4.2 (SPEC-042, ADR-0008): cap sul numero TOTALE di
   // nodi esplorati sull'INTERA traversata (concetto diverso da
-  // fanout_cap_per_hop, che resta non implementato da T4.2). <= 0 -> errore
+  // fanout_cap_per_hop). <= 0 -> errore
   // esplicito, nessun default silenzioso (SPEC-042 §3 scenario 6).
   int32 max_nodes = 9;
   Domain domain = 10;          // filtro dominio; UNSPECIFIED = nessun filtro
-  repeated string repos = 11;  // filtro repo (T4.2 usa solo il primo, se presente)
+  repeated string repos = 11;  // filtro repo, intersecato con lo scope autenticato
 }
 
 // Nodo impattato emesso in streaming man mano che la traversata procede.
@@ -196,6 +196,9 @@ message ImpactProgress {
   uint32 current_depth = 3;
   bool truncated_by_fanout_cap = 4;
   bool truncated_by_depth = 5;
+  // Estensione additiva SPEC-069 / ADR-0024: distingue il cap totale
+  // max_nodes dal cap per-node fanout_cap_per_hop.
+  bool truncated_by_node_cap = 6;
 }
 
 message ImpactAnalysisEvent {

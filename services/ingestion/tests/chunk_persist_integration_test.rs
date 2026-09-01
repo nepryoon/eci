@@ -229,15 +229,78 @@ fn chunk_persist_scenarios_1_2_4_validate_single_chunk_and_outbox() {
         "SPEC-032 scenario 1: provenance del CodeChunk di Validate deve combaciare col path del suo CodeNode: {validate_chunk_payload:?}"
     );
 
+    // A real downstream embedding may already reference the chunk when the
+    // same file is ingested again. Replacement must tombstone and remove both
+    // projections atomically before inserting the fresh chunk UUID.
+    let old_chunk_id: uuid::Uuid = client
+        .query_one(
+            "SELECT id FROM code_chunk WHERE entity_id = $1 AND chunk_index = 0",
+            &[&persisted_validate_id],
+        )
+        .expect("query old Validate chunk")
+        .get(0);
+    let old_embedding_id: uuid::Uuid = client
+        .query_one(
+            "INSERT INTO code_embedding (chunk_id, vector, model_id, embedding_dim)
+             VALUES ($1, ARRAY[0.1]::real[], 'replacement-regression', 1)
+             RETURNING id",
+            &[&old_chunk_id],
+        )
+        .expect("seed embedding for old chunk")
+        .get(0);
+    let old_relation_id: String = client
+        .query_one("SELECT id::text FROM code_relation ORDER BY id LIMIT 1", &[])
+        .expect("query old relation")
+        .get(0);
+
     // --- Scenario 2: ri-parso e ri-persisto SENZA modifiche -> il conteggio resta lo stesso. ---
     let (nodes2, relations2, chunks2) = parse_file_full("order_service.go", &source);
-    let _summary2 = persist_parsed_file(&mut client, nodes2, relations2, &chunks2)
+    let replacement_scope = IngestionScope::new("tenant-test", "sample-repo", "security").unwrap();
+    let _summary2 = persist_scoped(
+        &mut client,
+        &replacement_scope,
+        nodes2,
+        relations2,
+        &chunks2,
+    )
         .expect("persist_parsed_file scenario 2");
     assert_eq!(
         chunk_count_for_entity(&mut client, &persisted_validate_id),
         1,
         "scenario 2: il conteggio code_chunk per Validate deve restare 1 (vecchie cancellate, nuove identiche inserite, non duplicate)"
     );
+    for (aggregate_type, aggregate_id) in [
+        ("CodeChunk", old_chunk_id.to_string()),
+        ("CodeEmbedding", old_embedding_id.to_string()),
+        ("CodeRelation", old_relation_id),
+    ] {
+        let count: i64 = client
+            .query_one(
+                "SELECT count(*) FROM outbox
+                 WHERE event_type = 'DELETE' AND aggregate_type = $1
+                   AND aggregate_id = $2",
+                &[&aggregate_type, &aggregate_id],
+            )
+            .expect("query replacement tombstone")
+            .get(0);
+        assert_eq!(
+            count, 1,
+            "re-ingestion must emit one {aggregate_type} tombstone for {aggregate_id}"
+        );
+        let tombstone_acl: String = client
+            .query_one(
+                "SELECT payload->'provenance'->>'acl_group' FROM outbox
+                 WHERE event_type = 'DELETE' AND aggregate_type = $1
+                   AND aggregate_id = $2",
+                &[&aggregate_type, &aggregate_id],
+            )
+            .expect("query replacement tombstone ACL")
+            .get(0);
+        assert_eq!(
+            tombstone_acl, "developers",
+            "replacement tombstone must retain the projection's previous ACL"
+        );
+    }
 }
 
 // --- SPEC-029 §3 scenario 3: NUMERO diverso di chunk tra un parse e

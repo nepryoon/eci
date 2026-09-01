@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +28,8 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	tcqdrant "github.com/testcontainers/testcontainers-go/modules/qdrant"
 
+	"github.com/eci-project/eci/libs/go/eci/eventorder"
+	"github.com/eci-project/eci/libs/go/eci/outboxmeta"
 	"github.com/eci-project/eci/libs/go/eci/resilience"
 	"github.com/eci-project/eci/services/sink-vector/internal/consumer"
 )
@@ -64,6 +67,116 @@ func TestSinkVectorConsumer(t *testing.T) {
 	t.Run("Review_FailedQdrantWriteDoesNotMarkProcessed", func(t *testing.T) {
 		reviewFailedQdrantWriteDoesNotMarkProcessed(t, ctx, st)
 	})
+	t.Run("SPEC075_DeletePointScopeSafeAndIdempotent", func(t *testing.T) {
+		spec075DeletePointScopeSafeAndIdempotent(t, ctx, st)
+	})
+	t.Run("SPEC075_FailedDeleteDoesNotMarkProcessed", func(t *testing.T) {
+		spec075FailedDeleteDoesNotMarkProcessed(t, ctx, st)
+	})
+	t.Run("Review_OlderRetryCannotRecreateDeletedPoint", func(t *testing.T) {
+		reviewOlderRetryCannotRecreateDeletedPoint(t, ctx, st)
+	})
+	t.Run("Review_ConcurrentAggregateGuardsSerialize", func(t *testing.T) {
+		reviewConcurrentAggregateGuardsSerialize(t, ctx, st)
+	})
+}
+
+func reviewConcurrentAggregateGuardsSerialize(t *testing.T, ctx context.Context, st *stack) {
+	aggregateID := uuid.NewString()
+	first, state, err := eventorder.Begin(ctx, st.db, consumer.ConsumerName, "CodeEmbedding", aggregateID, outboxmeta.Metadata{
+		EventID: uuid.NewString(), Operation: outboxmeta.OperationUpsert, Sequence: 30_000,
+	})
+	if err != nil || state != eventorder.Ready {
+		t.Fatalf("first guard state=%v err=%v", state, err)
+	}
+	defer first.Abort()
+
+	type result struct {
+		guard *eventorder.Guard
+		state eventorder.State
+		err   error
+	}
+	secondResult := make(chan result, 1)
+	go func() {
+		guard, state, err := eventorder.Begin(ctx, st.db, consumer.ConsumerName, "CodeEmbedding", aggregateID, outboxmeta.Metadata{
+			EventID: uuid.NewString(), Operation: outboxmeta.OperationDelete, Sequence: 30_001,
+		})
+		secondResult <- result{guard: guard, state: state, err: err}
+	}()
+
+	select {
+	case got := <-secondResult:
+		if got.guard != nil {
+			got.guard.Abort()
+		}
+		t.Fatalf("second guard bypassed the aggregate lock: state=%v err=%v", got.state, got.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := first.Complete(ctx); err != nil {
+		t.Fatalf("complete first guard: %v", err)
+	}
+
+	select {
+	case got := <-secondResult:
+		if got.err != nil || got.state != eventorder.Ready || got.guard == nil {
+			t.Fatalf("second guard state=%v err=%v", got.state, got.err)
+		}
+		if err := got.guard.Complete(ctx); err != nil {
+			t.Fatalf("complete second guard: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second guard remained blocked after first completion")
+	}
+
+	var sequence int64
+	if err := st.db.QueryRowContext(ctx, `
+		SELECT event_sequence FROM consumer_projection_watermark
+		WHERE consumer_name=$1 AND aggregate_type='CodeEmbedding' AND aggregate_id=$2`,
+		consumer.ConsumerName, aggregateID,
+	).Scan(&sequence); err != nil {
+		t.Fatalf("read final watermark: %v", err)
+	}
+	if sequence != 30_001 {
+		t.Fatalf("final watermark=%d want 30001", sequence)
+	}
+}
+
+func reviewOlderRetryCannotRecreateDeletedPoint(t *testing.T, ctx context.Context, st *stack) {
+	deps := newDeps(st)
+	embeddingID := uuid.NewString()
+	entityID := "entity-ordered-delete"
+	deleteID := uuid.NewString()
+	deletePayload := codeEmbeddingTombstone(embeddingID, entityID, "developers", "ordered.go")
+	outcome, err := consumer.ProcessMessage(ctx, deps, consumer.TopicCodeEmbedding, deletePayload,
+		eventHeadersAt(deleteID, "DELETE", 20_000))
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("newer delete outcome=%v err=%v", outcome, err)
+	}
+
+	staleID := uuid.NewString()
+	stalePayload := codeEmbeddingPayload(
+		embeddingID, uuid.NewString(), entityID, syntheticVector(99), "test-model",
+		map[string]any{"path": "ordered.go"},
+	)
+	outcome, err = consumer.ProcessMessage(ctx, deps, consumer.TopicCodeEmbedding, stalePayload,
+		eventHeadersAt(staleID, "UPSERT", 19_999))
+	if err != nil || outcome != consumer.OutcomeDuplicate {
+		t.Fatalf("stale retry outcome=%v err=%v", outcome, err)
+	}
+	if n := countPoints(t, ctx, st.qdrant, consumer.DerivePointID(embeddingID)); n != 0 {
+		t.Fatalf("stale UPSERT recreated deleted point: count=%d", n)
+	}
+	assertProcessedEvent(t, ctx, st.db, staleID)
+
+	newerID := uuid.NewString()
+	outcome, err = consumer.ProcessMessage(ctx, deps, consumer.TopicCodeEmbedding, stalePayload,
+		eventHeadersAt(newerID, "UPSERT", 20_001))
+	if err != nil || outcome != consumer.OutcomeStored {
+		t.Fatalf("authorized newer UPSERT outcome=%v err=%v", outcome, err)
+	}
+	if n := countPoints(t, ctx, st.qdrant, consumer.DerivePointID(embeddingID)); n != 1 {
+		t.Fatalf("newer UPSERT did not recreate projection: count=%d", n)
+	}
 }
 
 func reviewFailedQdrantWriteDoesNotMarkProcessed(t *testing.T, ctx context.Context, st *stack) {
@@ -84,7 +197,7 @@ func reviewFailedQdrantWriteDoesNotMarkProcessed(t *testing.T, ctx context.Conte
 		consumer.Deps{DB: st.db, Qdrant: unreachable, Logf: t.Logf},
 		consumer.TopicCodeEmbedding,
 		payload,
-		[]kafka.Header{{Key: "event_id", Value: []byte(eventID)}},
+		eventHeaders(eventID, "UPSERT"),
 	)
 	if err == nil {
 		t.Fatal("expected unreachable Qdrant write to fail")
@@ -98,6 +211,123 @@ func reviewFailedQdrantWriteDoesNotMarkProcessed(t *testing.T, ctx context.Conte
 	}
 	if count != 0 {
 		t.Fatalf("processed marker count after failed Qdrant write = %d, want 0", count)
+	}
+}
+
+func spec075DeletePointScopeSafeAndIdempotent(t *testing.T, ctx context.Context, st *stack) {
+	deps := newDeps(st)
+	embeddingID := uuid.NewString()
+	entityID := "entity-delete"
+	pointID := consumer.DerivePointID(embeddingID)
+
+	upsertEventID := uuid.NewString()
+	upsertPayload := codeEmbeddingPayload(
+		embeddingID, uuid.NewString(), entityID, syntheticVector(75), "test-model",
+		map[string]any{"path": "delete.go"},
+	)
+	outcome, err := consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeEmbedding, upsertPayload,
+		eventHeaders(upsertEventID, "UPSERT"),
+	)
+	if err != nil || outcome != consumer.OutcomeStored {
+		t.Fatalf("seed upsert outcome=%v err=%v", outcome, err)
+	}
+	if n := countPoints(t, ctx, st.qdrant, pointID); n != 1 {
+		t.Fatalf("seed point count=%d want=1", n)
+	}
+
+	wrongScopeEventID := uuid.NewString()
+	wrongScope := codeEmbeddingTombstone(embeddingID, entityID, "admins", "delete.go")
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeEmbedding, wrongScope,
+		eventHeaders(wrongScopeEventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("cross-scope delete outcome=%v err=%v", outcome, err)
+	}
+	if n := countPoints(t, ctx, st.qdrant, pointID); n != 1 {
+		t.Fatalf("cross-scope delete point count=%d want=1", n)
+	}
+	assertProcessedEvent(t, ctx, st.db, wrongScopeEventID)
+
+	deleteEventID := uuid.NewString()
+	deletePayload := codeEmbeddingTombstone(embeddingID, entityID, "developers", "delete.go")
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeEmbedding, deletePayload,
+		eventHeaders(deleteEventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("delete outcome=%v err=%v", outcome, err)
+	}
+	if n := countPoints(t, ctx, st.qdrant, pointID); n != 0 {
+		t.Fatalf("deleted point count=%d want=0", n)
+	}
+	assertProcessedEvent(t, ctx, st.db, deleteEventID)
+
+	// Simulate a crash after the durable Qdrant effect but before the marker.
+	if _, err := st.db.ExecContext(ctx,
+		"DELETE FROM processed_events WHERE event_id = $1 AND consumer_name = $2",
+		deleteEventID, consumer.ConsumerName,
+	); err != nil {
+		t.Fatalf("remove marker for failure-window replay: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+		DELETE FROM consumer_projection_watermark
+		WHERE consumer_name=$1 AND aggregate_type='CodeEmbedding' AND aggregate_id=$2`,
+		consumer.ConsumerName, embeddingID); err != nil {
+		t.Fatalf("remove watermark for failure-window replay: %v", err)
+	}
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeEmbedding, deletePayload,
+		eventHeaders(deleteEventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("absent-point replay outcome=%v err=%v", outcome, err)
+	}
+	if n := countPoints(t, ctx, st.qdrant, pointID); n != 0 {
+		t.Fatalf("replayed delete point count=%d want=0", n)
+	}
+	assertProcessedEvent(t, ctx, st.db, deleteEventID)
+
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeEmbedding, deletePayload,
+		eventHeaders(deleteEventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDuplicate {
+		t.Fatalf("marked replay outcome=%v err=%v", outcome, err)
+	}
+}
+
+func spec075FailedDeleteDoesNotMarkProcessed(t *testing.T, ctx context.Context, st *stack) {
+	unreachable, err := qdrant.NewClient(&qdrant.Config{Host: "127.0.0.1", Port: 1})
+	if err != nil {
+		t.Fatalf("qdrant NewClient: %v", err)
+	}
+	defer unreachable.Close()
+
+	eventID := uuid.NewString()
+	deletePayload := codeEmbeddingTombstone(uuid.NewString(), "entity-delete-failure", "developers", "delete.go")
+	deleteCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_, err = consumer.ProcessMessage(
+		deleteCtx,
+		consumer.Deps{DB: st.db, Qdrant: unreachable, Logf: t.Logf},
+		consumer.TopicCodeEmbedding,
+		deletePayload,
+		eventHeaders(eventID, "DELETE"),
+	)
+	if err == nil {
+		t.Fatal("expected unreachable Qdrant delete to fail")
+	}
+	var count int
+	if err := st.db.QueryRowContext(ctx,
+		"SELECT count(*) FROM processed_events WHERE event_id = $1 AND consumer_name = $2",
+		eventID, consumer.ConsumerName,
+	).Scan(&count); err != nil {
+		t.Fatalf("query processed marker: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("processed marker count after failed Qdrant delete=%d want=0", count)
 	}
 }
 
@@ -454,7 +684,7 @@ func startPostgres(t *testing.T, ctx context.Context) *sql.DB {
 		t.Fatalf("ConnectionString: %v", err)
 	}
 
-	// processed_events (D1, 0001_init.up.sql) è l'unica tabella richiesta
+	// Le tabelle di completion e ordering sono le sole richieste
 	// da questo consumer (nessuna tabella specifica di sink-vector) — DDL
 	// applicato qui direttamente, senza il CLI 'migrate' esterno (questo
 	// servizio non ha migrazioni proprie sotto contracts/, SPEC-033
@@ -473,8 +703,17 @@ func startPostgres(t *testing.T, ctx context.Context) *sql.DB {
 			consumer_name  TEXT NOT NULL,
 			processed_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
 			PRIMARY KEY (event_id, consumer_name)
+		);
+		CREATE TABLE consumer_projection_watermark (
+			consumer_name TEXT NOT NULL,
+			aggregate_type TEXT NOT NULL,
+			aggregate_id TEXT NOT NULL,
+			event_sequence BIGINT NOT NULL CHECK (event_sequence > 0),
+			operation TEXT NOT NULL CHECK (operation IN ('UPSERT', 'DELETE')),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp(),
+			PRIMARY KEY (consumer_name, aggregate_type, aggregate_id)
 		)`); err != nil {
-		t.Fatalf("creazione processed_events: %v", err)
+		t.Fatalf("creazione tabelle consumer: %v", err)
 	}
 	return db
 }
@@ -493,7 +732,7 @@ func newDeps(st *stack) consumer.Deps {
 
 func produce(t *testing.T, ctx context.Context, brokers []string, topic, key string, value []byte, eventID string) {
 	t.Helper()
-	headers := []kafka.Header{{Key: "event_id", Value: []byte(eventID)}}
+	headers := eventHeaders(eventID, "UPSERT")
 	w := &kafka.Writer{
 		Addr:                   kafka.TCP(brokers...),
 		Topic:                  topic,
@@ -504,6 +743,20 @@ func produce(t *testing.T, ctx context.Context, brokers []string, topic, key str
 		t.Fatalf("produzione messaggio sintetico su %s: %v", topic, err)
 	}
 }
+
+func eventHeaders(eventID, operation string) []kafka.Header {
+	return eventHeadersAt(eventID, operation, syntheticEventSequence.Add(1))
+}
+
+func eventHeadersAt(eventID, operation string, sequence int64) []kafka.Header {
+	return []kafka.Header{
+		{Key: "event_id", Value: []byte(eventID)},
+		{Key: "event_type", Value: []byte(operation)},
+		{Key: "event_sequence", Value: []byte(fmt.Sprintf("%d", sequence))},
+	}
+}
+
+var syntheticEventSequence atomic.Int64
 
 // SPEC-035: FetchAndProcess accetta ora un resilience.ProcessFunc iniettato
 // (nessuna modifica alla logica applicativa di ProcessMessage stessa) e
@@ -572,6 +825,20 @@ func codeEmbeddingPayloadWithoutProvenance(id, chunkID, entityID string, vector 
 		"vector": vector, "model_id": modelID, "embedding_dim": len(vector),
 	}
 	out, _ := json.Marshal(m)
+	return out
+}
+
+func codeEmbeddingTombstone(id, entityID, aclGroup, path string) []byte {
+	out, _ := json.Marshal(map[string]any{
+		"id":        id,
+		"entity_id": entityID,
+		"provenance": map[string]any{
+			"tenant_id": "tenant-test",
+			"repo":      "sample-repo",
+			"acl_group": aclGroup,
+			"path":      path,
+		},
+	})
 	return out
 }
 

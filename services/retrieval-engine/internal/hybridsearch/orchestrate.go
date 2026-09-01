@@ -167,7 +167,7 @@ func HybridGraphVectorSearch(ctx context.Context, deps Deps, query, entryNodeID 
 		// Esplicitamente richiesto dal client (include_source_text=true):
 		// un fallimento OpenSearch fa fallire l'intera chiamata, stesso
 		// principio già stabilito per il reranker in T4.4 — SPEC-045 §4.
-		if err := hydrateSourceText(ctx, deps.OpenSearch, ranked); err != nil {
+		if err := HydrateSourceText(ctx, deps.OpenSearch, ranked); err != nil {
 			return nil, newHybridSearchError("Hydration source_text fallita", err)
 		}
 	}

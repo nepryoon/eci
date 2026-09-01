@@ -123,7 +123,16 @@ func TestEnvoyDescriptorIsDeterministicallyGenerated(t *testing.T) {
 		t.Fatal(err)
 	}
 	generated := filepath.Join(t.TempDir(), "retrieval.pb")
-	command := exec.Command("buf", "build", "contracts", "--as-file-descriptor-set", "-o", generated)
+	command := exec.Command(
+		"buf",
+		"build",
+		"contracts",
+		"--path",
+		"contracts/proto/eci/retrieval/v1/retrieval.proto",
+		"--as-file-descriptor-set",
+		"-o",
+		generated,
+	)
 	command.Dir = root
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("buf build: %v: %s", err, output)

@@ -17,6 +17,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"reflect"
 	"testing"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
@@ -98,8 +99,8 @@ func TestImpactAnalysisStreamingDispatch(t *testing.T) {
 			t.Fatal("nessun ImpactProgress con current_depth=1 ricevuto")
 		}
 
-		// Scenario 2: impact_kind (qui path_edge_types[0]) riflette il tipo
-		// d'arco dell'ultimo hop.
+		// Scenario 2: il percorso completo e la classificazione riflettono
+		// tutti gli archi del percorso minimo.
 		byID := map[string]*retrievalv1.ImpactedNode{}
 		for _, e := range events {
 			if n := e.GetNode(); n != nil {
@@ -110,13 +111,17 @@ func TestImpactAnalysisStreamingDispatch(t *testing.T) {
 		if !ok || len(callsNode.GetPathEdgeTypes()) != 1 || callsNode.GetPathEdgeTypes()[0] != retrievalv1.EdgeType_EDGE_TYPE_CALLS {
 			t.Errorf("%s: path_edge_types = %+v, want [EDGE_TYPE_CALLS]", impactL1CallsID, byID[impactL1CallsID].GetPathEdgeTypes())
 		}
+		if callsNode.GetImpactKind() != retrievalv1.ImpactKind_IMPACT_KIND_BEHAVIORAL {
+			t.Errorf("%s: impact_kind = %v, want BEHAVIORAL", impactL1CallsID, callsNode.GetImpactKind())
+		}
 		implementsNode, ok := byID[impactL1ImplementsID]
 		if !ok || len(implementsNode.GetPathEdgeTypes()) != 1 || implementsNode.GetPathEdgeTypes()[0] != retrievalv1.EdgeType_EDGE_TYPE_IMPLEMENTS {
 			t.Errorf("%s: path_edge_types = %+v, want [EDGE_TYPE_IMPLEMENTS]", impactL1ImplementsID, byID[impactL1ImplementsID].GetPathEdgeTypes())
 		}
 		l2Node, ok := byID[impactL2ID]
-		if !ok || l2Node.GetDepth() != 2 || len(l2Node.GetPathEdgeTypes()) != 1 || l2Node.GetPathEdgeTypes()[0] != retrievalv1.EdgeType_EDGE_TYPE_EXTENDS {
-			t.Errorf("%s: %+v, want Depth=2 path_edge_types=[EDGE_TYPE_EXTENDS]", impactL2ID, l2Node)
+		wantL2Path := []retrievalv1.EdgeType{retrievalv1.EdgeType_EDGE_TYPE_CALLS, retrievalv1.EdgeType_EDGE_TYPE_EXTENDS}
+		if !ok || l2Node.GetDepth() != 2 || !reflect.DeepEqual(l2Node.GetPathEdgeTypes(), wantL2Path) {
+			t.Errorf("%s: %+v, want Depth=2 path_edge_types=%v", impactL2ID, l2Node, wantL2Path)
 		}
 	})
 
@@ -190,6 +195,7 @@ func startImpactServer(t *testing.T, driver neo4j.DriverWithContext) retrievalv1
 	}
 	srv := grpc.NewServer(
 		grpc.UnaryInterceptor(secctx.UnaryServerInterceptor()),
+		grpc.StreamInterceptor(secctx.StreamServerInterceptor()),
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 	)
 	retrievalv1.RegisterRetrievalEngineServer(srv, &server.Server{Driver: driver})

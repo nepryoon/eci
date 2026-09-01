@@ -44,6 +44,37 @@ func TestRelationWriteSetsAbsoluteWeightForRetryIdempotency(t *testing.T) {
 	}
 }
 
+func TestDeleteQueriesAreScopedIdempotentAndInvalidateGDS(t *testing.T) {
+	nodeQuery := deleteCodeNodeQuery
+	assertFragmentsInOrder(t, "node delete", nodeQuery,
+		"MATCH (n:CodeNode {id: $id})",
+		"n.tenant_id = $tenant_id",
+		"OPTIONAL MATCH (n)--(neighbor:CodeNode)",
+		"MERGE (p:GDSPartition",
+		"DETACH DELETE n",
+	)
+	if strings.Contains(nodeQuery, "MERGE (n:CodeNode") {
+		t.Fatal("an absent tombstone must not recreate a node while locking")
+	}
+
+	relationQuery, err := deleteCodeRelationQuery("CALLS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFragmentsInOrder(t, "relation delete", relationQuery,
+		"MATCH (from:CodeNode {id: $from_id})",
+		"MATCH (from)-[r:CALLS]->(to)",
+		"MERGE (p:GDSPartition",
+		"DELETE rel",
+	)
+	if _, err := deleteCodeRelationQuery("CALLS]->(n) DETACH DELETE n //"); err == nil {
+		t.Fatal("relation delete interpolated a non-whitelisted type")
+	}
+	if strings.Contains(lockDeleteRelationEndpointsQuery, "MERGE (endpoint:CodeNode") {
+		t.Fatal("an absent relation tombstone must not recreate endpoint placeholders")
+	}
+}
+
 func TestGDSMutationLockOrderIsDeterministicAndScopeIsReadAfterEntityLock(t *testing.T) {
 	nodeQuery, err := mergeCodeNodeQuery("Function")
 	if err != nil {

@@ -17,7 +17,7 @@ eci/
 ├── CLAUDE.md                      # contesto principale AI (template sotto); symlink .cursorrules
 ├── Taskfile.yml                   # interfaccia comandi unica
 ├── docs/
-│   ├── add/                       # ADD consolidato + diagramma master — SOLA LETTURA
+│   ├── ADD_Enterprise_Code_Intelligence_consolidato.md # ADD consolidato — SOLA LETTURA
 │   ├── specs/                     # SPEC-NNN-slug.md (una per task) + _TEMPLATE.md
 │   ├── decisions/                 # ADR-NNN.md — ogni deviazione dall'ADD passa da qui
 │   └── runbooks/
@@ -52,7 +52,7 @@ eci/
 └── .github/workflows/ci.yml       # lint+test Go/Py/Rust + buf breaking + guard paths
 ```
 
-Regole strutturali: (1) `docs/add/` e `contracts/` sono read-only per l'AI — un job CI (`task guard`) fallisce la PR se toccati senza un ADR nello stesso commit; (2) ogni servizio ha un `CLAUDE.md` locale di ≤30 righe con le sole regole specifiche del linguaggio; (3) i fake vivono in `/fakes` e sono cittadini di prima classe: tutto lo sviluppo fino alla Fase 5 gira su LLM/embedder finti e deterministici.
+Regole strutturali: (1) `docs/ADD_Enterprise_Code_Intelligence_consolidato.md` e `contracts/` sono read-only per l'AI — un job CI (`task guard`) fallisce la PR se toccati senza un ADR nello stesso commit; (2) ogni servizio ha un `CLAUDE.md` locale di ≤30 righe con le sole regole specifiche del linguaggio; (3) i fake vivono in `/fakes` e sono cittadini di prima classe: tutto lo sviluppo fino alla Fase 5 gira su LLM/embedder finti e deterministici.
 
 ### Template `CLAUDE.md` di root (personalizzato sull'ADD)
 
@@ -61,10 +61,10 @@ Regole strutturali: (1) `docs/add/` e `contracts/` sono read-only per l'AI — u
 
 GraphRAG system over multi-million-LoC codebases. Microservices, hybrid storage
 (Neo4j + Qdrant + OpenSearch) coordinated via CDC. Full architecture in
-`docs/add/` (read-only). Contracts in `contracts/` (read-only).
+`docs/ADD_Enterprise_Code_Intelligence_consolidato.md` (read-only). Contracts in `contracts/` (read-only).
 
 ## Source-of-truth hierarchy (on conflict: STOP and ask, or open an ADR)
-docs/add/ (ADD) > contracts/ > docs/specs/ > existing code > your judgement.
+docs/ADD_Enterprise_Code_Intelligence_consolidato.md (ADD) > accepted ADRs > contracts/ > verified specs > existing code > your judgement.
 
 ## Non-negotiable architectural invariants (from the ADD)
 - PostgreSQL is the ONLY source of truth. Neo4j/Qdrant/OpenSearch are
@@ -99,7 +99,7 @@ task build | lint | test # all languages
 task test:integration    # testcontainers (requires docker)
 task proto:gen           # buf codegen after proto changes (needs ADR)
 task db:migrate          # PG + Neo4j migrations
-task guard               # verifies contracts/ and docs/add/ untouched
+task guard               # verifies contracts/ and the consolidated ADD are protected
 
 ## Workflow rules
 1. Implement exactly ONE SPEC (docs/specs/SPEC-NNN-*.md) per session/PR.
@@ -288,7 +288,7 @@ Legenda delega: 🟢 = delega ~90% (review leggera) · 🟡 = delega con review 
 5. **Deploy in produzione, segreti, licensing** (Neo4j EE a preventivo).
 
 **Guardrail operativi trasversali (meccanici, non di disciplina):**
-1. `task guard` in CI: PR rossa se tocca `contracts/` o `docs/add/` senza ADR nel diff.
+1. `task guard` in CI: PR rossa se tocca `contracts/` o `docs/ADD_Enterprise_Code_Intelligence_consolidato.md` senza ADR nel diff.
 2. Test-first obbligatorio: la PR che aggiunge codice senza i test della SPEC §3 non passa la review checklist.
 3. Ogni sink/mutazione ha il test di idempotenza "esegui due volte ⇒ stato identico".
 4. Checklist fissa in ogni PR 🔴: threat model 5 righe, "cosa succede se questo input è ostile?", secondo passaggio di review a distanza di un giorno (sei un dev solo: il tempo è il tuo secondo revisore).

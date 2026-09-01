@@ -3,9 +3,9 @@
 Builds throwaway git repos under a temp dir and exercises guard.sh against
 synthetic commits: no protected touch, protected touch without ADR, protected
 touch with ADR, plus the edge cases from SPEC-001 §4 (unresolved BASE_REF,
-renamed file under contracts/). The ADR requirement only applies to modified
-(M) or deleted (D) files under contracts/ or docs/add/ — adding a brand new
-file (A) there does not require an ADR.
+renamed file under contracts/). The ADR requirement applies to modified or
+deleted files under contracts/, docs/add/, and the consolidated ADD; adding a
+brand new file under a protected directory does not require an ADR.
 """
 
 import os
@@ -70,7 +70,7 @@ class TestGuard(unittest.TestCase):
     def tearDown(self):
         self.repo.cleanup()
 
-    # Scenario 5: nessun tocco a contracts/ o docs/add/ -> passa sempre.
+    # Scenario 5: nessun tocco a contracts/ o al vero ADD -> passa sempre.
     def test_no_protected_touch_passes(self):
         self.repo.write("services/foo/main.go", "package main\n")
         self.repo.commit_all("add unrelated file")
@@ -124,6 +124,17 @@ class TestGuard(unittest.TestCase):
         result = self.repo.run_guard()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("docs/add/notes.md", result.stderr)
+
+    def test_consolidated_add_modify_without_adr_fails(self):
+        add_path = "docs/ADD_Enterprise_Code_Intelligence_consolidato.md"
+        self.repo.write(add_path, "# ADD\n")
+        self.repo.commit_all("add consolidated ADD (baseline)")
+        self.repo.move_base_to_head()
+        self.repo.write(add_path, "# ADD modificato\n")
+        self.repo.commit_all("modify consolidated ADD without ADR")
+        result = self.repo.run_guard()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(add_path, result.stderr)
 
     # Scenario 4: modifica di un file protetto + ADR aggiunto nello stesso
     # diff -> passa.

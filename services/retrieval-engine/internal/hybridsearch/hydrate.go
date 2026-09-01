@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
@@ -20,6 +21,15 @@ import (
 // localmente (non importabile da services/sink-search/internal, un altro
 // modulo Go — stesso principio già accettato per embedclient/T4.1).
 const codeChunksIndex = "code_chunks"
+
+const (
+	sourceHydrationPageSize = 1000
+	sourceHydrationPITTTL   = time.Minute
+	// A request can select at most 10,000 nodes. This independent chunk cap
+	// keeps pagination, response memory and concatenation bounded even when a
+	// valid node has many chunks.
+	maxSourceHydrationChunks = 100_000
+)
 
 // hydrateNames popola RetrievedNode.Name per ogni nodo con Name=="" (i
 // risultati della sola gamba grafo lo hanno già, popolato direttamente
@@ -84,12 +94,14 @@ func hydrateNames(ctx context.Context, driver neo4j.DriverWithContext, nodes []R
 // chunkHit rispecchia i campi del documento code_chunks (SPEC-034 §2)
 // necessari qui: entity_id/chunk_index/text.
 type chunkHit struct {
-	EntityID   string `json:"entity_id"`
-	ChunkIndex int    `json:"chunk_index"`
-	Text       string `json:"text"`
+	ChunkID       string `json:"chunk_id"`
+	EntityID      string `json:"entity_id"`
+	ChunkIndex    int    `json:"chunk_index"`
+	EventSequence *int64 `json:"event_sequence"`
+	Text          string `json:"text"`
 }
 
-// hydrateSourceText popola RetrievedNode.SourceText leggendo i chunk da
+// HydrateSourceText popola RetrievedNode.SourceText leggendo i chunk da
 // OpenSearch (code_chunks, SPEC-034) per l'intero set di nodi in UNA sola
 // query batch (`terms` su entity_id — stesso principio "batch, non N
 // separate" già stabilito per hydrateNames), poi concatena i chunk di
@@ -99,7 +111,7 @@ type chunkHit struct {
 // errore) — solo un fallimento della QUERY stessa (OpenSearch
 // irraggiungibile) è un errore esplicito (SPEC-045 §4: richiesto
 // esplicitamente dal client via include_source_text=true).
-func hydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes []RetrievedNode) error {
+func HydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes []RetrievedNode) error {
 	ctx, observe := securityfilter.Observe(ctx, "opensearch")
 	outcome := "error"
 	defer func() { observe(outcome) }()
@@ -119,35 +131,121 @@ func hydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes 
 	for i, n := range nodes {
 		ids[i] = n.NodeID
 	}
-
-	query := map[string]any{
-		"query": securityfilter.OpenSearchFilter(scope, ids),
-		// Limite esplicito generoso: il default OpenSearch (10 risultati)
-		// troncherebbe silenziosamente un'entità con molti chunk o un
-		// candidate set con molte entità — scelta dichiarata, non presunta
-		// dal default.
-		"size": 1000,
-	}
-
-	resp, err := client.Search(ctx, &opensearchapi.SearchReq{
+	securityHeaders := securityfilter.OpenSearchHeaders(scope)
+	pit, err := client.PointInTime.Create(ctx, opensearchapi.PointInTimeCreateReq{
 		Indices: []string{codeChunksIndex},
-		Body:    opensearchutil.NewJSONReader(query),
-		Header:  securityfilter.OpenSearchHeaders(scope),
+		Header:  securityHeaders,
+		Params:  opensearchapi.PointInTimeCreateParams{KeepAlive: sourceHydrationPITTTL},
 	})
 	if err != nil {
-		return fmt.Errorf("ricerca batch code_chunks: %w", err)
+		return fmt.Errorf("apertura snapshot code_chunks: %w", err)
 	}
+	pitInspect := pit.Inspect()
+	if pitInspect.Response == nil || pitInspect.Response.StatusCode < 200 || pitInspect.Response.StatusCode >= 300 ||
+		pit.PitID == "" || pit.Shards.Failed != 0 {
+		return fmt.Errorf("apertura snapshot code_chunks: risposta OpenSearch non valida")
+	}
+	defer func() {
+		// Cleanup must survive client cancellation; the independent deadline and
+		// server-side one-minute TTL keep both the call and leaked PIT bounded.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer cancel()
+		_, _ = client.PointInTime.Delete(cleanupCtx, opensearchapi.PointInTimeDeleteReq{
+			PitID: []string{pit.PitID}, Header: securityHeaders,
+		})
+	}()
 
-	byEntity := make(map[string][]chunkHit)
-	for _, hit := range resp.Hits.Hits {
-		var c chunkHit
-		if err := json.Unmarshal(hit.Source, &c); err != nil {
-			continue // documento malformato: scartato, non un errore fatale della ricerca
-		}
-		byEntity[c.EntityID] = append(byEntity[c.EntityID], c)
+	query := map[string]any{
+		"query":            securityfilter.OpenSearchFilter(scope, ids),
+		"track_total_hits": true,
+		"size":             sourceHydrationPageSize,
+		"pit": map[string]any{
+			"id": pit.PitID, "keep_alive": "1m",
+		},
+		// Re-ingestion can leave two projection documents for the same logical
+		// chunk until reconciliation. PIT freezes the result set and the indexed
+		// canonical event order selects the latest logical chunk, while chunk UUID
+		// is the unique final tiebreaker so search_after cannot skip a tie.
+		// OpenSearch forbids sorting on _id.
+		"sort": []any{
+			map[string]any{"entity_id": "asc"},
+			map[string]any{"chunk_index": "asc"},
+			map[string]any{"event_sequence": map[string]any{"order": "asc", "missing": 0}},
+			map[string]any{"chunk_id": "asc"},
+		},
 	}
-	for _, chunks := range byEntity {
-		sort.Slice(chunks, func(i, j int) bool { return chunks[i].ChunkIndex < chunks[j].ChunkIndex })
+	byEntity := make(map[string][]chunkHit)
+	seenIDs := make(map[string]struct{})
+	expectedTotal := -1
+	for {
+		resp, err := client.Search(ctx, &opensearchapi.SearchReq{
+			Body:   opensearchutil.NewJSONReader(query),
+			Header: securityHeaders,
+		})
+		if err != nil {
+			return fmt.Errorf("ricerca batch code_chunks: %w", err)
+		}
+		inspect := resp.Inspect()
+		if inspect.Response == nil || inspect.Response.StatusCode < 200 || inspect.Response.StatusCode >= 300 {
+			return fmt.Errorf("ricerca batch code_chunks: risposta OpenSearch non valida")
+		}
+		if resp.Timeout || resp.Errors || resp.Hits.Total.Relation != "eq" {
+			return fmt.Errorf("ricerca batch code_chunks: risposta parziale")
+		}
+		if expectedTotal < 0 {
+			expectedTotal = resp.Hits.Total.Value
+			if expectedTotal > maxSourceHydrationChunks {
+				return fmt.Errorf("ricerca batch code_chunks: limite bounded superato")
+			}
+		} else if resp.Hits.Total.Value != expectedTotal {
+			return fmt.Errorf("ricerca batch code_chunks: risultato cambiato durante la paginazione")
+		}
+
+		for _, hit := range resp.Hits.Hits {
+			if _, duplicate := seenIDs[hit.ID]; duplicate {
+				return fmt.Errorf("ricerca batch code_chunks: pagina duplicata")
+			}
+			seenIDs[hit.ID] = struct{}{}
+			var c chunkHit
+			if err := json.Unmarshal(hit.Source, &c); err != nil {
+				return fmt.Errorf("ricerca batch code_chunks: documento malformato")
+			}
+			if c.ChunkID == "" || c.ChunkID != hit.ID || c.EntityID == "" || c.ChunkIndex < 0 || c.EventSequence == nil || *c.EventSequence < 0 {
+				return fmt.Errorf("ricerca batch code_chunks: documento senza cursore canonico")
+			}
+			byEntity[c.EntityID] = append(byEntity[c.EntityID], c)
+		}
+		if len(seenIDs) == expectedTotal {
+			break
+		}
+		if len(resp.Hits.Hits) == 0 || len(resp.Hits.Hits) > sourceHydrationPageSize {
+			return fmt.Errorf("ricerca batch code_chunks: paginazione incompleta")
+		}
+		lastSort := resp.Hits.Hits[len(resp.Hits.Hits)-1].Sort
+		if len(lastSort) != 4 {
+			return fmt.Errorf("ricerca batch code_chunks: cursore di paginazione non valido")
+		}
+		query["search_after"] = lastSort
+	}
+	for entityID, chunks := range byEntity {
+		sort.Slice(chunks, func(i, j int) bool {
+			if chunks[i].ChunkIndex != chunks[j].ChunkIndex {
+				return chunks[i].ChunkIndex < chunks[j].ChunkIndex
+			}
+			if *chunks[i].EventSequence != *chunks[j].EventSequence {
+				return *chunks[i].EventSequence < *chunks[j].EventSequence
+			}
+			return chunks[i].ChunkID < chunks[j].ChunkID
+		})
+		current := chunks[:0]
+		for _, chunk := range chunks {
+			if len(current) > 0 && current[len(current)-1].ChunkIndex == chunk.ChunkIndex {
+				current[len(current)-1] = chunk
+				continue
+			}
+			current = append(current, chunk)
+		}
+		byEntity[entityID] = current
 	}
 
 	for i := range nodes {

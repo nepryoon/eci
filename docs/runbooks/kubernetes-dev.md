@@ -239,10 +239,21 @@ create gateway restart churn.
 Retrieval Engine exposes the same low-detail 204/503 contract on its metrics
 listener. Its bounded concurrent check verifies Neo4j credentials and
 connectivity, existence/access of Qdrant `code_embeddings` and OpenSearch
-`code_chunks`, plus the native TEI `/health` endpoints of embedder and
+`code_chunks` with mapping marker `eci_chunk_cursor_schema=1`, plus the native TEI `/health` endpoints of embedder and
 reranker. The TEI checks do not run embeddings or reranking, so Kubernetes
 probing does not create periodic GPU inference load. Retrieval liveness remains
 local TCP.
+
+For an upgrade from an index predating ordered chunk cursors, roll out
+sink-search before retrieval-engine. Sink startup first adds the cursor
+mapping, then performs a bounded synchronous backfill (`chunk_id=_id`, reserved
+historical `event_sequence=0`) and writes the schema marker last. Do not bypass
+this order or create the marker manually. A timeout, version conflict or bulk
+failure leaves sink-search stopped and retrieval unavailable; inspect the
+OpenSearch task/error response, remove the external cause, and restart
+sink-search. The operation is idempotent. During a mixed-version writer window,
+the new reader additionally rejects any hit missing the canonical fields, so a
+legacy late write degrades the request closed instead of returning stale text.
 
 The default-deny boundary is complemented by per-workload NetworkPolicy pairs:
 the egress side selects the calling pod and the ingress side selects the exact

@@ -177,7 +177,7 @@ nella stessa transazione dei dati; un valore assente non riceve un default.
 ## Kafka + Debezium (CDC outbox, SPEC-007)
 
 `kafka` gira in modalità KRaft nativa (nessun ZooKeeper). `kafka-connect`
-usa l'immagine `quay.io/debezium/connect:latest` (non `debezium/connect`
+usa l'immagine ufficiale `quay.io/debezium/connect` bloccata per digest (non `debezium/connect`
 su Docker Hub — quel repository non pubblica un tag `latest`, solo tag di
 versione esplicita; vedi deviazione in SPEC-007 §10) con i plugin Debezium
 preinstallati, incluso il connector PostgreSQL. La configurazione del

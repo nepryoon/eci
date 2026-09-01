@@ -22,6 +22,8 @@ from orchestrator.prompt import SYSTEM_MESSAGE, build_messages
 from orchestrator.retrieval_client import find_callers, hybrid_search
 from orchestrator.who_calls import is_who_calls_query
 
+pytestmark = pytest.mark.integration
+
 UNREACHABLE_GRPC_ADDR = "127.0.0.1:1"
 UNREACHABLE_HTTP_URL = "http://127.0.0.1:1"
 

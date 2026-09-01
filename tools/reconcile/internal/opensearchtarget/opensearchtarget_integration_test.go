@@ -85,6 +85,9 @@ func TestOpenSearchTarget(t *testing.T) {
 	t.Run("EdgeCase_RowDeletedBeforeRepublishReturnsExplicitError", func(t *testing.T) {
 		edgeCaseRowDeletedBeforeRepublishReturnsExplicitError(t, ctx, st)
 	})
+	t.Run("Review_LegacyDocumentWithMatchingTextStillRepublishes", func(t *testing.T) {
+		reviewLegacyDocumentWithMatchingTextStillRepublishes(t, ctx, st)
+	})
 }
 
 // ============================================================
@@ -191,7 +194,7 @@ func scenario5RepublishedPayloadMatchesPersistParsedFileShape(t *testing.T, ctx 
 	// Forma ESATTA prodotta da persist_parsed_file
 	// (services/ingestion/src/persist.rs, funzione che inserisce
 	// code_chunk+outbox) per questa stessa riga: {id, entity_id,
-	// chunk_index, text, char_count, provenance: {path: file_path}} —
+	// chunk_index, text, char_count, provenance with authenticated scope} —
 	// replicata qui letteralmente, NON derivata dall'implementazione sotto
 	// test.
 	wantPayload := map[string]any{
@@ -201,7 +204,10 @@ func scenario5RepublishedPayloadMatchesPersistParsedFileShape(t *testing.T, ctx 
 		"text":        text,
 		"char_count":  len(text),
 		"provenance": map[string]any{
-			"path": "default.go",
+			"tenant_id": "tenant-reconcile",
+			"repo":      "repo-reconcile",
+			"acl_group": "developers",
+			"path":      "default.go",
 		},
 	}
 
@@ -409,10 +415,10 @@ func startOpenSearch(t *testing.T, ctx context.Context) *opensearchapi.Client {
 // code_chunk (il vero row.ID riconciliato). entityID è usato come
 // code_node.id (e come code_chunk.entity_id, stesso valore — schema:
 // code_chunk.entity_id REFERENCES code_node(id)); provenance di default
-// {"path":"default.go"}, coerente con lo scenario 5.
+// con scope autenticato e path, coerente con lo scenario 5.
 func insertFullRow(t *testing.T, ctx context.Context, db *sql.DB, entityID, text string) (chunkID string) {
 	t.Helper()
-	provenance := []byte(`{"path":"default.go"}`)
+	provenance := []byte(`{"tenant_id":"tenant-reconcile","repo":"repo-reconcile","acl_group":"developers","path":"default.go"}`)
 	if _, err := db.ExecContext(ctx, insertCodeNode, entityID, hash64(entityID), provenance); err != nil {
 		t.Fatalf("INSERT code_node id=%s: %v", entityID, err)
 	}
@@ -459,9 +465,8 @@ func readOutboxPayload(t *testing.T, ctx context.Context, db *sql.DB, aggregateI
 func createOpenSearchDocument(t *testing.T, ctx context.Context, client *opensearchapi.Client, chunkID, text, entityID string) {
 	t.Helper()
 	body := map[string]any{
-		"text":        text,
-		"entity_id":   entityID,
-		"chunk_index": 0,
+		"chunk_id": chunkID, "event_sequence": 1,
+		"text": text, "entity_id": entityID, "chunk_index": 0,
 	}
 	if _, err := client.Index(ctx, opensearchapi.IndexReq{
 		Index:      indexName,
@@ -471,6 +476,26 @@ func createOpenSearchDocument(t *testing.T, ctx context.Context, client *opensea
 		t.Fatalf("Index documento id=%s: %v", chunkID, err)
 	}
 	refreshIndex(t, ctx, client)
+}
+
+func reviewLegacyDocumentWithMatchingTextStillRepublishes(t *testing.T, ctx context.Context, st *stack) {
+	entityID := hash64("review-legacy-cursor-entity")
+	text := "func LegacyCursor() {}"
+	chunkID := insertFullRow(t, ctx, st.db, entityID, text)
+	body := map[string]any{"text": text, "entity_id": entityID, "chunk_index": 0}
+	if _, err := st.opensearch.Index(ctx, opensearchapi.IndexReq{
+		Index: indexName, DocumentID: chunkID, Body: opensearchutil.NewJSONReader(body),
+	}); err != nil {
+		t.Fatalf("Index legacy document: %v", err)
+	}
+	refreshIndex(t, ctx, st.opensearch)
+	report, err := framework.Reconcile(ctx, st.db, opensearchtarget.New(st.opensearch, st.db))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Republished == 0 || countOutboxRowsFor(t, ctx, st.db, chunkID) == 0 {
+		t.Fatalf("legacy document with matching text was incorrectly accepted: %+v", report)
+	}
 }
 
 func refreshIndex(t *testing.T, ctx context.Context, client *opensearchapi.Client) {

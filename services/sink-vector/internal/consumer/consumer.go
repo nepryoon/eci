@@ -1,6 +1,6 @@
 // Package consumer implementa il consumer Kafka -> Qdrant di sink-vector
 // (SPEC-033 §2, T3.1): legge da outbox.event.CodeEmbedding, dedup via
-// processed_events (stessa tabella condivisa, stesso principio già
+// watermark+processed_events (stessa base condivisa, stesso principio già
 // stabilito da sink-graph/SPEC-015 ed embedding-worker/SPEC-030), scrive
 // ciascun embedding come punto Qdrant con payload
 // {node_id, domain, provenance}.
@@ -16,6 +16,8 @@ import (
 	"github.com/qdrant/go-client/qdrant"
 	kafka "github.com/segmentio/kafka-go"
 
+	"github.com/eci-project/eci/libs/go/eci/eventorder"
+	"github.com/eci-project/eci/libs/go/eci/outboxmeta"
 	"github.com/eci-project/eci/libs/go/eci/securitylabels"
 )
 
@@ -27,10 +29,6 @@ const ConsumerName = "sink-vector"
 // aggregate_type='CodeEmbedding' (SPEC-030, stesso meccanismo generico già
 // verificato end-to-end per CodeChunk in SPEC-029).
 const TopicCodeEmbedding = "outbox.event.CodeEmbedding"
-
-// eventIDHeaderKey — stesso header promosso dal connector Debezium già
-// consumato da sink-graph/embedding-worker.
-const eventIDHeaderKey = "event_id"
 
 // CollectionName è il nome dichiarato della collection Qdrant (SPEC-033 §2).
 const CollectionName = "code_embeddings"
@@ -137,6 +135,7 @@ type Outcome int
 
 const (
 	OutcomeStored Outcome = iota
+	OutcomeDeleted
 	OutcomeDuplicate
 	OutcomeInvalidSkipped
 )
@@ -160,14 +159,21 @@ type securityProvenance struct {
 	TenantID string `json:"tenant_id"`
 	Repo     string `json:"repo"`
 	ACLGroup string `json:"acl_group"`
+	Path     string `json:"path"`
+}
+
+type codeEmbeddingTombstone struct {
+	ID       string             `json:"id"`
+	EntityID string             `json:"entity_id"`
+	Security securityProvenance `json:"provenance"`
 }
 
 // ProcessMessage elabora UN messaggio Kafka già fetchato (SPEC-033 §2/§3):
 //  1. estrae event_id dagli header;
-//  2. verifica processed_events senza prenotare l'evento;
+//  2. serializza l'aggregate e verifica processed_events/watermark;
 //  3. se nuovo, upsert idempotente di UN punto Qdrant con id derivato
 //     dall'id dell'embedding e payload {node_id, domain, provenance?}.
-//  4. solo dopo l'upsert riuscito registra processed_events.
+//  4. solo dopo l'upsert riuscito registra watermark e processed_events.
 //
 // Un errore ritornato (non-nil) significa "infrastruttura irraggiungibile,
 // NON committare l'offset" (SPEC-033 §4). Un payload malformato o senza id
@@ -175,15 +181,20 @@ type securityProvenance struct {
 // ritorna (OutcomeInvalidSkipped, nil) — il chiamante committa comunque
 // l'offset, stesso principio di sink-graph (SPEC-015 §3 scenario 5).
 func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, headers []kafka.Header) (Outcome, error) {
-	eventID, ok := eventIDFromHeaders(headers)
-	if !ok {
-		deps.Logf("sink-vector: messaggio su %s senza header %q valido, scartato (offset committato)", topic, eventIDHeaderKey)
+	metadata, metadataErr := outboxmeta.Parse(headers)
+	if metadataErr != nil {
+		deps.Logf("sink-vector: metadata outbox non valida, scartata")
 		return OutcomeInvalidSkipped, nil
 	}
 
 	if topic != TopicCodeEmbedding {
-		deps.Logf("sink-vector: topic sconosciuto %q (event_id=%s), scartato", topic, eventID)
+		deps.Logf("sink-vector: topic sconosciuto, scartato")
 		return OutcomeInvalidSkipped, nil
+	}
+	eventID := metadata.EventID
+
+	if metadata.Operation == outboxmeta.OperationDelete {
+		return processDelete(ctx, deps, value, metadata)
 	}
 
 	var msg codeEmbeddingPayload
@@ -204,72 +215,55 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	}
 	securitylabels.Observe(ConsumerName, "accepted")
 
-	processed, err := isProcessed(ctx, deps.DB, eventID)
+	guard, orderState, err := eventorder.Begin(ctx, deps.DB, ConsumerName, "CodeEmbedding", msg.ID, metadata)
 	if err != nil {
-		return OutcomeInvalidSkipped, fmt.Errorf("dedup event_id=%s: %w", eventID, err)
+		return OutcomeInvalidSkipped, fmt.Errorf("acquire ordered event: %w", err)
 	}
-	if processed {
-		deps.Logf("sink-vector: event_id=%s già in processed_events, skip upsert (redelivery)", eventID)
+	if orderState == eventorder.Duplicate || orderState == eventorder.Stale {
+		deps.Logf("sink-vector: evento duplicato o superato, effetto non applicato")
 		return OutcomeDuplicate, nil
 	}
+	defer guard.Abort()
 
 	if err := upsertPoint(ctx, deps.Qdrant, msg); err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("upsert punto Qdrant id=%s: %w", msg.ID, err)
 	}
-	isNew, err := markProcessed(ctx, deps.DB, eventID)
-	if err != nil {
-		return OutcomeInvalidSkipped, fmt.Errorf("complete dedup event_id=%s after Qdrant upsert: %w", eventID, err)
-	}
-	if !isNew {
-		deps.Logf("sink-vector: event_id=%s completato concorrentemente, upsert idempotente già applicato", eventID)
-		return OutcomeDuplicate, nil
+	if err := guard.Complete(ctx); err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("complete ordered event: %w", err)
 	}
 	return OutcomeStored, nil
 }
 
-func isProcessed(ctx context.Context, db *sql.DB, eventID string) (bool, error) {
-	var processed bool
-	err := db.QueryRowContext(ctx,
-		`SELECT EXISTS (
-			SELECT 1 FROM processed_events WHERE event_id = $1 AND consumer_name = $2
-		)`,
-		eventID, ConsumerName,
-	).Scan(&processed)
-	return processed, err
-}
-
-// eventIDFromHeaders — stessa logica di sink-graph (SPEC-015 §2 punto 1).
-func eventIDFromHeaders(headers []kafka.Header) (string, bool) {
-	for _, h := range headers {
-		if h.Key != eventIDHeaderKey {
-			continue
-		}
-		if len(h.Value) == 0 {
-			return "", false
-		}
-		return string(h.Value), true
+func processDelete(ctx context.Context, deps Deps, value []byte, metadata outboxmeta.Metadata) (Outcome, error) {
+	var tombstone codeEmbeddingTombstone
+	if err := json.Unmarshal(value, &tombstone); err != nil || tombstone.ID == "" || tombstone.EntityID == "" || tombstone.Security.Path == "" {
+		deps.Logf("sink-vector: tombstone CodeEmbedding non valido, scartato")
+		return OutcomeInvalidSkipped, nil
 	}
-	return "", false
-}
-
-// markProcessed — stesso identico dedup atomico di sink-graph (SPEC-015 §2
-// punto 2): INSERT...ON CONFLICT DO NOTHING RETURNING.
-func markProcessed(ctx context.Context, db *sql.DB, eventID string) (isNew bool, err error) {
-	var returned string
-	err = db.QueryRowContext(ctx,
-		`INSERT INTO processed_events (event_id, consumer_name)
-		 VALUES ($1, $2)
-		 ON CONFLICT (event_id, consumer_name) DO NOTHING
-		 RETURNING event_id`,
-		eventID, ConsumerName,
-	).Scan(&returned)
-	if err == sql.ErrNoRows {
-		return false, nil
+	if !securitylabels.Valid(tombstone.Security.TenantID, tombstone.Security.Repo, tombstone.Security.ACLGroup) {
+		securitylabels.Observe(ConsumerName, "rejected")
+		deps.Logf("sink-vector: tombstone CodeEmbedding senza security labels valide, scartato")
+		return OutcomeInvalidSkipped, nil
 	}
+	securitylabels.Observe(ConsumerName, "accepted")
+
+	guard, orderState, err := eventorder.Begin(ctx, deps.DB, ConsumerName, "CodeEmbedding", tombstone.ID, metadata)
 	if err != nil {
-		return false, err
+		return OutcomeInvalidSkipped, fmt.Errorf("acquire ordered tombstone: %w", err)
 	}
-	return true, nil
+	if orderState == eventorder.Duplicate || orderState == eventorder.Stale {
+		deps.Logf("sink-vector: tombstone duplicato o superato")
+		return OutcomeDuplicate, nil
+	}
+	defer guard.Abort()
+
+	if err := deletePoint(ctx, deps.Qdrant, tombstone); err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("delete Qdrant projection: %w", err)
+	}
+	if err := guard.Complete(ctx); err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("complete ordered tombstone: %w", err)
+	}
+	return OutcomeDeleted, nil
 }
 
 // upsertPoint scrive UN punto Qdrant per il messaggio (SPEC-033 §2): id
@@ -291,6 +285,31 @@ func upsertPoint(ctx context.Context, client *qdrant.Client, msg codeEmbeddingPa
 		return err
 	}
 	return validateAppliedUpdate(result)
+}
+
+func deletePoint(ctx context.Context, client *qdrant.Client, msg codeEmbeddingTombstone) error {
+	result, err := client.Delete(ctx, buildDeleteRequest(msg))
+	if err != nil {
+		return err
+	}
+	return validateAppliedUpdate(result)
+}
+
+// buildDeleteRequest combines point identity with the complete canonical
+// scope. A point ID alone is never authority to remove another scope's data.
+func buildDeleteRequest(msg codeEmbeddingTombstone) *qdrant.DeletePoints {
+	wait := true
+	filter := &qdrant.Filter{Must: []*qdrant.Condition{
+		qdrant.NewHasID(qdrant.NewID(DerivePointID(msg.ID))),
+		qdrant.NewMatch("tenant_id", msg.Security.TenantID),
+		qdrant.NewMatch("repo", msg.Security.Repo),
+		qdrant.NewMatch("acl_group", msg.Security.ACLGroup),
+	}}
+	return &qdrant.DeletePoints{
+		CollectionName: CollectionName,
+		Wait:           &wait,
+		Points:         qdrant.NewPointsSelectorFilter(filter),
+	}
 }
 
 // buildUpsertRequest makes the durability boundary explicit: the external
@@ -335,10 +354,10 @@ func buildUpsertRequest(msg codeEmbeddingPayload) (*qdrant.UpsertPoints, error) 
 
 func validateAppliedUpdate(result *qdrant.UpdateResult) error {
 	if result == nil {
-		return fmt.Errorf("Qdrant upsert returned no update result")
+		return fmt.Errorf("Qdrant returned no update result")
 	}
 	if result.GetStatus() != qdrant.UpdateStatus_Completed {
-		return fmt.Errorf("Qdrant upsert not completed: status=%s", result.GetStatus())
+		return fmt.Errorf("Qdrant update not completed: status=%s", result.GetStatus())
 	}
 	return nil
 }

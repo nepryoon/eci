@@ -230,9 +230,9 @@ fn persist_parsed_file_scenarios_1_2_3_5() {
         PersistSummary {
             nodes_upserted: 4,
             relations_replaced: 4,
-            outbox_rows_written: 8,
+            outbox_rows_written: 12,
         },
-        "scenario 2: conteggi del summary (identici allo scenario 1, nessun 'nessun cambiamento' rilevato, §5)"
+        "scenario 2: quattro tombstone delle relazioni sostituite precedono gli otto UPSERT"
     );
     assert_eq!(
         count(&mut client, "code_node"),
@@ -268,10 +268,22 @@ fn persist_parsed_file_scenarios_1_2_3_5() {
          comportamento accettato (SPEC-014 §4 — nessun vincolo di unicità naturale su code_relation): \
          prima={rows_after_first:?} dopo={rows_after_second:?}"
     );
+    let relation_delete_count: i64 = client
+        .query_one(
+            "SELECT count(*) FROM outbox
+             WHERE aggregate_type = 'CodeRelation' AND event_type = 'DELETE'",
+            &[],
+        )
+        .expect("query relation replacement tombstones")
+        .get(0);
+    assert_eq!(
+        relation_delete_count, 4,
+        "scenario 2: ogni UUID relazione sostituito deve ricevere un tombstone"
+    );
     assert_eq!(
         count(&mut client, "outbox"),
-        16,
-        "scenario 2: 8 nuove righe outbox si sommano alle 8 dello scenario 1 (ogni run produce eventi, §5 non-goals)"
+        20,
+        "scenario 2: 4 DELETE e 8 UPSERT si sommano alle 8 righe iniziali"
     );
 
     // --- Scenario 3: seconda versione del sorgente, Process non chiama più Validate. ---

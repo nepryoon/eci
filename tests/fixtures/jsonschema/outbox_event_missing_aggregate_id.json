@@ -2,6 +2,7 @@
   "id": "6f8e1c2a-9b1e-4f7a-8a0e-1c2d3e4f5a6b",
   "aggregate_type": "CodeNode",
   "event_type": "UPSERT",
+  "event_sequence": 42,
   "payload": {
     "id": "svc.orders.OrderService#charge",
     "domain": "code",

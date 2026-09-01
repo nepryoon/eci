@@ -111,11 +111,12 @@ func newCheck(driver neo4j.DriverWithContext) func(ctx context.Context, row fram
 // esatta che persist_parsed_file (T1.2, services/ingestion/src/persist.rs)
 // avrebbe scritto per quella riga.
 func republish(ctx context.Context, tx *sql.Tx, row framework.SourceRow) error {
-	var domain, nodeType, name, astHash, filePath string
+	var domain, nodeType, name, astHash string
+	var provenance []byte
 	err := tx.QueryRowContext(ctx,
-		`SELECT domain, node_type, name, ast_hash, provenance->>'path' FROM code_node WHERE id = $1`,
+		`SELECT domain, node_type, name, ast_hash, provenance FROM code_node WHERE id = $1 FOR UPDATE`,
 		row.ID,
-	).Scan(&domain, &nodeType, &name, &astHash, &filePath)
+	).Scan(&domain, &nodeType, &name, &astHash, &provenance)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return fmt.Errorf("neo4jtarget: code_node id=%s non trovato in Postgres al momento di Republish (cancellato dopo SourceRows): %w", row.ID, err)
@@ -124,20 +125,19 @@ func republish(ctx context.Context, tx *sql.Tx, row framework.SourceRow) error {
 	}
 
 	// Stessa identica forma di persist.rs (persist_parsed_file,
-	// services/ingestion/src/persist.rs): provenance = {"path": file_path},
+	// services/ingestion/src/persist.rs): canonical provenance is copied
+	// intact so tenant_id/repo/acl_group can never be dropped by a repair;
 	// ext = {"node_type": ..., "language": "go"} — "language" hardcoded a
 	// "go" è il comportamento REALE di persist.rs oggi (T1.1 estrae solo Go
 	// al momento di questa SPEC), non un difetto da correggere qui: SPEC-038
 	// §2 chiede la forma ESATTA prodotta da persist_parsed_file per quella
 	// riga, non una versione "corretta" di essa.
 	payload, err := json.Marshal(map[string]any{
-		"id":       row.ID,
-		"domain":   domain,
-		"name":     name,
-		"ast_hash": astHash,
-		"provenance": map[string]any{
-			"path": filePath,
-		},
+		"id":         row.ID,
+		"domain":     domain,
+		"name":       name,
+		"ast_hash":   astHash,
+		"provenance": json.RawMessage(provenance),
 		"ext": map[string]any{
 			"node_type": nodeType,
 			"language":  "go",

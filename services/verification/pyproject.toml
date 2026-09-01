@@ -24,3 +24,8 @@ include = ["verification*"]
 
 [tool.ruff]
 extend-exclude = [".venv"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires Docker-backed or external runtime dependencies",
+]

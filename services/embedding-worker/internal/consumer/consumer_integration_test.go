@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,6 +75,87 @@ func TestEmbeddingWorkerConsumer(t *testing.T) {
 	t.Run("EdgeCase_EmptyTextChunkStillEmbedded", func(t *testing.T) {
 		edgeCaseEmptyTextChunkStillEmbedded(t, ctx, st)
 	})
+	t.Run("SPEC074_DeleteAcknowledgedWithoutEmbedder", func(t *testing.T) {
+		spec074DeleteAcknowledgedWithoutEmbedder(t, ctx, st)
+	})
+	t.Run("Review_OlderRetryCannotMaterializeDeletedChunk", func(t *testing.T) {
+		reviewOlderRetryCannotMaterializeDeletedChunk(t, ctx, st)
+	})
+}
+
+func reviewOlderRetryCannotMaterializeDeletedChunk(t *testing.T, ctx context.Context, st *stack) {
+	chunkID := insertCodeChunkFixture(t, ctx, st.db, "must remain without an embedding")
+	entityID := "entity-ordered-delete"
+	deleteID := uniqueUUID(t)
+	deletePayload, _ := json.Marshal(map[string]any{
+		"id": chunkID, "entity_id": entityID,
+		"provenance": map[string]any{
+			"tenant_id": "tenant-test", "repo": "local",
+			"acl_group": "developers", "path": "ordered.go",
+		},
+	})
+	outcome, err := consumer.ProcessMessage(
+		ctx,
+		consumer.Deps{DB: st.db, Embed: embedclient.New("http://127.0.0.1:1"), ModelID: modelID, Logf: t.Logf},
+		consumer.TopicCodeChunk, deletePayload,
+		eventHeadersAt(deleteID, "DELETE", 20_000),
+	)
+	if err != nil || outcome != consumer.OutcomeTombstoneAcknowledged {
+		t.Fatalf("newer delete outcome=%v err=%v", outcome, err)
+	}
+
+	staleID := uniqueUUID(t)
+	stalePayload := codeChunkPayloadWithProvenance(chunkID, entityID, 0, "func Stale() {}", map[string]any{
+		"tenant_id": "tenant-test", "repo": "local", "acl_group": "developers", "path": "ordered.go",
+	})
+	outcome, err = consumer.ProcessMessage(
+		ctx, newDeps(st), consumer.TopicCodeChunk, stalePayload,
+		eventHeadersAt(staleID, "UPSERT", 19_999),
+	)
+	if err != nil || outcome != consumer.OutcomeDuplicate {
+		t.Fatalf("stale retry outcome=%v err=%v", outcome, err)
+	}
+	if got := countEmbeddingsForChunk(t, ctx, st.db, chunkID); got != 0 {
+		t.Fatalf("stale UPSERT materialized deleted chunk: embeddings=%d", got)
+	}
+	assertProcessedEvent(t, ctx, st.db, staleID)
+}
+
+func spec074DeleteAcknowledgedWithoutEmbedder(t *testing.T, ctx context.Context, st *stack) {
+	chunkID := insertCodeChunkFixture(t, ctx, st.db, "must never be embedded")
+	eventID := uniqueUUID(t)
+	deps := consumer.Deps{
+		DB: st.db, Embed: embedclient.New("http://127.0.0.1:1"),
+		ModelID: modelID, Logf: t.Logf,
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"id": chunkID, "entity_id": "entity-delete",
+		"provenance": map[string]any{
+			"tenant_id": "tenant-test", "repo": "local",
+			"acl_group": "developers", "path": "delete.go",
+		},
+	})
+	outboxBefore := countRows(t, ctx, st.db, "outbox")
+	outcome, err := consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeChunk, payload, eventHeaders(eventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeTombstoneAcknowledged {
+		t.Fatalf("delete outcome=%v err=%v", outcome, err)
+	}
+	if countEmbeddingsForChunk(t, ctx, st.db, chunkID) != 0 {
+		t.Fatal("DELETE recreated a canonical embedding")
+	}
+	if got := countRows(t, ctx, st.db, "outbox"); got != outboxBefore {
+		t.Fatalf("DELETE emitted a second tombstone/outbox row: %d -> %d", outboxBefore, got)
+	}
+	assertProcessedEvent(t, ctx, st.db, eventID)
+
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeChunk, payload, eventHeaders(eventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDuplicate {
+		t.Fatalf("delete replay outcome=%v err=%v", outcome, err)
+	}
 }
 
 // ============================================================
@@ -593,7 +675,7 @@ func newDeps(st *stack) consumer.Deps {
 
 func produce(t *testing.T, ctx context.Context, brokers []string, topic, key string, value []byte, eventID, traceID string) {
 	t.Helper()
-	headers := []kafka.Header{{Key: "event_id", Value: []byte(eventID)}}
+	headers := eventHeaders(eventID, "UPSERT")
 	if traceID != "" {
 		headers = append(headers, kafka.Header{Key: "trace_id", Value: []byte(traceID)})
 	}
@@ -607,6 +689,20 @@ func produce(t *testing.T, ctx context.Context, brokers []string, topic, key str
 		t.Fatalf("produzione messaggio sintetico su %s: %v", topic, err)
 	}
 }
+
+func eventHeaders(eventID, operation string) []kafka.Header {
+	return eventHeadersAt(eventID, operation, syntheticEventSequence.Add(1))
+}
+
+func eventHeadersAt(eventID, operation string, sequence int64) []kafka.Header {
+	return []kafka.Header{
+		{Key: "event_id", Value: []byte(eventID)},
+		{Key: "event_type", Value: []byte(operation)},
+		{Key: "event_sequence", Value: []byte(fmt.Sprintf("%d", sequence))},
+	}
+}
+
+var syntheticEventSequence atomic.Int64
 
 func fetchAndProcessOnce(t *testing.T, ctx context.Context, brokers []string, deps consumer.Deps) consumer.Outcome {
 	t.Helper()
@@ -754,6 +850,15 @@ func countEmbeddingsForChunk(t *testing.T, ctx context.Context, db *sql.DB, chun
 		t.Fatalf("countEmbeddingsForChunk chunk_id=%s: %v", chunkID, err)
 	}
 	return n
+}
+
+func countRows(t *testing.T, ctx context.Context, db *sql.DB, table string) int {
+	t.Helper()
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
 }
 
 func assertProcessedEvent(t *testing.T, ctx context.Context, db *sql.DB, eventID string) {

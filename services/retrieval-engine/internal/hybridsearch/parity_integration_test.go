@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/qdrant/go-client/qdrant"
+
 	"github.com/eci-project/eci/services/retrieval-engine/internal/hybridsearch"
 )
 
@@ -46,6 +48,24 @@ func TestHybridSearchParity(t *testing.T) {
 	ctx := authenticatedContext(t, context.Background())
 	f := setupFixture(t, ctx)
 	pythonBin := ensureReferenceVenv(t)
+
+	// The frozen D5 Python reference predates the authenticated canonical
+	// hydration boundary. Remove the two security-only Qdrant canaries from
+	// this isolated fixture so this test compares the ranking algorithm over
+	// the same canonical candidates; dedicated integration tests continue to
+	// prove that Go rejects both foreign-scope and orphan vector hits.
+	wait := true
+	deleted, err := f.qdrantClient.Delete(ctx, &qdrant.DeletePoints{
+		CollectionName: collectionName,
+		Wait:           &wait,
+		Points: qdrant.NewPointsSelector(
+			qdrant.NewIDNum(stableUint64(f.foreignVectorID)),
+			qdrant.NewIDNum(stableUint64("hs-unrelated-vector-node")),
+		),
+	})
+	if err != nil || deleted.GetStatus() != qdrant.UpdateStatus_Completed {
+		t.Fatalf("prune parity-only canaries: status=%v err=%v", deleted.GetStatus(), err)
+	}
 
 	goRanked, err := hybridsearch.HybridGraphVectorSearch(ctx, goodDeps(f), f.queryText, f.seedID, 2)
 	if err != nil {

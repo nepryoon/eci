@@ -8,7 +8,7 @@
 //
 // Topic/chiave/valore attesi (SPEC-008 §2), verificati contro il sorgente
 // Debezium v3.6.0.Final (stessa versione bundlata in
-// quay.io/debezium/connect:latest, vedi deviazione in fondo al file per i
+// l'immagine Quay ufficiale di Debezium bloccata per digest, vedi deviazione in fondo al file per i
 // riferimenti):
 //   - route.by.field=aggregate_type, route.topic.replacement di default
 //     "outbox.event.${routedByValue}" -> topic = outbox.event.<aggregate_type>.
@@ -54,10 +54,10 @@ const (
 	postgresUser     = "eci"
 	postgresPassword = "eci-dev-only"
 	postgresDB       = "eci"
-	connectorName        = "eci-outbox-connector"
-	registerTimeout      = 60 * time.Second
-	runningTimeout       = 60 * time.Second
-	pollInterval         = 3 * time.Second
+	connectorName    = "eci-outbox-connector"
+	registerTimeout  = 60 * time.Second
+	runningTimeout   = 60 * time.Second
+	pollInterval     = 3 * time.Second
 )
 
 func TestOutboxCDCEndToEnd(t *testing.T) {
@@ -109,6 +109,37 @@ func TestOutboxCDCEndToEnd(t *testing.T) {
 			t.Errorf("chiave del messaggio = %q, want %q (aggregate_id)", got, codeRelAggID)
 		}
 		assertJSONEqual(t, value, codeRelPayload)
+	})
+
+	// SPEC-071: il discriminante canonico viaggia in un header separato;
+	// topic, key e payload conservano il comportamento EventRouter esistente.
+	const deleteChunkID = "33333333-3333-3333-3333-333333333333"
+	const deleteChunkPayload = `{"id":"33333333-3333-3333-3333-333333333333","entity_id":"node-42"}`
+	deleteSequence := insertOutboxRow(t, ctx, st.db, deleteChunkID, "CodeChunk", deleteChunkID, "DELETE", deleteChunkPayload)
+
+	t.Run("SPEC071_DELETECarriesSingleOperationHeader", func(t *testing.T) {
+		headers, key, value, ok := tryConsumeOneWithHeaders(
+			t, ctx, st.kafka, "outbox.event.CodeChunk", 30*time.Second,
+		)
+		if !ok {
+			t.Fatal("nessun DELETE CodeChunk ricevuto entro 30s")
+		}
+		if got := decodeJSONString(t, key); got != deleteChunkID {
+			t.Errorf("chiave = %q, want %q", got, deleteChunkID)
+		}
+		assertJSONEqual(t, value, deleteChunkPayload)
+		if strings.Count(headers, "event_type:DELETE") != 1 {
+			t.Fatalf("header event_type DELETE assente o duplicato: %q", headers)
+		}
+		sequenceHeader := fmt.Sprintf("event_sequence:%d", deleteSequence)
+		if strings.Count(headers, sequenceHeader) != 1 {
+			t.Fatalf("header %s assente o duplicato: %q", sequenceHeader, headers)
+		}
+		for _, forbidden := range []string{"tenant", "repository", "acl", "path", "payload"} {
+			if strings.Contains(strings.ToLower(headers), forbidden) {
+				t.Fatalf("header CDC espone campo vietato %q: %q", forbidden, headers)
+			}
+		}
 	})
 }
 
@@ -269,9 +300,9 @@ func startKafka(t *testing.T, ctx context.Context, networkName string) testconta
 func startKafkaConnect(t *testing.T, ctx context.Context, networkName string) testcontainers.Container {
 	t.Helper()
 	req := testcontainers.ContainerRequest{
-		// debezium/connect:latest non esiste su Docker Hub (SPEC-007 §10
-		// deviazione #1) — quay.io/debezium/connect:latest riusato qui.
-		Image: "quay.io/debezium/connect:latest",
+		// debezium/connect:latest non esiste su Docker Hub (deviazione storica SPEC-007 §10
+		// deviazione #1) — stessa immagine ufficiale bloccata per digest.
+		Image: "quay.io/debezium/connect@sha256:698f0559e667a242f962221079e75917b2b7a3ad4de62661e977628da0e33b45",
 		Env: map[string]string{
 			"BOOTSTRAP_SERVERS":    kafkaAlias + ":9092",
 			"GROUP_ID":             "eci-connect-test",
@@ -287,7 +318,7 @@ func startKafkaConnect(t *testing.T, ctx context.Context, networkName string) te
 	}
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{ContainerRequest: req, Started: true})
 	if err != nil {
-		t.Fatalf("avvio container quay.io/debezium/connect:latest: %v", err)
+		t.Fatalf("avvio container Debezium bloccato per digest: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := c.Terminate(ctx); err != nil {
@@ -431,15 +462,18 @@ func waitConnectorRunning(t *testing.T, ctx context.Context, connectURL string) 
 // Postgres: INSERT nella tabella outbox.
 // ============================================================
 
-func insertOutboxRow(t *testing.T, ctx context.Context, db *sql.DB, id, aggregateType, aggregateID, eventType, payload string) {
+func insertOutboxRow(t *testing.T, ctx context.Context, db *sql.DB, id, aggregateType, aggregateID, eventType, payload string) int64 {
 	t.Helper()
-	_, err := db.ExecContext(ctx, `
+	var sequence int64
+	err := db.QueryRowContext(ctx, `
 		INSERT INTO outbox (id, aggregate_type, aggregate_id, event_type, payload)
-		VALUES ($1, $2, $3, $4, $5::jsonb)`,
-		id, aggregateType, aggregateID, eventType, payload)
+		VALUES ($1, $2, $3, $4, $5::jsonb)
+		RETURNING event_sequence`,
+		id, aggregateType, aggregateID, eventType, payload).Scan(&sequence)
 	if err != nil {
 		t.Fatalf("INSERT INTO outbox (aggregate_type=%s, aggregate_id=%s): %v", aggregateType, aggregateID, err)
 	}
+	return sequence
 }
 
 // ============================================================
@@ -491,6 +525,38 @@ func tryConsumeOne(t *testing.T, ctx context.Context, kafka testcontainers.Conta
 		}
 	}
 	return "", "", false
+}
+
+func tryConsumeOneWithHeaders(t *testing.T, ctx context.Context, kafka testcontainers.Container, topic string, timeout time.Duration) (headers, key, value string, ok bool) {
+	t.Helper()
+	cmd := []string{
+		"/opt/kafka/bin/kafka-console-consumer.sh",
+		"--bootstrap-server", "localhost:9092",
+		"--topic", topic,
+		"--from-beginning",
+		"--max-messages", "1",
+		"--timeout-ms", strconv.Itoa(int(timeout.Milliseconds())),
+		"--property", "print.headers=true",
+		"--property", "headers.separator=,",
+		"--property", "headers.key.separator=:",
+		"--property", "print.key=true",
+		"--property", "key.separator=|",
+	}
+	_, reader, err := kafka.Exec(ctx, cmd, tcexec.Multiplexed())
+	if err != nil {
+		t.Fatalf("Exec kafka-console-consumer.sh con header su %s: %v", topic, err)
+	}
+	buf := new(bytes.Buffer)
+	if _, err := buf.ReadFrom(reader); err != nil {
+		t.Fatalf("lettura consumer con header su %s: %v", topic, err)
+	}
+	for _, line := range strings.Split(buf.String(), "\n") {
+		parts := strings.SplitN(strings.TrimRight(line, "\r"), "|", 3)
+		if len(parts) == 3 && strings.HasPrefix(strings.TrimSpace(parts[2]), "{") {
+			return parts[0], parts[1], parts[2], true
+		}
+	}
+	return "", "", "", false
 }
 
 // decodeJSONString decodifica un letterale stringa JSON (es. `"foo"`) nel

@@ -256,7 +256,8 @@ func startE2EKafka(t *testing.T, ctx context.Context, networkName string) []stri
 		t.Fatalf("kafka Brokers: %v", err)
 	}
 
-	// Pre-creazione ESPLICITA dei topic PRIMA che sink-graph formi il
+	// Pre-creazione ESPLICITA di tutti i topic sottoscritti PRIMA che
+	// sink-graph formi il
 	// proprio consumer group (startSinkGraphProcess, dopo) — stesso
 	// principio di consumer_integration_test.go (SPEC-015 §10): un consumer
 	// group con GroupTopics che si unisce PRIMA che un topic esista riceve
@@ -265,7 +266,12 @@ func startE2EKafka(t *testing.T, ctx context.Context, networkName string) []stri
 	// evento CDC) — nessun rebalance automatico lo attiva. Scoperto
 	// scrivendo questo stesso test: sink-graph si univa al gruppo, otteneva
 	// l'assegnazione, e restava silenziosamente senza mai ricevere nulla.
-	ensureKafkaTopics(t, ctx, brokers, "outbox.event.CodeNode", "outbox.event.CodeRelation")
+	ensureKafkaTopics(t, ctx, brokers,
+		"outbox.event.CodeNode",
+		"outbox.event.CodeRelation",
+		"outbox.event.CodeNode.retry.sink-graph",
+		"outbox.event.CodeRelation.retry.sink-graph",
+	)
 
 	return brokers
 }
@@ -301,9 +307,9 @@ func ensureKafkaTopics(t *testing.T, ctx context.Context, brokers []string, topi
 func startKafkaConnect(t *testing.T, ctx context.Context, networkName string) testcontainers.Container {
 	t.Helper()
 	req := testcontainers.ContainerRequest{
-		// debezium/connect:latest non esiste su Docker Hub (SPEC-007 §10) —
-		// quay.io/debezium/connect:latest riusato qui, stesso di SPEC-008.
-		Image: "quay.io/debezium/connect:latest",
+		// debezium/connect:latest non esiste su Docker Hub (deviazione storica SPEC-007 §10) —
+		// stessa immagine ufficiale bloccata per digest di SPEC-008.
+		Image: "quay.io/debezium/connect@sha256:698f0559e667a242f962221079e75917b2b7a3ad4de62661e977628da0e33b45",
 		Env: map[string]string{
 			"BOOTSTRAP_SERVERS":    e2eKafkaAlias + ":9092",
 			"GROUP_ID":             "reconcile-e2e-connect",
@@ -319,7 +325,7 @@ func startKafkaConnect(t *testing.T, ctx context.Context, networkName string) te
 	}
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{ContainerRequest: req, Started: true})
 	if err != nil {
-		t.Fatalf("avvio container quay.io/debezium/connect:latest: %v", err)
+		t.Fatalf("avvio container Debezium bloccato per digest: %v", err)
 	}
 	t.Cleanup(func() {
 		if t.Failed() {

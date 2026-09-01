@@ -16,6 +16,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -71,6 +72,9 @@ func TestSinkSearchConsumer(t *testing.T) {
 	t.Run("Scenario4_EnsureIndexIdempotent", func(t *testing.T) {
 		scenario4EnsureIndexIdempotent(t, ctx, st)
 	})
+	t.Run("Review_LegacyCursorFieldsAreBackfilled", func(t *testing.T) {
+		reviewLegacyCursorFieldsAreBackfilled(t, ctx, st)
+	})
 	t.Run("Scenario5_DistinctConsumerGroupFanOut", func(t *testing.T) {
 		scenario5DistinctConsumerGroupFanOut(t, ctx, st)
 	})
@@ -83,6 +87,44 @@ func TestSinkSearchConsumer(t *testing.T) {
 	t.Run("Review_FailedOpenSearchWriteDoesNotMarkProcessed", func(t *testing.T) {
 		reviewFailedOpenSearchWriteDoesNotMarkProcessed(t, ctx, st)
 	})
+	t.Run("SPEC076_DeleteDocumentScopeSafeAndIdempotent", func(t *testing.T) {
+		spec076DeleteDocumentScopeSafeAndIdempotent(t, ctx, st)
+	})
+	t.Run("SPEC076_FailedDeleteDoesNotMarkProcessed", func(t *testing.T) {
+		spec076FailedDeleteDoesNotMarkProcessed(t, ctx, st)
+	})
+	t.Run("Review_OlderRetryCannotRecreateDeletedDocument", func(t *testing.T) {
+		reviewOlderRetryCannotRecreateDeletedDocument(t, ctx, st)
+	})
+}
+
+func reviewOlderRetryCannotRecreateDeletedDocument(t *testing.T, ctx context.Context, st *stack) {
+	deps := newDeps(st)
+	chunkID := uuid.NewString()
+	entityID := "entity-ordered-delete"
+	deleteID := uuid.NewString()
+	outcome, err := consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeChunk,
+		codeChunkTombstone(chunkID, entityID, "developers", "ordered.go"),
+		eventHeadersAt(deleteID, "DELETE", 20_000),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("newer delete outcome=%v err=%v", outcome, err)
+	}
+
+	staleID := uuid.NewString()
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeChunk,
+		codeChunkPayload(chunkID, entityID, 0, "func Stale() {}", map[string]any{"path": "ordered.go"}),
+		eventHeadersAt(staleID, "UPSERT", 19_999),
+	)
+	if err != nil || outcome != consumer.OutcomeDuplicate {
+		t.Fatalf("stale retry outcome=%v err=%v", outcome, err)
+	}
+	if documentExists(t, ctx, st.opensearch, chunkID) {
+		t.Fatal("stale UPSERT recreated deleted document")
+	}
+	assertProcessedEvent(t, ctx, st.db, staleID, consumer.ConsumerName)
 }
 
 func reviewFailedOpenSearchWriteDoesNotMarkProcessed(t *testing.T, ctx context.Context, st *stack) {
@@ -100,7 +142,7 @@ func reviewFailedOpenSearchWriteDoesNotMarkProcessed(t *testing.T, ctx context.C
 		consumer.Deps{DB: st.db, OpenSearch: unreachable, Logf: t.Logf},
 		consumer.TopicCodeChunk,
 		codeChunkPayload(uuid.NewString(), "failed-write", 0, "failed write", nil),
-		[]kafka.Header{{Key: "event_id", Value: []byte(eventID)}},
+		eventHeaders(eventID, "UPSERT"),
 	)
 	if err == nil {
 		t.Fatal("expected unreachable OpenSearch write to fail")
@@ -114,6 +156,118 @@ func reviewFailedOpenSearchWriteDoesNotMarkProcessed(t *testing.T, ctx context.C
 	}
 	if count != 0 {
 		t.Fatalf("processed marker count after failed OpenSearch write = %d, want 0", count)
+	}
+}
+
+func spec076DeleteDocumentScopeSafeAndIdempotent(t *testing.T, ctx context.Context, st *stack) {
+	deps := newDeps(st)
+	chunkID := uuid.NewString()
+	entityID := "entity-delete"
+	upsertEventID := uuid.NewString()
+	upsertPayload := codeChunkPayload(chunkID, entityID, 0, "func DeleteMe() {}", map[string]any{"path": "delete.go"})
+	outcome, err := consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeChunk, upsertPayload,
+		eventHeaders(upsertEventID, "UPSERT"),
+	)
+	if err != nil || outcome != consumer.OutcomeStored {
+		t.Fatalf("seed index outcome=%v err=%v", outcome, err)
+	}
+	if !documentExists(t, ctx, st.opensearch, chunkID) {
+		t.Fatal("seed document not found")
+	}
+
+	wrongScopeEventID := uuid.NewString()
+	wrongScope := codeChunkTombstone(chunkID, entityID, "admins", "delete.go")
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeChunk, wrongScope,
+		eventHeaders(wrongScopeEventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("cross-scope delete outcome=%v err=%v", outcome, err)
+	}
+	if !documentExists(t, ctx, st.opensearch, chunkID) {
+		t.Fatal("cross-scope delete removed document")
+	}
+	assertProcessedEvent(t, ctx, st.db, wrongScopeEventID, consumer.ConsumerName)
+
+	deleteEventID := uuid.NewString()
+	deletePayload := codeChunkTombstone(chunkID, entityID, "developers", "delete.go")
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeChunk, deletePayload,
+		eventHeaders(deleteEventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("delete outcome=%v err=%v", outcome, err)
+	}
+	if documentExists(t, ctx, st.opensearch, chunkID) {
+		t.Fatal("document remains after delete")
+	}
+	assertProcessedEvent(t, ctx, st.db, deleteEventID, consumer.ConsumerName)
+
+	// Recreate the effect-before-marker crash window: the document is already
+	// absent, but completion must still be safely retryable.
+	if _, err := st.db.ExecContext(ctx,
+		"DELETE FROM processed_events WHERE event_id = $1 AND consumer_name = $2",
+		deleteEventID, consumer.ConsumerName,
+	); err != nil {
+		t.Fatalf("remove marker for failure-window replay: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+		DELETE FROM consumer_projection_watermark
+		WHERE consumer_name=$1 AND aggregate_type='CodeChunk' AND aggregate_id=$2`,
+		consumer.ConsumerName, chunkID); err != nil {
+		t.Fatalf("remove watermark for failure-window replay: %v", err)
+	}
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeChunk, deletePayload,
+		eventHeaders(deleteEventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("absent-document replay outcome=%v err=%v", outcome, err)
+	}
+	if documentExists(t, ctx, st.opensearch, chunkID) {
+		t.Fatal("replay recreated deleted document")
+	}
+	assertProcessedEvent(t, ctx, st.db, deleteEventID, consumer.ConsumerName)
+
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeChunk, deletePayload,
+		eventHeaders(deleteEventID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDuplicate {
+		t.Fatalf("marked replay outcome=%v err=%v", outcome, err)
+	}
+}
+
+func spec076FailedDeleteDoesNotMarkProcessed(t *testing.T, ctx context.Context, st *stack) {
+	unreachable, err := opensearchapi.NewClient(opensearchapi.Config{
+		Client: opensearch.Config{Addresses: []string{"http://127.0.0.1:1"}},
+	})
+	if err != nil {
+		t.Fatalf("opensearchapi NewClient: %v", err)
+	}
+	eventID := uuid.NewString()
+	deleteCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_, err = consumer.ProcessMessage(
+		deleteCtx,
+		consumer.Deps{DB: st.db, OpenSearch: unreachable, Logf: t.Logf},
+		consumer.TopicCodeChunk,
+		codeChunkTombstone(uuid.NewString(), "entity-delete-failure", "developers", "delete.go"),
+		eventHeaders(eventID, "DELETE"),
+	)
+	if err == nil {
+		t.Fatal("expected unreachable OpenSearch delete to fail")
+	}
+	var count int
+	if err := st.db.QueryRowContext(ctx,
+		"SELECT count(*) FROM processed_events WHERE event_id = $1 AND consumer_name = $2",
+		eventID, consumer.ConsumerName,
+	).Scan(&count); err != nil {
+		t.Fatalf("query processed marker: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("processed marker count after failed OpenSearch delete=%d want=0", count)
 	}
 }
 
@@ -151,6 +305,12 @@ func scenario1DocumentIndexedWithShaHexID(t *testing.T, ctx context.Context, st 
 	}
 	if doc["entity_id"] != entityID {
 		t.Errorf("doc['entity_id'] = %v, want %q", doc["entity_id"], entityID)
+	}
+	if doc["chunk_id"] != chunkID {
+		t.Errorf("doc['chunk_id'] = %v, want %q", doc["chunk_id"], chunkID)
+	}
+	if sequence, ok := doc["event_sequence"].(float64); !ok || sequence <= 0 {
+		t.Errorf("doc['event_sequence'] = %v, want positive canonical sequence", doc["event_sequence"])
 	}
 	if doc["tenant_id"] != "tenant-test" || doc["repo"] != "sample-repo" || doc["acl_group"] != "developers" {
 		t.Errorf("security labels = (%v,%v,%v), want (%q,%q,%q)",
@@ -278,6 +438,28 @@ func scenario4EnsureIndexIdempotent(t *testing.T, ctx context.Context, st *stack
 	// ricrearlo (SPEC-034 §3 scenario 4).
 	if err := consumer.EnsureIndex(ctx, st.opensearch); err != nil {
 		t.Fatalf("EnsureIndex su indice già esistente deve essere un no-op, non un errore: %v", err)
+	}
+}
+
+func reviewLegacyCursorFieldsAreBackfilled(t *testing.T, ctx context.Context, st *stack) {
+	legacyID := uuid.NewString()
+	legacy := map[string]any{
+		"entity_id": "legacy-entity", "chunk_index": 0, "text": "legacy",
+		"tenant_id": "tenant-test", "repo": "local", "acl_group": "developers",
+	}
+	if _, err := st.opensearch.Document.Create(ctx, opensearchapi.DocumentCreateReq{
+		Index: consumer.IndexName, DocumentID: legacyID,
+		Body: opensearchutil.NewJSONReader(legacy),
+	}); err != nil {
+		t.Fatalf("create legacy document: %v", err)
+	}
+	refreshIndex(t, ctx, st.opensearch)
+	if err := consumer.EnsureIndex(ctx, st.opensearch); err != nil {
+		t.Fatalf("migrate legacy document: %v", err)
+	}
+	got := getDocument(t, ctx, st.opensearch, legacyID)
+	if got["chunk_id"] != legacyID || got["event_sequence"] != float64(0) {
+		t.Fatalf("legacy cursor=%v/%v want %s/0", got["chunk_id"], got["event_sequence"], legacyID)
 	}
 }
 
@@ -511,7 +693,7 @@ func startPostgres(t *testing.T, ctx context.Context) *sql.DB {
 		t.Fatalf("ConnectionString: %v", err)
 	}
 
-	// processed_events (D1, 0001_init.up.sql) è l'unica tabella richiesta
+	// Le tabelle di completion e ordering sono le sole richieste
 	// da questo consumer (nessuna tabella specifica di sink-search) — DDL
 	// applicato qui direttamente, senza il CLI 'migrate' esterno (stesso
 	// principio di sink-vector/SPEC-033: questo servizio non ha
@@ -530,8 +712,17 @@ func startPostgres(t *testing.T, ctx context.Context) *sql.DB {
 			consumer_name  TEXT NOT NULL,
 			processed_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
 			PRIMARY KEY (event_id, consumer_name)
+		);
+		CREATE TABLE consumer_projection_watermark (
+			consumer_name TEXT NOT NULL,
+			aggregate_type TEXT NOT NULL,
+			aggregate_id TEXT NOT NULL,
+			event_sequence BIGINT NOT NULL CHECK (event_sequence > 0),
+			operation TEXT NOT NULL CHECK (operation IN ('UPSERT', 'DELETE')),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp(),
+			PRIMARY KEY (consumer_name, aggregate_type, aggregate_id)
 		)`); err != nil {
-		t.Fatalf("creazione processed_events: %v", err)
+		t.Fatalf("creazione tabelle consumer: %v", err)
 	}
 	return db
 }
@@ -550,7 +741,7 @@ func newDeps(st *stack) consumer.Deps {
 
 func produce(t *testing.T, ctx context.Context, brokers []string, topic, key string, value []byte, eventID string) {
 	t.Helper()
-	headers := []kafka.Header{{Key: "event_id", Value: []byte(eventID)}}
+	headers := eventHeaders(eventID, "UPSERT")
 	w := &kafka.Writer{
 		Addr:                   kafka.TCP(brokers...),
 		Topic:                  topic,
@@ -561,6 +752,20 @@ func produce(t *testing.T, ctx context.Context, brokers []string, topic, key str
 		t.Fatalf("produzione messaggio sintetico su %s: %v", topic, err)
 	}
 }
+
+func eventHeaders(eventID, operation string) []kafka.Header {
+	return eventHeadersAt(eventID, operation, syntheticEventSequence.Add(1))
+}
+
+func eventHeadersAt(eventID, operation string, sequence int64) []kafka.Header {
+	return []kafka.Header{
+		{Key: "event_id", Value: []byte(eventID)},
+		{Key: "event_type", Value: []byte(operation)},
+		{Key: "event_sequence", Value: []byte(fmt.Sprintf("%d", sequence))},
+	}
+}
+
+var syntheticEventSequence atomic.Int64
 
 // SPEC-035: FetchAndProcess accetta ora un resilience.ProcessFunc iniettato
 // (nessuna modifica alla logica applicativa di ProcessMessage stessa) e
@@ -619,6 +824,20 @@ func codeChunkPayload(id, entityID string, chunkIndex int, text string, provenan
 		m["provenance"] = provenance
 	}
 	out, _ := json.Marshal(m)
+	return out
+}
+
+func codeChunkTombstone(id, entityID, aclGroup, path string) []byte {
+	out, _ := json.Marshal(map[string]any{
+		"id":        id,
+		"entity_id": entityID,
+		"provenance": map[string]any{
+			"tenant_id": "tenant-test",
+			"repo":      "sample-repo",
+			"acl_group": aclGroup,
+			"path":      path,
+		},
+	})
 	return out
 }
 

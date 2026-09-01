@@ -163,6 +163,38 @@ pub enum CommandReceiptStatus {
     Conflict,
 }
 
+/// Canonical file mutations must be serialized independently of command-id
+/// replay protection. This length-delimited key prevents delimiter ambiguity
+/// while keeping the advisory-lock input free of source content or credentials.
+fn file_mutation_lock_key(scope: &crate::worker::AuthenticatedCommitScope, path: &str) -> String {
+    let mut key = String::from("eci-file-mutation-v1");
+    for component in [
+        scope.tenant_id(),
+        scope.repository(),
+        scope.acl_group(),
+        path,
+    ] {
+        key.push(':');
+        key.push_str(&component.len().to_string());
+        key.push(':');
+        key.push_str(component);
+    }
+    key
+}
+
+fn lock_file_mutation(
+    tx: &mut postgres::Transaction<'_>,
+    scope: &crate::worker::AuthenticatedCommitScope,
+    path: &str,
+) -> Result<(), postgres::Error> {
+    let key = file_mutation_lock_key(scope, path);
+    tx.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        &[&key],
+    )?;
+    Ok(())
+}
+
 pub fn inspect_ingestion_command_receipt(
     client: &mut postgres::Client,
     scope: &crate::worker::AuthenticatedCommitScope,
@@ -235,6 +267,7 @@ pub fn persist_ingestion_command(
 ) -> Result<CommandOutcome, PersistError> {
     let span = tracing::info_span!(
         "ingestion.command.persist",
+        ingestion.operation = "upsert",
         ingestion.outcome = tracing::field::Empty
     );
     let _entered = span.enter();
@@ -256,6 +289,9 @@ fn persist_ingestion_command_inner(
     relations: Vec<CodeRelation>,
     chunks: &[CodeChunk],
 ) -> Result<CommandOutcome, PersistError> {
+    if command.operation() != crate::worker::FileOperation::Upsert {
+        return Err(PersistError(PersistErrorKind::InvalidCommandData));
+    }
     if !parsed_command_data_is_valid(command.path(), &nodes, chunks) {
         return Err(PersistError(PersistErrorKind::InvalidCommandData));
     }
@@ -267,6 +303,7 @@ fn persist_ingestion_command_inner(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
         &[&command_id.to_string()],
     )?;
+    lock_file_mutation(&mut tx, scope, command.path())?;
     if let Some(row) = tx.query_opt(
         "SELECT fingerprint FROM ingestion_command_receipt WHERE command_id = $1",
         &[&command_id],
@@ -301,22 +338,232 @@ fn persist_ingestion_command_inner(
         &trace_id,
         Some(&provenance),
     )?;
+    insert_command_receipt(&mut tx, scope, command, &fingerprint)?;
+    tx.commit()?;
+    Ok(CommandOutcome::Applied(summary))
+}
+
+/// Apply an authenticated file removal and its projection tombstones in one
+/// canonical PostgreSQL transaction (SPEC-070 / ADR-0025).
+pub fn persist_ingestion_delete_command(
+    client: &mut postgres::Client,
+    scope: &crate::worker::AuthenticatedCommitScope,
+    command: &crate::worker::IngestionFileCommand,
+) -> Result<CommandOutcome, PersistError> {
+    let span = tracing::info_span!(
+        "ingestion.command.persist",
+        ingestion.operation = "delete",
+        ingestion.outcome = tracing::field::Empty
+    );
+    let _entered = span.enter();
+    let result = persist_ingestion_delete_command_inner(client, scope, command);
+    let outcome = match &result {
+        Ok(CommandOutcome::Applied(_)) => "applied",
+        Ok(CommandOutcome::Duplicate) => "duplicate",
+        Err(_) => "failed",
+    };
+    span.record("ingestion.outcome", outcome);
+    result
+}
+
+fn persist_ingestion_delete_command_inner(
+    client: &mut postgres::Client,
+    scope: &crate::worker::AuthenticatedCommitScope,
+    command: &crate::worker::IngestionFileCommand,
+) -> Result<CommandOutcome, PersistError> {
+    if command.operation() != crate::worker::FileOperation::Delete {
+        return Err(PersistError(PersistErrorKind::InvalidCommandData));
+    }
+    let trace_id = eci_common::observability::current_trace_id_hex();
+    let fingerprint = crate::worker::command_fingerprint(scope, command);
+    let command_id = command.command_id();
+    let mut tx = client.transaction()?;
+    tx.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        &[&command_id.to_string()],
+    )?;
+    lock_file_mutation(&mut tx, scope, command.path())?;
+    if let Some(row) = tx.query_opt(
+        "SELECT fingerprint FROM ingestion_command_receipt WHERE command_id = $1",
+        &[&command_id],
+    )? {
+        let existing: String = row.get(0);
+        if existing == fingerprint {
+            tx.commit()?;
+            return Ok(CommandOutcome::Duplicate);
+        }
+        return Err(PersistError(PersistErrorKind::CommandIdConflict));
+    }
+
+    let node_rows = tx.query(
+        "SELECT id, node_type FROM code_node
+         WHERE provenance->>'tenant_id' = $1
+           AND provenance->>'repo' = $2
+           AND provenance->>'acl_group' = $3
+           AND provenance->>'path' = $4
+         ORDER BY id FOR UPDATE",
+        &[
+            &scope.tenant_id(),
+            &scope.repository(),
+            &scope.acl_group(),
+            &command.path(),
+        ],
+    )?;
+    let node_ids: Vec<String> = node_rows.iter().map(|row| row.get(0)).collect();
+    let provenance = serde_json::json!({
+        "tenant_id": scope.tenant_id(),
+        "repo": scope.repository(),
+        "acl_group": scope.acl_group(),
+        "path": command.path(),
+        "commit_sha": command.commit_sha(),
+    });
+
+    let relation_rows = tx.query(
+        "SELECT id::text, rel_type, from_id, to_id
+         FROM code_relation
+         WHERE from_id = ANY($1) OR to_id = ANY($1)
+         ORDER BY id FOR UPDATE",
+        &[&node_ids],
+    )?;
+    let chunk_rows = tx.query(
+        "SELECT id, entity_id FROM code_chunk
+         WHERE entity_id = ANY($1) ORDER BY id FOR UPDATE",
+        &[&node_ids],
+    )?;
+    let chunk_ids: Vec<uuid::Uuid> = chunk_rows.iter().map(|row| row.get(0)).collect();
+    let embedding_rows = tx.query(
+        "SELECT e.id::text, c.entity_id
+         FROM code_embedding e JOIN code_chunk c ON c.id = e.chunk_id
+         WHERE e.chunk_id = ANY($1) ORDER BY e.id FOR UPDATE",
+        &[&chunk_ids],
+    )?;
+
+    let mut outbox_rows_written = 0usize;
+    for row in &embedding_rows {
+        let id: String = row.get(0);
+        let entity_id: String = row.get(1);
+        insert_delete_outbox(
+            &mut tx,
+            "CodeEmbedding",
+            &id,
+            serde_json::json!({"id": id, "entity_id": entity_id, "provenance": provenance}),
+            &trace_id,
+        )?;
+        outbox_rows_written += 1;
+    }
+    for row in &chunk_rows {
+        let id = row.get::<_, uuid::Uuid>(0).to_string();
+        let entity_id: String = row.get(1);
+        insert_delete_outbox(
+            &mut tx,
+            "CodeChunk",
+            &id,
+            serde_json::json!({"id": id, "entity_id": entity_id, "provenance": provenance}),
+            &trace_id,
+        )?;
+        outbox_rows_written += 1;
+    }
+    for row in &relation_rows {
+        let id: String = row.get(0);
+        let rel_type: String = row.get(1);
+        let from_id: String = row.get(2);
+        let to_id: String = row.get(3);
+        insert_delete_outbox(
+            &mut tx,
+            "CodeRelation",
+            &id,
+            serde_json::json!({
+                "id": id, "rel_type": rel_type, "from_id": from_id,
+                "to_id": to_id, "provenance": provenance
+            }),
+            &trace_id,
+        )?;
+        outbox_rows_written += 1;
+    }
+    for row in &node_rows {
+        let id: String = row.get(0);
+        let node_type: String = row.get(1);
+        insert_delete_outbox(
+            &mut tx,
+            "CodeNode",
+            &id,
+            serde_json::json!({
+                "id": id, "ext": {"node_type": node_type}, "provenance": provenance
+            }),
+            &trace_id,
+        )?;
+        outbox_rows_written += 1;
+    }
+
+    tx.execute(
+        "DELETE FROM code_embedding WHERE chunk_id = ANY($1)",
+        &[&chunk_ids],
+    )?;
+    tx.execute(
+        "DELETE FROM code_chunk WHERE entity_id = ANY($1)",
+        &[&node_ids],
+    )?;
+    tx.execute(
+        "DELETE FROM code_relation WHERE from_id = ANY($1) OR to_id = ANY($1)",
+        &[&node_ids],
+    )?;
+    tx.execute(
+        "DELETE FROM lineage
+         WHERE old_node_id::text = ANY($1) OR new_node_id::text = ANY($1)",
+        &[&node_ids],
+    )?;
+    tx.execute(
+        "UPDATE code_node SET supersedes = NULL WHERE supersedes = ANY($1)",
+        &[&node_ids],
+    )?;
+    tx.execute("DELETE FROM code_node WHERE id = ANY($1)", &[&node_ids])?;
+    insert_command_receipt(&mut tx, scope, command, &fingerprint)?;
+    tx.commit()?;
+
+    Ok(CommandOutcome::Applied(PersistSummary {
+        nodes_upserted: 0,
+        relations_replaced: 0,
+        outbox_rows_written,
+    }))
+}
+
+fn insert_delete_outbox(
+    tx: &mut postgres::Transaction<'_>,
+    aggregate_type: &str,
+    aggregate_id: &str,
+    payload: serde_json::Value,
+    trace_id: &Option<String>,
+) -> Result<(), PersistError> {
+    tx.execute(
+        "INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload, trace_id)
+         VALUES ($1, $2, 'DELETE', $3, $4)",
+        &[&aggregate_type, &aggregate_id, &payload, trace_id],
+    )?;
+    Ok(())
+}
+
+fn insert_command_receipt(
+    tx: &mut postgres::Transaction<'_>,
+    scope: &crate::worker::AuthenticatedCommitScope,
+    command: &crate::worker::IngestionFileCommand,
+    fingerprint: &str,
+) -> Result<(), PersistError> {
     tx.execute(
         "INSERT INTO ingestion_command_receipt
-         (command_id, fingerprint, tenant_id, repository, commit_sha, path, source_sha256)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+         (command_id, fingerprint, tenant_id, repository, commit_sha, path, source_sha256, operation)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         &[
-            &command_id,
+            &command.command_id(),
             &fingerprint,
             &scope.tenant_id(),
             &scope.repository(),
             &command.commit_sha(),
             &command.path(),
             &command.source_sha256(),
+            &command.operation().as_str(),
         ],
     )?;
-    tx.commit()?;
-    Ok(CommandOutcome::Applied(summary))
+    Ok(())
 }
 
 fn parsed_command_data_is_valid(
@@ -351,6 +598,26 @@ fn persist_parsed_file_in_transaction(
 ) -> Result<PersistSummary, PersistError> {
     let mut nodes_upserted = 0usize;
     let mut outbox_rows_written = 0usize;
+    let file_path_by_node_id: HashMap<String, &str> = nodes
+        .iter()
+        .map(|node| (scoped_node_id(scope, &node.id), node.file_path.as_str()))
+        .collect();
+    let file_node_ids_owned: Vec<String> = nodes
+        .iter()
+        .map(|node| scoped_node_id(scope, &node.id))
+        .collect();
+    let file_node_ids: Vec<&str> = file_node_ids_owned.iter().map(String::as_str).collect();
+    // Capture the scope that owns every existing projection before the node
+    // UPSERT can replace provenance (ACL is intentionally not part of node ID).
+    let previous_node_rows = tx.query(
+        "SELECT id, provenance FROM code_node
+         WHERE id = ANY($1) ORDER BY id FOR UPDATE",
+        &[&file_node_ids],
+    )?;
+    let previous_node_provenance: HashMap<String, serde_json::Value> = previous_node_rows
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
 
     for node in &nodes {
         let node_id = scoped_node_id(scope, &node.id);
@@ -402,11 +669,36 @@ fn persist_parsed_file_in_transaction(
     // Scope del DELETE: SOLO from_id, mai to_id (SPEC-014 §2) — id di
     // TUTTI i nodi appena prodotti da questo file, File incluso (le sue
     // CONTAINS hanno from_id = id del File).
-    let file_node_ids_owned: Vec<String> = nodes
-        .iter()
-        .map(|node| scoped_node_id(scope, &node.id))
-        .collect();
-    let file_node_ids: Vec<&str> = file_node_ids_owned.iter().map(String::as_str).collect();
+    // Re-ingestion replaces canonical rows whose projection identities may be
+    // different from the replacements. Publish the old logical edges before
+    // removing them so Neo4j cannot retain relationships that disappeared
+    // from the new parse. DELETE and subsequent UPSERT sequences are allocated
+    // in this same transaction and therefore preserve replacement order.
+    let old_relation_rows = tx.query(
+        "SELECT id::text, rel_type, from_id, to_id, provenance
+         FROM code_relation
+         WHERE domain = 'code' AND from_id = ANY($1)
+         ORDER BY id FOR UPDATE",
+        &[&file_node_ids],
+    )?;
+    for row in &old_relation_rows {
+        let id: String = row.get(0);
+        let rel_type: String = row.get(1);
+        let from_id: String = row.get(2);
+        let to_id: String = row.get(3);
+        let previous_provenance: serde_json::Value = row.get(4);
+        insert_delete_outbox(
+            tx,
+            "CodeRelation",
+            &id,
+            serde_json::json!({
+                "id": id, "rel_type": rel_type, "from_id": from_id,
+                "to_id": to_id, "provenance": previous_provenance
+            }),
+            trace_id,
+        )?;
+        outbox_rows_written += 1;
+    }
     tx.execute(
         "DELETE FROM code_relation WHERE domain = 'code' AND from_id = ANY($1)",
         &[&file_node_ids],
@@ -459,18 +751,67 @@ fn persist_parsed_file_in_transaction(
     // Scope del DELETE: SOLO entity_id tra i nodi appena prodotti da questo
     // file (SPEC-029 §2 — stesso pattern già stabilito per code_relation
     // sopra, non un ON CONFLICT: il numero di chunk di un'entità può
-    // cambiare tra un parse e l'altro).
+    // cambiare tra un parse e l'altro). Capture dependent embeddings and old
+    // chunk UUIDs first: they are distinct projection aggregates and must be
+    // tombstoned atomically before their canonical rows are removed.
+    let old_chunk_rows = tx.query(
+        "SELECT id, entity_id FROM code_chunk
+         WHERE entity_id = ANY($1) ORDER BY id FOR UPDATE",
+        &[&file_node_ids],
+    )?;
+    let old_chunk_ids: Vec<uuid::Uuid> = old_chunk_rows.iter().map(|row| row.get(0)).collect();
+    let old_embedding_rows = tx.query(
+        "SELECT e.id::text, c.entity_id
+         FROM code_embedding e JOIN code_chunk c ON c.id = e.chunk_id
+         WHERE e.chunk_id = ANY($1) ORDER BY e.id FOR UPDATE",
+        &[&old_chunk_ids],
+    )?;
+    for row in &old_embedding_rows {
+        let id: String = row.get(0);
+        let entity_id: String = row.get(1);
+        let previous_provenance = previous_node_provenance
+            .get(&entity_id)
+            .cloned()
+            .ok_or_else(|| PersistError(PersistErrorKind::InvalidCommandData))?;
+        insert_delete_outbox(
+            tx,
+            "CodeEmbedding",
+            &id,
+            serde_json::json!({
+                "id": id, "entity_id": entity_id,
+                "provenance": previous_provenance
+            }),
+            trace_id,
+        )?;
+        outbox_rows_written += 1;
+    }
+    for row in &old_chunk_rows {
+        let id = row.get::<_, uuid::Uuid>(0).to_string();
+        let entity_id: String = row.get(1);
+        let previous_provenance = previous_node_provenance
+            .get(&entity_id)
+            .cloned()
+            .ok_or_else(|| PersistError(PersistErrorKind::InvalidCommandData))?;
+        insert_delete_outbox(
+            tx,
+            "CodeChunk",
+            &id,
+            serde_json::json!({
+                "id": id, "entity_id": entity_id,
+                "provenance": previous_provenance
+            }),
+            trace_id,
+        )?;
+        outbox_rows_written += 1;
+    }
+    tx.execute(
+        "DELETE FROM code_embedding WHERE chunk_id = ANY($1)",
+        &[&old_chunk_ids],
+    )?;
     tx.execute(
         "DELETE FROM code_chunk WHERE entity_id = ANY($1)",
         &[&file_node_ids],
     )?;
-
-    // Lookup in memoria file_path per id (SPEC-032 §2): nessuna nuova
-    // query, `nodes` è già ricevuto nella STESSA chiamata di `chunks`.
-    let file_path_by_node_id: HashMap<String, &str> = nodes
-        .iter()
-        .map(|n| (scoped_node_id(scope, &n.id), n.file_path.as_str()))
-        .collect();
 
     for chunk in chunks {
         let entity_id = scoped_node_id(scope, &chunk.entity_id);
@@ -557,5 +898,37 @@ mod tests {
             &nodes,
             &chunks,
         ));
+    }
+
+    #[test]
+    fn file_mutation_lock_key_is_length_delimited_and_scope_bound() {
+        let payload = br#"{
+            "schema_version":"1",
+            "command_id":"018f0806-3d73-7a8f-b5a5-c4b25f9d4701",
+            "commit_sha":"32cd8e17643358a7a4307c92dfb3a025d59045f4",
+            "path":"src/a_b.go",
+            "source_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "source_size_bytes":1
+        }"#;
+        let headers = |tenant: &str, repository: &str| {
+            vec![
+                ("eci-tenant-id".to_owned(), tenant.as_bytes().to_vec()),
+                ("eci-repository".to_owned(), repository.as_bytes().to_vec()),
+                ("eci-acl-group".to_owned(), b"group".to_vec()),
+            ]
+        };
+        let (scope, _) =
+            crate::worker::parse_authenticated_command(payload, &headers("tenant:a", "repo"), 1024)
+                .expect("valid scope");
+        let key = file_mutation_lock_key(&scope, "src/a_b.go");
+        assert_eq!(
+            key,
+            "eci-file-mutation-v1:8:tenant:a:4:repo:5:group:10:src/a_b.go"
+        );
+
+        let (other_scope, _) =
+            crate::worker::parse_authenticated_command(payload, &headers("tenant", "a:repo"), 1024)
+                .expect("valid scope");
+        assert_ne!(key, file_mutation_lock_key(&other_scope, "src/a_b.go"));
     }
 }

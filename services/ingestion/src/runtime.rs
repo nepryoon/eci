@@ -43,7 +43,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use crate::worker::{command_message_key_matches, parse_authenticated_command, source_object_key};
 use crate::{
     inspect_ingestion_command_receipt, parse_file_full_private, persist_ingestion_command,
-    CommandReceiptStatus,
+    persist_ingestion_delete_command, CommandReceiptStatus,
 };
 
 const INPUT_TOPIC: &str = "eci.ingestion.file.v1";
@@ -384,6 +384,7 @@ pub async fn run() -> Result<(), RuntimeError> {
                 messaging.system = "kafka",
                 messaging.destination.name = INPUT_TOPIC,
                 messaging.kafka.partition = message.partition(),
+                ingestion.operation = tracing::field::Empty,
                 ingestion.outcome = tracing::field::Empty,
             );
             if let Some(link) = trace_link(&message) {
@@ -895,6 +896,7 @@ async fn process_message<M: Message>(
             reason: "invalid_message_key",
         };
     }
+    tracing::Span::current().record("ingestion.operation", command.operation().as_str());
     let dsn = config.postgres_dsn.clone();
     let ca_pem = config.postgres_ca_pem.clone();
     let receipt = tokio::task::block_in_place(|| {
@@ -925,6 +927,38 @@ async fn process_message<M: Message>(
         Err(CommandPersistenceError::Invalid) => unreachable!("receipt lookup is read-only"),
         Err(CommandPersistenceError::Conflict) => unreachable!("receipt lookup is read-only"),
     };
+    if command.operation() == crate::worker::FileOperation::Delete {
+        let persisted = tokio::task::block_in_place(|| {
+            persist_ingestion_delete_command(&mut postgres, &scope, &command).map_err(|error| {
+                if error.is_command_id_conflict() {
+                    CommandPersistenceError::Conflict
+                } else if error.is_invalid_command_data() {
+                    CommandPersistenceError::Invalid
+                } else {
+                    CommandPersistenceError::Transient
+                }
+            })
+        });
+        return match persisted {
+            Ok(crate::CommandOutcome::Applied(_)) => ProcessAction::Commit {
+                outcome: "applied",
+                reason: "none",
+            },
+            Ok(crate::CommandOutcome::Duplicate) => ProcessAction::Commit {
+                outcome: "duplicate",
+                reason: "none",
+            },
+            Err(CommandPersistenceError::Conflict) => ProcessAction::Dlq {
+                reason: "command_id_conflict",
+            },
+            Err(CommandPersistenceError::Invalid) => ProcessAction::Dlq {
+                reason: "parse_failed",
+            },
+            Err(CommandPersistenceError::Transient) => ProcessAction::Retry {
+                dependency: "postgres",
+            },
+        };
+    }
     let source_span = tracing::info_span!(
         "ingestion.source.fetch",
         storage.system = "s3",
@@ -1073,7 +1107,14 @@ async fn fetch_source(
     scope: &crate::worker::AuthenticatedCommitScope,
     command: &crate::worker::IngestionFileCommand,
 ) -> Result<Vec<u8>, SourceError> {
-    let key = source_object_key(scope, command);
+    let key =
+        source_object_key(scope, command).ok_or(SourceError::Permanent("invalid_operation"))?;
+    let expected_size = command
+        .source_size_bytes()
+        .ok_or(SourceError::Permanent("invalid_operation"))?;
+    let expected_digest = command
+        .source_sha256()
+        .ok_or(SourceError::Permanent("invalid_operation"))?;
     let request = minio
         .get_object(&config.minio_bucket, key.as_str())
         .map_err(|_| SourceError::Permanent("invalid_object_key"))?
@@ -1087,7 +1128,7 @@ async fn fetch_source(
             Ok(response) => response,
         };
         let object_size = response.object_size().map_err(|_| SourceError::Transient)?;
-        if object_size != command.source_size_bytes() || object_size > config.max_source_bytes {
+        if object_size != expected_size || object_size > config.max_source_bytes {
             return Err(SourceError::Permanent("source_size_mismatch"));
         }
         response
@@ -1097,12 +1138,12 @@ async fn fetch_source(
     })
     .await
     .map_err(|_| SourceError::Transient)??;
-    if bytes.len() as u64 != command.source_size_bytes() {
+    if bytes.len() as u64 != expected_size {
         return Err(SourceError::Permanent("source_size_mismatch"));
     }
     let digest = Sha256::digest(&bytes);
     let actual: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-    if actual != command.source_sha256() {
+    if actual != expected_digest {
         return Err(SourceError::Permanent("source_digest_mismatch"));
     }
     Ok(bytes.to_vec())
@@ -1204,15 +1245,23 @@ pub fn postgres_runtime_schema_ready(client: &mut postgres::Client) -> bool {
             "SELECT COALESCE(\
                 has_table_privilege(current_user, to_regclass('ingestion_command_receipt'), 'SELECT')\
                 AND has_table_privilege(current_user, to_regclass('ingestion_command_receipt'), 'INSERT')\
+                AND has_table_privilege(current_user, to_regclass('code_node'), 'SELECT')\
                 AND has_table_privilege(current_user, to_regclass('code_node'), 'INSERT')\
                 AND has_table_privilege(current_user, to_regclass('code_node'), 'UPDATE')\
+                AND has_table_privilege(current_user, to_regclass('code_node'), 'DELETE')\
                 AND has_table_privilege(current_user, to_regclass('code_relation'), 'SELECT')\
                 AND has_table_privilege(current_user, to_regclass('code_relation'), 'INSERT')\
                 AND has_table_privilege(current_user, to_regclass('code_relation'), 'DELETE')\
                 AND has_table_privilege(current_user, to_regclass('code_chunk'), 'SELECT')\
                 AND has_table_privilege(current_user, to_regclass('code_chunk'), 'INSERT')\
                 AND has_table_privilege(current_user, to_regclass('code_chunk'), 'DELETE')\
-                AND has_table_privilege(current_user, to_regclass('outbox'), 'INSERT'),\
+                AND has_table_privilege(current_user, to_regclass('code_embedding'), 'SELECT')\
+                AND has_table_privilege(current_user, to_regclass('code_embedding'), 'DELETE')\
+                AND has_table_privilege(current_user, to_regclass('lineage'), 'DELETE')\
+                AND has_table_privilege(current_user, to_regclass('outbox'), 'INSERT')\
+                AND has_sequence_privilege(\
+                    current_user, pg_get_serial_sequence('outbox', 'event_sequence'), 'USAGE'\
+                ),\
                 false\
             )",
             &[],

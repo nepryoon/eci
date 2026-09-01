@@ -32,7 +32,7 @@ func TestStreamImpactIntegration(t *testing.T) {
 
 	t.Run("Scenario3_CapTruncatesWithRealGraph", func(t *testing.T) {
 		var events []impactanalysis.ImpactEvent
-		err := impactanalysis.StreamImpact(ctx, driver, "ia-fanout-seed", 1, 3, nil, nil,
+		err := impactanalysis.StreamImpact(ctx, driver, "ia-fanout-seed", impactanalysis.Options{MaxDepth: 1, MaxNodes: 3, FanoutCap: 100, EdgeTypes: []string{"CALLS"}, Direction: "REVERSE"},
 			func(e impactanalysis.ImpactEvent) error { events = append(events, e); return nil })
 		if err != nil {
 			t.Fatalf("StreamImpact: %v", err)
@@ -48,7 +48,7 @@ func TestStreamImpactIntegration(t *testing.T) {
 
 	t.Run("Scenario4_NoTruncationWhenUnderCap", func(t *testing.T) {
 		var events []impactanalysis.ImpactEvent
-		err := impactanalysis.StreamImpact(ctx, driver, "ia-fanout-seed", 1, 100, nil, nil,
+		err := impactanalysis.StreamImpact(ctx, driver, "ia-fanout-seed", impactanalysis.Options{MaxDepth: 1, MaxNodes: 100, FanoutCap: 100, EdgeTypes: []string{"CALLS"}, Direction: "REVERSE"},
 			func(e impactanalysis.ImpactEvent) error { events = append(events, e); return nil })
 		if err != nil {
 			t.Fatalf("StreamImpact: %v", err)
@@ -64,7 +64,7 @@ func TestStreamImpactIntegration(t *testing.T) {
 
 	t.Run("Scenario5_UnknownEntryNodeYieldsEmptyProgressNoError", func(t *testing.T) {
 		var events []impactanalysis.ImpactEvent
-		err := impactanalysis.StreamImpact(ctx, driver, "does-not-exist-anywhere", 3, 100, nil, nil,
+		err := impactanalysis.StreamImpact(ctx, driver, "does-not-exist-anywhere", impactanalysis.Options{MaxDepth: 3, MaxNodes: 100, FanoutCap: 100, EdgeTypes: []string{"CALLS"}, Direction: "REVERSE"},
 			func(e impactanalysis.ImpactEvent) error { events = append(events, e); return nil })
 		if err != nil {
 			t.Fatalf("atteso nessun errore per entry_node_id inesistente, ottenuto: %v", err)
@@ -80,7 +80,7 @@ func TestStreamImpactIntegration(t *testing.T) {
 
 	t.Run("EdgeCase_ShortestPathWinsWithRealMultiPathGraph", func(t *testing.T) {
 		var events []impactanalysis.ImpactEvent
-		err := impactanalysis.StreamImpact(ctx, driver, "ia-shared-seed", 3, 100, nil, nil,
+		err := impactanalysis.StreamImpact(ctx, driver, "ia-shared-seed", impactanalysis.Options{MaxDepth: 3, MaxNodes: 100, FanoutCap: 100, EdgeTypes: []string{"CALLS", "IMPLEMENTS", "EXTENDS"}, Direction: "REVERSE"},
 			func(e impactanalysis.ImpactEvent) error { events = append(events, e); return nil })
 		if err != nil {
 			t.Fatalf("StreamImpact: %v", err)

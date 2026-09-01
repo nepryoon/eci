@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -81,6 +82,9 @@ func TestSinkGraphConsumer(t *testing.T) {
 	t.Run("Scenario5_InvalidEnumDiscardedNoNeo4jWrite", func(t *testing.T) {
 		scenario5InvalidEnumDiscardedNoNeo4jWrite(t, ctx, st)
 	})
+	t.Run("SPEC073_DeleteRelationAndNodeIdempotently", func(t *testing.T) {
+		spec073DeleteRelationAndNodeIdempotently(t, ctx, st)
+	})
 	t.Run("T6_7_GDSPartitionInvalidatedOnScopeAndTopologyMutation", func(t *testing.T) {
 		t67GDSPartitionInvalidatedOnScopeAndTopologyMutation(t, ctx, st)
 	})
@@ -90,6 +94,90 @@ func TestSinkGraphConsumer(t *testing.T) {
 	t.Run("Review_FailedNeo4jWriteDoesNotMarkProcessed", func(t *testing.T) {
 		reviewFailedNeo4jWriteDoesNotMarkProcessed(t, st)
 	})
+	t.Run("Review_OlderRetryCannotRecreateDeletedNode", func(t *testing.T) {
+		reviewOlderRetryCannotRecreateDeletedNode(t, ctx, st)
+	})
+	t.Run("Review_OldRelationUUIDCannotDeleteNewLogicalEdge", func(t *testing.T) {
+		reviewOldRelationUUIDCannotDeleteNewLogicalEdge(t, ctx, st)
+	})
+}
+
+func reviewOldRelationUUIDCannotDeleteNewLogicalEdge(t *testing.T, ctx context.Context, st *stack) {
+	deps := newDeps(st)
+	fromID := uniqueID(t, "relation-order-from")
+	toID := uniqueID(t, "relation-order-to")
+	for _, node := range []struct{ id, name string }{{fromID, "From"}, {toID, "To"}} {
+		outcome, err := consumer.ProcessMessage(
+			ctx, deps, consumer.TopicCodeNode,
+			codeNodePayload(node.id, node.name, "Function", "go", "relation-order.go"),
+			eventHeaders(uniqueEventID(t), "UPSERT"),
+		)
+		if err != nil || outcome != consumer.OutcomeMerged {
+			t.Fatalf("seed node outcome=%v err=%v", outcome, err)
+		}
+	}
+
+	newRelationID := uuid.NewString()
+	newPayload, _ := json.Marshal(map[string]any{
+		"id": newRelationID, "domain": "code", "rel_type": "CALLS",
+		"from_id": fromID, "to_id": toID, "weight": 1,
+	})
+	outcome, err := consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeRelation, newPayload,
+		eventHeadersAt(uniqueEventID(t), "UPSERT", 40_001),
+	)
+	if err != nil || outcome != consumer.OutcomeMerged {
+		t.Fatalf("new logical relation outcome=%v err=%v", outcome, err)
+	}
+
+	oldTombstone, _ := json.Marshal(map[string]any{
+		"id": uuid.NewString(), "rel_type": "CALLS",
+		"from_id": fromID, "to_id": toID,
+		"provenance": map[string]any{
+			"tenant_id": tenantPlaceholder, "repo": repoPlaceholder,
+			"acl_group": aclPlaceholder, "path": "relation-order.go",
+		},
+	})
+	delayedID := uniqueEventID(t)
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeRelation, oldTombstone,
+		eventHeadersAt(delayedID, "DELETE", 40_000),
+	)
+	if err != nil || outcome != consumer.OutcomeDuplicate {
+		t.Fatalf("delayed old tombstone outcome=%v err=%v", outcome, err)
+	}
+	if count := countRelationships(t, ctx, st.driver, fromID, toID, "CALLS"); count != 1 {
+		t.Fatalf("old relation UUID deleted replacement logical edge: count=%d", count)
+	}
+	assertProcessedEvent(t, ctx, st.db, delayedID)
+}
+
+func reviewOlderRetryCannotRecreateDeletedNode(t *testing.T, ctx context.Context, st *stack) {
+	deps := newDeps(st)
+	nodeID := uniqueID(t, "ordered-delete")
+	deleteID := uniqueEventID(t)
+	outcome, err := consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeNode,
+		codeNodeTombstone(nodeID, "ordered.go", aclPlaceholder),
+		eventHeadersAt(deleteID, "DELETE", 20_000),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("newer delete outcome=%v err=%v", outcome, err)
+	}
+
+	staleID := uniqueEventID(t)
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeNode,
+		codeNodePayload(nodeID, "StaleNode", "Function", "go", "ordered.go"),
+		eventHeadersAt(staleID, "UPSERT", 19_999),
+	)
+	if err != nil || outcome != consumer.OutcomeDuplicate {
+		t.Fatalf("stale retry outcome=%v err=%v", outcome, err)
+	}
+	if count := countNodesWithID(t, ctx, st.driver, nodeID); count != 0 {
+		t.Fatalf("stale UPSERT recreated deleted node: count=%d", count)
+	}
+	assertProcessedEvent(t, ctx, st.db, staleID)
 }
 
 func reviewFailedNeo4jWriteDoesNotMarkProcessed(t *testing.T, st *stack) {
@@ -110,7 +198,7 @@ func reviewFailedNeo4jWriteDoesNotMarkProcessed(t *testing.T, st *stack) {
 		consumer.Deps{DB: st.db, Neo4j: driver, Logf: t.Logf},
 		consumer.TopicCodeNode,
 		codeNodePayload(uniqueID(t, "failed-write"), "FailedWrite", "Method", "go", "failed.go"),
-		[]kafka.Header{{Key: "event_id", Value: []byte(eventID)}},
+		eventHeaders(eventID, "UPSERT"),
 	)
 	if err == nil {
 		t.Fatal("expected unreachable Neo4j write to fail")
@@ -139,7 +227,7 @@ func t67GDSPartitionInvalidatedOnScopeAndTopologyMutation(t *testing.T, ctx cont
 		tenantPlaceholder, repoPlaceholder, "admins",
 	)
 	outcome, err := consumer.ProcessMessage(ctx, newDeps(st), consumer.TopicCodeNode, movePayload,
-		[]kafka.Header{{Key: "event_id", Value: []byte(uniqueEventID(t))}})
+		eventHeaders(uniqueEventID(t), "UPSERT"))
 	if err != nil || outcome != consumer.OutcomeMerged {
 		t.Fatalf("scope move outcome=%v err=%v", outcome, err)
 	}
@@ -151,7 +239,7 @@ func t67GDSPartitionInvalidatedOnScopeAndTopologyMutation(t *testing.T, ctx cont
 	setImpactProperties(t, ctx, st.driver, oldPeer, relationPeer)
 	relationPayload := codeRelationPayload(oldPeer, relationPeer, "CALLS", intPtr(1))
 	outcome, err = consumer.ProcessMessage(ctx, newDeps(st), consumer.TopicCodeRelation, relationPayload,
-		[]kafka.Header{{Key: "event_id", Value: []byte(uniqueEventID(t))}})
+		eventHeaders(uniqueEventID(t), "UPSERT"))
 	if err != nil || outcome != consumer.OutcomeMerged {
 		t.Fatalf("relation mutation outcome=%v err=%v", outcome, err)
 	}
@@ -182,7 +270,7 @@ func t67ConcurrentScopeReadsSerializeAfterEntityLocks(t *testing.T, ctx context.
 				tenantPlaceholder, repoPlaceholder, finalACL,
 			)
 			outcome, err := consumer.ProcessMessage(ctx, newDeps(st), consumer.TopicCodeNode, payload,
-				[]kafka.Header{{Key: "event_id", Value: []byte(uniqueEventID(t))}})
+				eventHeaders(uniqueEventID(t), "UPSERT"))
 			completed <- processResult{outcome: outcome, err: err}
 		}()
 
@@ -221,7 +309,7 @@ func t67ConcurrentScopeReadsSerializeAfterEntityLocks(t *testing.T, ctx context.
 		go func() {
 			payload := codeRelationPayload(fromID, toID, "CALLS", intPtr(1))
 			outcome, err := consumer.ProcessMessage(ctx, newDeps(st), consumer.TopicCodeRelation, payload,
-				[]kafka.Header{{Key: "event_id", Value: []byte(uniqueEventID(t))}})
+				eventHeaders(uniqueEventID(t), "UPSERT"))
 			completed <- processResult{outcome: outcome, err: err}
 		}()
 
@@ -566,6 +654,12 @@ func scenario2RedeliveryDoesNotDuplicate(t *testing.T, ctx context.Context, st *
 	); err != nil {
 		t.Fatalf("rimozione marker per simulare failure window: %v", err)
 	}
+	if _, err := st.db.ExecContext(ctx, `
+		DELETE FROM consumer_projection_watermark
+		WHERE consumer_name=$1 AND aggregate_type='CodeNode' AND aggregate_id=$2`,
+		consumer.ConsumerName, nodeID); err != nil {
+		t.Fatalf("rimozione watermark per simulare rollback completion: %v", err)
+	}
 	replayOutcome, err := consumer.ProcessMessage(ctx, deps, msg1.Topic, msg1.Value, msg1.Headers)
 	if err != nil {
 		t.Fatalf("ProcessMessage dopo marker failure simulata: %v", err)
@@ -726,6 +820,106 @@ func scenario5InvalidEnumDiscardedNoNeo4jWrite(t *testing.T, ctx context.Context
 			t.Fatalf("nodi con id=%s (endpoint to) = %d, want 0", toID, n)
 		}
 	})
+}
+
+func spec073DeleteRelationAndNodeIdempotently(t *testing.T, ctx context.Context, st *stack) {
+	deps := newDeps(st)
+	fromID := uniqueID(t, "delete-from")
+	toID := uniqueID(t, "delete-to")
+	path := "delete.go"
+	for _, node := range []struct{ id, name string }{{fromID, "From"}, {toID, "To"}} {
+		outcome, err := consumer.ProcessMessage(
+			ctx, deps, consumer.TopicCodeNode,
+			codeNodePayload(node.id, node.name, "Function", "go", path),
+			eventHeaders(uniqueEventID(t), "UPSERT"),
+		)
+		if err != nil || outcome != consumer.OutcomeMerged {
+			t.Fatalf("seed node outcome=%v err=%v", outcome, err)
+		}
+	}
+	relationPayload := codeRelationPayload(fromID, toID, "CALLS", intPtr(1))
+	outcome, err := consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeRelation, relationPayload,
+		eventHeaders(uniqueEventID(t), "UPSERT"),
+	)
+	if err != nil || outcome != consumer.OutcomeMerged {
+		t.Fatalf("seed relation outcome=%v err=%v", outcome, err)
+	}
+
+	relationDeleteID := uniqueEventID(t)
+	relationDelete := codeRelationTombstone(fromID, toID, "CALLS", path, aclPlaceholder)
+	generationBeforeRelationDelete := readPartitionGeneration(t, ctx, st.driver, aclPlaceholder)
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeRelation, relationDelete,
+		eventHeaders(relationDeleteID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("relation delete outcome=%v err=%v", outcome, err)
+	}
+	if countRelationships(t, ctx, st.driver, fromID, toID, "CALLS") != 0 {
+		t.Fatal("relation remains after tombstone")
+	}
+	if got := readPartitionGeneration(t, ctx, st.driver, aclPlaceholder); got != generationBeforeRelationDelete+1 {
+		t.Fatalf("relation delete generation=%d want=%d", got, generationBeforeRelationDelete+1)
+	}
+	assertProcessedEvent(t, ctx, st.db, relationDeleteID)
+
+	if _, err := st.db.ExecContext(ctx,
+		"DELETE FROM processed_events WHERE event_id=$1 AND consumer_name=$2",
+		relationDeleteID, consumer.ConsumerName,
+	); err != nil {
+		t.Fatal(err)
+	}
+	relationAggregateID, err := consumer.RelationAggregateID("CALLS", fromID, toID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+		DELETE FROM consumer_projection_watermark
+		WHERE consumer_name=$1 AND aggregate_type='CodeRelation' AND aggregate_id=$2`,
+		consumer.ConsumerName, relationAggregateID); err != nil {
+		t.Fatal(err)
+	}
+	generationBeforeReplay := readPartitionGeneration(t, ctx, st.driver, aclPlaceholder)
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeRelation, relationDelete,
+		eventHeaders(relationDeleteID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("relation replay outcome=%v err=%v", outcome, err)
+	}
+	if got := readPartitionGeneration(t, ctx, st.driver, aclPlaceholder); got != generationBeforeReplay {
+		t.Fatalf("no-op relation replay advanced generation: %d -> %d", generationBeforeReplay, got)
+	}
+	assertProcessedEvent(t, ctx, st.db, relationDeleteID)
+
+	wrongScopeID := uniqueEventID(t)
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeNode,
+		codeNodeTombstone(fromID, path, "admins"),
+		eventHeaders(wrongScopeID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeInvalidSkipped {
+		t.Fatalf("scope mismatch outcome=%v err=%v", outcome, err)
+	}
+	if countNodesWithID(t, ctx, st.driver, fromID) != 1 {
+		t.Fatal("scope mismatch deleted node")
+	}
+	assertNoProcessedEvent(t, ctx, st.db, wrongScopeID)
+
+	nodeDeleteID := uniqueEventID(t)
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeNode,
+		codeNodeTombstone(fromID, path, aclPlaceholder),
+		eventHeaders(nodeDeleteID, "DELETE"),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("node delete outcome=%v err=%v", outcome, err)
+	}
+	if countNodesWithID(t, ctx, st.driver, fromID) != 0 {
+		t.Fatal("node remains after tombstone")
+	}
+	assertProcessedEvent(t, ctx, st.db, nodeDeleteID)
 }
 
 // ============================================================
@@ -900,7 +1094,7 @@ func newDeps(st *stack) consumer.Deps {
 
 func produce(t *testing.T, ctx context.Context, brokers []string, topic, key string, value []byte, eventID, traceID string) {
 	t.Helper()
-	headers := []kafka.Header{{Key: "event_id", Value: []byte(eventID)}}
+	headers := eventHeaders(eventID, "UPSERT")
 	if traceID != "" {
 		headers = append(headers, kafka.Header{Key: "trace_id", Value: []byte(traceID)})
 	}
@@ -915,6 +1109,20 @@ func produce(t *testing.T, ctx context.Context, brokers []string, topic, key str
 		t.Fatalf("produzione messaggio sintetico su %s: %v", topic, err)
 	}
 }
+
+func eventHeaders(eventID, operation string) []kafka.Header {
+	return eventHeadersAt(eventID, operation, syntheticEventSequence.Add(1))
+}
+
+func eventHeadersAt(eventID, operation string, sequence int64) []kafka.Header {
+	return []kafka.Header{
+		{Key: "event_id", Value: []byte(eventID)},
+		{Key: "event_type", Value: []byte(operation)},
+		{Key: "event_sequence", Value: []byte(fmt.Sprintf("%d", sequence))},
+	}
+}
+
+var syntheticEventSequence atomic.Int64
 
 // fetchAndProcessOnce usa un consumer group DEDICATO (univoco per
 // chiamata) — ogni scenario legge il proprio messaggio in isolamento,
@@ -1010,6 +1218,31 @@ func codeRelationPayload(fromID, toID, relType string, weight *int) []byte {
 		"from_id":  fromID,
 		"to_id":    toID,
 		"weight":   weight,
+	}
+	out, _ := json.Marshal(payload)
+	return out
+}
+
+func codeNodeTombstone(id, path, acl string) []byte {
+	payload := map[string]any{
+		"id": id,
+		"provenance": map[string]any{
+			"tenant_id": tenantPlaceholder, "repo": repoPlaceholder,
+			"acl_group": acl, "path": path,
+		},
+	}
+	out, _ := json.Marshal(payload)
+	return out
+}
+
+func codeRelationTombstone(fromID, toID, relType, path, acl string) []byte {
+	payload := map[string]any{
+		"id": fromID + "->" + toID, "rel_type": relType,
+		"from_id": fromID, "to_id": toID,
+		"provenance": map[string]any{
+			"tenant_id": tenantPlaceholder, "repo": repoPlaceholder,
+			"acl_group": acl, "path": path,
+		},
 	}
 	out, _ := json.Marshal(payload)
 	return out
@@ -1266,6 +1499,29 @@ func countNodesWithID(t *testing.T, ctx context.Context, driver neo4j.DriverWith
 	return count
 }
 
+func countRelationships(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, fromID, toID, relType string) int64 {
+	t.Helper()
+	session := driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+	query := fmt.Sprintf(
+		"MATCH (:CodeNode {id: $from_id})-[r:%s]->(:CodeNode {id: $to_id}) RETURN count(r) AS c",
+		relType,
+	)
+	result, err := session.Run(ctx, query, map[string]any{"from_id": fromID, "to_id": toID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := result.Single(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, _, err := neo4j.GetRecordValue[int64](record, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
 func readRelWeight(t *testing.T, ctx context.Context, driver neo4j.DriverWithContext, fromID, toID, relType string) float64 {
 	t.Helper()
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
@@ -1297,6 +1553,20 @@ func assertProcessedEvent(t *testing.T, ctx context.Context, db *sql.DB, eventID
 	}
 	if consumerName != consumer.ConsumerName {
 		t.Errorf("processed_events.consumer_name = %q, want %q", consumerName, consumer.ConsumerName)
+	}
+}
+
+func assertNoProcessedEvent(t *testing.T, ctx context.Context, db *sql.DB, eventID string) {
+	t.Helper()
+	var count int
+	if err := db.QueryRowContext(ctx,
+		"SELECT count(*) FROM processed_events WHERE event_id=$1 AND consumer_name=$2",
+		eventID, consumer.ConsumerName,
+	).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("unexpected processed marker for %s", eventID)
 	}
 }
 

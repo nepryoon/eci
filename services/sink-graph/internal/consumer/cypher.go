@@ -62,6 +62,72 @@ SET endpoint._eci_write_lock = coalesce(endpoint._eci_write_lock, 0) + 1
 REMOVE endpoint._eci_write_lock
 RETURN count(endpoint) AS locked`
 
+// Delete locks never MERGE: a replay after projection removal must not
+// recreate placeholder nodes merely to serialize a no-op tombstone.
+const lockDeleteCodeNodeQuery = `// sink-graph-lock-delete-code-node
+MATCH (n:CodeNode {id: $id})
+SET n._eci_write_lock = coalesce(n._eci_write_lock, 0) + 1
+REMOVE n._eci_write_lock
+RETURN n.id AS id`
+
+const checkDeleteCodeNodeScopeQuery = `MATCH (n:CodeNode {id: $id})
+RETURN n.tenant_id = $tenant_id AND n.repo = $repo
+  AND n.acl_group = $acl_group AND n.path = $path AS scope_matches`
+
+const lockDeleteRelationEndpointsQuery = `// sink-graph-lock-delete-relation-endpoints
+UNWIND [$from_id, $to_id] AS endpoint_id
+WITH DISTINCT endpoint_id
+ORDER BY endpoint_id
+MATCH (endpoint:CodeNode {id: endpoint_id})
+SET endpoint._eci_write_lock = coalesce(endpoint._eci_write_lock, 0) + 1
+REMOVE endpoint._eci_write_lock
+RETURN count(endpoint) AS locked`
+
+// A node tombstone checks the complete canonical scope before deleting. Every
+// adjacent endpoint partition is invalidated because DETACH DELETE changes its
+// reachability too. No MATCH means a replay is an external no-op.
+const deleteCodeNodeQuery = `MATCH (n:CodeNode {id: $id})
+WHERE n.tenant_id = $tenant_id AND n.repo = $repo
+  AND n.acl_group = $acl_group AND n.path = $path
+OPTIONAL MATCH (n)--(neighbor:CodeNode)
+WITH n, collect(DISTINCT {
+  tenant_id: neighbor.tenant_id, repo: neighbor.repo, acl_group: neighbor.acl_group
+}) + [{tenant_id: n.tenant_id, repo: n.repo, acl_group: n.acl_group}] AS scopes
+UNWIND scopes AS scope
+WITH DISTINCT n, scope.tenant_id AS scope_tenant_id,
+  scope.repo AS scope_repo, scope.acl_group AS scope_acl_group
+ORDER BY scope_tenant_id, scope_repo, scope_acl_group
+FOREACH (_ IN CASE WHEN scope_tenant_id IS NOT NULL AND scope_repo IS NOT NULL
+  AND scope_acl_group IS NOT NULL THEN [1] ELSE [] END |
+  MERGE (p:GDSPartition {tenant_id: scope_tenant_id, repo: scope_repo, acl_group: scope_acl_group})
+  ON CREATE SET p.generation = 1, p.write_lock = 0
+  ON MATCH SET p.generation = coalesce(p.generation, 0) + 1
+)
+WITH DISTINCT n
+DETACH DELETE n`
+
+func deleteCodeRelationQuery(relType string) (string, error) {
+	if !allowedRelTypes[relType] {
+		return "", fmt.Errorf("rel_type non valido")
+	}
+	return "MATCH (from:CodeNode {id: $from_id})\n" +
+		"MATCH (to:CodeNode {id: $to_id})\n" +
+		"MATCH (from)-[r:" + relType + "]->(to)\n" +
+		"WITH from, to, collect(r) AS relationships, [\n" +
+		"  {tenant_id: from.tenant_id, repo: from.repo, acl_group: from.acl_group},\n" +
+		"  {tenant_id: to.tenant_id, repo: to.repo, acl_group: to.acl_group}\n" +
+		"] AS scopes\n" +
+		"UNWIND scopes AS scope\n" +
+		"WITH DISTINCT relationships, scope.tenant_id AS scope_tenant_id,\n" +
+		"  scope.repo AS scope_repo, scope.acl_group AS scope_acl_group\n" +
+		"ORDER BY scope_tenant_id, scope_repo, scope_acl_group\n" +
+		"MERGE (p:GDSPartition {tenant_id: scope_tenant_id, repo: scope_repo, acl_group: scope_acl_group})\n" +
+		"ON CREATE SET p.generation = 1, p.write_lock = 0\n" +
+		"ON MATCH SET p.generation = coalesce(p.generation, 0) + 1\n" +
+		"WITH DISTINCT relationships\n" +
+		"FOREACH (rel IN relationships | DELETE rel)", nil
+}
+
 // mergeCodeNodeQuery costruisce la query di MERGE per un CodeNode (SPEC-015
 // §2). I tre frammenti Cypher illustrativi della SPEC (query base + "SOLO
 // per Method" + "SOLO per File") sono unificati qui in una singola query

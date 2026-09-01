@@ -283,7 +283,10 @@ func startE2EKafka(t *testing.T, ctx context.Context, networkName string) []stri
 	// PRIMA che un topic esista riceve zero partizioni in quell'assegna-
 	// zione iniziale e non le riscopre da solo quando Debezium lo crea più
 	// tardi (lazy auto-create al primo evento CDC).
-	ensureKafkaTopics(t, ctx, brokers, topicCodeChunk)
+	ensureKafkaTopics(t, ctx, brokers,
+		topicCodeChunk,
+		topicCodeChunk+".retry.sink-search",
+	)
 
 	return brokers
 }
@@ -319,10 +322,10 @@ func ensureKafkaTopics(t *testing.T, ctx context.Context, brokers []string, topi
 func startKafkaConnect(t *testing.T, ctx context.Context, networkName string) testcontainers.Container {
 	t.Helper()
 	req := testcontainers.ContainerRequest{
-		// debezium/connect:latest non esiste su Docker Hub (SPEC-007 §10)
-		// — quay.io/debezium/connect:latest riusato qui, stesso di
+		// debezium/connect:latest non esiste su Docker Hub (deviazione storica SPEC-007 §10)
+		// — immagine ufficiale bloccata per digest, stessa di
 		// SPEC-008/SPEC-038/SPEC-039.
-		Image: "quay.io/debezium/connect:latest",
+		Image: "quay.io/debezium/connect@sha256:698f0559e667a242f962221079e75917b2b7a3ad4de62661e977628da0e33b45",
 		Env: map[string]string{
 			"BOOTSTRAP_SERVERS":    e2eKafkaAlias + ":9092",
 			"GROUP_ID":             "reconcile-e2e-opensearch-connect",
@@ -338,7 +341,7 @@ func startKafkaConnect(t *testing.T, ctx context.Context, networkName string) te
 	}
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{ContainerRequest: req, Started: true})
 	if err != nil {
-		t.Fatalf("avvio container quay.io/debezium/connect:latest: %v", err)
+		t.Fatalf("avvio container Debezium bloccato per digest: %v", err)
 	}
 	t.Cleanup(func() {
 		if t.Failed() {

@@ -17,7 +17,7 @@
     "transforms.outbox.route.by.field": "aggregate_type",
     "transforms.outbox.table.field.event.key": "aggregate_id",
     "transforms.outbox.table.expand.json.payload": "true",
-    "transforms.outbox.table.fields.additional.placement": "trace_id:header:trace_id,id:header:event_id",
+    "transforms.outbox.table.fields.additional.placement": "trace_id:header:trace_id,id:header:event_id,event_type:header:event_type,event_sequence:header:event_sequence",
     "key.converter": "org.apache.kafka.connect.json.JsonConverter",
     "key.converter.schemas.enable": "false",
     "value.converter": "org.apache.kafka.connect.json.JsonConverter",

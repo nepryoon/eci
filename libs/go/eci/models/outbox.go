@@ -13,16 +13,19 @@ type OutboxEvent struct {
 	AggregateType string          `json:"aggregate_type"`
 	AggregateID   string          `json:"aggregate_id"`
 	EventType     string          `json:"event_type"`
+	EventSequence int64           `json:"event_sequence"`
 	Payload       json.RawMessage `json:"payload"`
 	CreatedAt     string          `json:"created_at"`
 	TraceID       *string         `json:"trace_id,omitempty"`
 }
 
 var outboxRequiredFields = []string{
-	"id", "aggregate_type", "aggregate_id", "event_type", "payload", "created_at",
+	"id", "aggregate_type", "aggregate_id", "event_type", "event_sequence", "payload", "created_at",
 }
 
-var outboxAggregateTypes = map[string]bool{"CodeNode": true, "CodeRelation": true}
+var outboxAggregateTypes = map[string]bool{
+	"CodeNode": true, "CodeRelation": true, "CodeChunk": true, "CodeEmbedding": true,
+}
 
 var outboxEventTypes = map[string]bool{"UPSERT": true, "DELETE": true}
 
@@ -53,6 +56,9 @@ func ParseOutboxEvent(data []byte) (*OutboxEvent, error) {
 	}
 	if !outboxEventTypes[event.EventType] {
 		return nil, fmt.Errorf("invalid event_type %q", event.EventType)
+	}
+	if event.EventSequence <= 0 {
+		return nil, fmt.Errorf("invalid event_sequence")
 	}
 
 	return &event, nil

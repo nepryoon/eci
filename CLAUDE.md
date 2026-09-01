@@ -5,10 +5,10 @@
 
 GraphRAG system over multi-million-LoC codebases. Microservices, hybrid storage
 (Neo4j + Qdrant + OpenSearch) coordinated via CDC. Full architecture in
-`docs/add/` (read-only). Contracts in `contracts/` (read-only).
+`docs/ADD_Enterprise_Code_Intelligence_consolidato.md` (read-only). Contracts in `contracts/` (read-only).
 
 ## Source-of-truth hierarchy (on conflict: STOP and ask, or open an ADR)
-docs/add/ (ADD) > contracts/ > docs/specs/ > existing code > your judgement.
+docs/ADD_Enterprise_Code_Intelligence_consolidato.md (ADD) > accepted ADRs > contracts/ > verified specs > existing code > your judgement.
 
 ## Non-negotiable architectural invariants (from the ADD)
 - PostgreSQL is the ONLY source of truth. Neo4j/Qdrant/OpenSearch are
@@ -43,7 +43,7 @@ task build | lint | test # all languages
 task test:integration    # testcontainers (requires docker)
 task proto:gen           # buf codegen after proto changes (needs ADR)
 task db:migrate          # PG + Neo4j migrations
-task guard               # verifies contracts/ and docs/add/ untouched
+task guard               # verifies contracts/ and the consolidated ADD are protected
 
 ## Workflow rules
 1. Implement exactly ONE SPEC (docs/specs/SPEC-NNN-*.md) per session/PR.
@@ -60,4 +60,3 @@ lint green · unit+integration tests green · idempotency proven where relevant
 ```
 
 Lo stesso file funziona identico come `.cursorrules` (symlink). In inglese perché è un artefatto operativo per il tool ed è portabile; le SPEC restano in italiano.
-

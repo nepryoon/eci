@@ -11,7 +11,6 @@ package hybridsearch_test
 import (
 	"context"
 	"encoding/json"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -244,12 +243,14 @@ func seedContentChunks(t *testing.T, ctx context.Context, client *opensearchapi.
 	mapping := map[string]any{
 		"mappings": map[string]any{
 			"properties": map[string]any{
-				"text":        map[string]any{"type": "text"},
-				"entity_id":   map[string]any{"type": "keyword"},
-				"chunk_index": map[string]any{"type": "integer"},
-				"tenant_id":   map[string]any{"type": "keyword"},
-				"repo":        map[string]any{"type": "keyword"},
-				"acl_group":   map[string]any{"type": "keyword"},
+				"text":           map[string]any{"type": "text"},
+				"entity_id":      map[string]any{"type": "keyword"},
+				"chunk_index":    map[string]any{"type": "integer"},
+				"chunk_id":       map[string]any{"type": "keyword"},
+				"event_sequence": map[string]any{"type": "long"},
+				"tenant_id":      map[string]any{"type": "keyword"},
+				"repo":           map[string]any{"type": "keyword"},
+				"acl_group":      map[string]any{"type": "keyword"},
 			},
 		},
 	}
@@ -264,18 +265,20 @@ func seedContentChunks(t *testing.T, ctx context.Context, client *opensearchapi.
 	// scenario 4 verifica che la concatenazione segua chunk_index
 	// crescente, non l'ordine di arrivo/inserimento.
 	type chunk struct {
-		EntityID   string `json:"entity_id"`
-		ChunkIndex int    `json:"chunk_index"`
-		Text       string `json:"text"`
-		TenantID   string `json:"tenant_id"`
-		Repo       string `json:"repo"`
-		ACLGroup   string `json:"acl_group"`
+		ChunkID       string `json:"chunk_id"`
+		EventSequence int64  `json:"event_sequence"`
+		EntityID      string `json:"entity_id"`
+		ChunkIndex    int    `json:"chunk_index"`
+		Text          string `json:"text"`
+		TenantID      string `json:"tenant_id"`
+		Repo          string `json:"repo"`
+		ACLGroup      string `json:"acl_group"`
 	}
 	chunks := []chunk{
-		{EntityID: contentGraphDepID, ChunkIndex: 2, Text: "CCC", TenantID: "tenant-test", Repo: "local", ACLGroup: "developers"},
-		{EntityID: contentGraphDepID, ChunkIndex: 0, Text: "AAA", TenantID: "tenant-test", Repo: "local", ACLGroup: "developers"},
-		{EntityID: contentGraphDepID, ChunkIndex: 1, Text: "BBB", TenantID: "tenant-test", Repo: "local", ACLGroup: "developers"},
-		{EntityID: contentGraphDepID, ChunkIndex: 3, Text: "FOREIGN_SECRET", TenantID: "tenant-b", Repo: "local", ACLGroup: "developers"},
+		{ChunkID: contentGraphDepID + "-0", EventSequence: 1, EntityID: contentGraphDepID, ChunkIndex: 2, Text: "CCC", TenantID: "tenant-test", Repo: "local", ACLGroup: "developers"},
+		{ChunkID: contentGraphDepID + "-1", EventSequence: 2, EntityID: contentGraphDepID, ChunkIndex: 0, Text: "AAA", TenantID: "tenant-test", Repo: "local", ACLGroup: "developers"},
+		{ChunkID: contentGraphDepID + "-2", EventSequence: 3, EntityID: contentGraphDepID, ChunkIndex: 1, Text: "BBB", TenantID: "tenant-test", Repo: "local", ACLGroup: "developers"},
+		{ChunkID: contentGraphDepID + "-3", EventSequence: 4, EntityID: contentGraphDepID, ChunkIndex: 3, Text: "FOREIGN_SECRET", TenantID: "tenant-b", Repo: "local", ACLGroup: "developers"},
 	}
 	for i, c := range chunks {
 		body, err := json.Marshal(c)
@@ -284,7 +287,7 @@ func seedContentChunks(t *testing.T, ctx context.Context, client *opensearchapi.
 		}
 		if _, err := client.Index(ctx, opensearchapi.IndexReq{
 			Index:      codeChunksIndex,
-			DocumentID: contentGraphDepID + "-" + strconv.Itoa(i),
+			DocumentID: c.ChunkID,
 			Body:       strings.NewReader(string(body)),
 			Params:     opensearchapi.IndexParams{Refresh: "true"},
 		}); err != nil {

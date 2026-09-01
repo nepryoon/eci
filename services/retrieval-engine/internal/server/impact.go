@@ -1,139 +1,238 @@
-// SPEC-042, T4.2 — ImpactAnalysis: prima RPC streaming del progetto.
-// Riusa lo scaffold proto D7 già esistente (ImpactAnalysisRequest/
-// ImpactedNode/ImpactProgress/ImpactAnalysisEvent), esteso additivamente
-// con max_nodes/domain/repos (ADR-0008) — non le forme nuove proposte
-// letteralmente da SPEC-042 §2, che collidevano per nome con lo scaffold
-// esistente (vedi ADR-0008 per il ragionamento completo).
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"math"
+	"sort"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/eci-project/eci/libs/go/eci/accessscope"
 	retrievalv1 "github.com/eci-project/eci/libs/go/eci/retrieval/v1"
+	"github.com/eci-project/eci/services/retrieval-engine/internal/hybridsearch"
 	"github.com/eci-project/eci/services/retrieval-engine/internal/impactanalysis"
 )
 
-const defaultImpactMaxDepth = 4 // stesso default dichiarato dal commento proto preesistente (D7)
+const (
+	defaultImpactMaxDepth  = 4
+	defaultImpactFanoutCap = 100
+	maxImpactDepth         = 32
+	maxImpactNodes         = 10_000
+	maxImpactFanoutCap     = 1_000
+	maxImpactRepos         = 128
+	maxImpactRepoLength    = 256
+)
 
-// ImpactAnalysis — SPEC-042 §2/§3: reverse reachability bounded in
-// streaming, BFS livello-per-livello (internal/impactanalysis.StreamImpact,
-// T4.2), cap max_nodes sul totale esplorato. max_depth non impostato (0)
-// -> default 4 (commento preesistente sul campo proto, D7); max_nodes non
-// impostato o <= 0 -> errore esplicito PRIMA di avviare la traversata
-// (SPEC-042 §3 scenario 6, nessun default silenzioso — a differenza di
-// max_depth, questo cap non ha un valore "innocuo" da assumere).
+var defaultImpactEdgeTypes = []string{"CALLS", "IMPLEMENTS", "EXTENDS", "OVERRIDES", "DEPENDS_ON", "IMPORTS"}
+
 func (s *Server) ImpactAnalysis(req *retrievalv1.ImpactAnalysisRequest, stream retrievalv1.RetrievalEngine_ImpactAnalysisServer) error {
-	if _, err := accessscope.FromContext(stream.Context()); err != nil {
-		return status.Error(codes.PermissionDenied, "security scope non valido")
+	ctx := stream.Context()
+	scope, err := accessscope.FromContext(ctx)
+	if err != nil {
+		return status.Error(codes.PermissionDenied, "invalid security scope")
+	}
+	opts, emptyIntersection, err := validatedImpactOptions(scope, req)
+	if err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	if req.GetIncludeSourceText() {
+		if s.OpenSearch == nil {
+			return status.Error(codes.FailedPrecondition, "include_source_text requires configured OpenSearch")
+		}
+		opts.HydrateLevel = s.hydrateImpactLevel
+	}
+	if emptyIntersection {
+		return stream.Send(impactAnalysisEventFromInternal(impactanalysis.ImpactEvent{Progress: &impactanalysis.ImpactProgress{CurrentDepth: 1}}))
+	}
+
+	emit := func(event impactanalysis.ImpactEvent) error {
+		return stream.Send(impactAnalysisEventFromInternal(event))
+	}
+	if err := impactanalysis.StreamImpact(ctx, s.Driver, req.GetEntryNodeId(), opts, emit); err != nil {
+		return impactStatusError(err)
+	}
+	return nil
+}
+
+func impactStatusError(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return status.Error(codes.Canceled, "impact analysis canceled")
+	case errors.Is(err, context.DeadlineExceeded):
+		return status.Error(codes.DeadlineExceeded, "impact analysis deadline exceeded")
+	default:
+		return status.Error(codes.Unavailable, "impact analysis dependency failure")
+	}
+}
+
+func validatedImpactOptions(scope accessscope.Scope, req *retrievalv1.ImpactAnalysisRequest) (impactanalysis.Options, bool, error) {
+	if req == nil || req.GetEntryNodeId() == "" {
+		return impactanalysis.Options{}, false, fmt.Errorf("entry_node_id is required")
 	}
 	maxNodes := int(req.GetMaxNodes())
-	if maxNodes <= 0 {
-		return status.Errorf(codes.InvalidArgument, "max_nodes deve essere >= 1, ricevuto %d", maxNodes)
+	if maxNodes <= 0 || maxNodes > maxImpactNodes {
+		return impactanalysis.Options{}, false, fmt.Errorf("max_nodes must be between 1 and %d", maxImpactNodes)
 	}
 	maxDepth := int(req.GetMaxDepth())
 	if maxDepth == 0 {
 		maxDepth = defaultImpactMaxDepth
 	}
+	if maxDepth > maxImpactDepth {
+		return impactanalysis.Options{}, false, fmt.Errorf("max_depth must not exceed %d", maxImpactDepth)
+	}
+	capPerNode := int(req.GetFanoutCapPerHop())
+	if capPerNode == 0 {
+		capPerNode = defaultImpactFanoutCap
+	}
+	if capPerNode > maxImpactFanoutCap {
+		return impactanalysis.Options{}, false, fmt.Errorf("fanout_cap_per_hop must not exceed %d", maxImpactFanoutCap)
+	}
+	score := req.GetMinImpactScore()
+	if math.IsNaN(score) || math.IsInf(score, 0) || score < 0 || score > 1 {
+		return impactanalysis.Options{}, false, fmt.Errorf("min_impact_score must be finite and between 0 and 1")
+	}
 
+	edges := append([]string(nil), defaultImpactEdgeTypes...)
+	if len(req.GetEdgeTypes()) > 0 {
+		edges = make([]string, 0, len(req.GetEdgeTypes()))
+		seen := make(map[string]struct{}, len(req.GetEdgeTypes()))
+		for _, edge := range req.GetEdgeTypes() {
+			value, ok := edgeTypeToString[edge]
+			if !ok {
+				return impactanalysis.Options{}, false, fmt.Errorf("edge_types contains unsupported value %d", edge)
+			}
+			if _, duplicate := seen[value]; !duplicate {
+				seen[value] = struct{}{}
+				edges = append(edges, value)
+			}
+		}
+	}
+	direction := "REVERSE"
+	switch req.GetDirection() {
+	case retrievalv1.TraversalDirection_TRAVERSAL_DIRECTION_UNSPECIFIED, retrievalv1.TraversalDirection_TRAVERSAL_DIRECTION_REVERSE:
+	case retrievalv1.TraversalDirection_TRAVERSAL_DIRECTION_FORWARD:
+		direction = "FORWARD"
+	default:
+		return impactanalysis.Options{}, false, fmt.Errorf("direction contains unsupported value %d", req.GetDirection())
+	}
 	var domain *string
-	if d, ok := domainToString[req.GetDomain()]; ok && req.GetDomain() != retrievalv1.Domain_DOMAIN_UNSPECIFIED {
-		domain = &d
-	}
-	var repo *string
-	if repos := req.GetRepos(); len(repos) > 0 {
-		repo = &repos[0]
-	}
-
-	ctx := stream.Context()
-	emit := func(e impactanalysis.ImpactEvent) error {
-		return stream.Send(impactAnalysisEventFromInternal(e))
+	if req.GetDomain() != retrievalv1.Domain_DOMAIN_UNSPECIFIED {
+		value, ok := domainToString[req.GetDomain()]
+		if !ok {
+			return impactanalysis.Options{}, false, fmt.Errorf("domain contains unsupported value %d", req.GetDomain())
+		}
+		domain = &value
 	}
 
-	if err := impactanalysis.StreamImpact(ctx, s.Driver, req.GetEntryNodeId(), maxDepth, maxNodes, domain, repo, emit); err != nil {
-		return status.Errorf(codes.Internal, "impact analysis: %v", err)
+	repos, empty, err := requestedRepoIntersection(scope.AllowedRepos, req.GetRepos())
+	if err != nil {
+		return impactanalysis.Options{}, false, err
+	}
+	return impactanalysis.Options{
+		MaxDepth: maxDepth, MaxNodes: maxNodes, FanoutCap: capPerNode,
+		EdgeTypes: edges, Direction: direction, MinImpactScore: score,
+		Domain: domain, Repos: repos,
+	}, empty, nil
+}
+
+func requestedRepoIntersection(allowed, requested []string) ([]string, bool, error) {
+	if len(requested) == 0 {
+		return nil, false, nil
+	}
+	if len(requested) > maxImpactRepos {
+		return nil, false, fmt.Errorf("repos must not contain more than %d values", maxImpactRepos)
+	}
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, repo := range allowed {
+		allowedSet[repo] = struct{}{}
+	}
+	intersection := make(map[string]struct{}, len(requested))
+	for _, repo := range requested {
+		if !validImpactRepo(repo) {
+			return nil, false, fmt.Errorf("repos contains an invalid value")
+		}
+		if _, ok := allowedSet[repo]; ok {
+			intersection[repo] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(intersection))
+	for repo := range intersection {
+		result = append(result, repo)
+	}
+	sort.Strings(result)
+	return result, len(result) == 0, nil
+}
+
+func validImpactRepo(repo string) bool {
+	if repo == "" || len(repo) > maxImpactRepoLength || !utf8.ValidString(repo) || strings.TrimSpace(repo) != repo {
+		return false
+	}
+	for _, r := range repo {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) hydrateImpactLevel(ctx context.Context, nodes []*impactanalysis.ImpactNode) error {
+	batch := make([]hybridsearch.RetrievedNode, len(nodes))
+	for i, node := range nodes {
+		batch[i].NodeID = node.NodeID
+	}
+	if err := hybridsearch.HydrateSourceText(ctx, s.OpenSearch, batch); err != nil {
+		return err
+	}
+	for i := range nodes {
+		nodes[i].SourceText = batch[i].SourceText
 	}
 	return nil
 }
 
-// impactAnalysisEventFromInternal proietta un impactanalysis.ImpactEvent
-// (T4.2) sul messaggio proto ImpactAnalysisEvent riusato (ADR-0008).
-// Esattamente uno tra Node/Progress è non-nil nell'input (stesso invariante
-// del type impactanalysis.ImpactEvent) — mai un evento vuoto costruito.
-func impactAnalysisEventFromInternal(e impactanalysis.ImpactEvent) *retrievalv1.ImpactAnalysisEvent {
+func impactAnalysisEventFromInternal(event impactanalysis.ImpactEvent) *retrievalv1.ImpactAnalysisEvent {
 	switch {
-	case e.Node != nil:
-		return &retrievalv1.ImpactAnalysisEvent{
-			Event: &retrievalv1.ImpactAnalysisEvent_Node{
-				Node: impactedNodeFromInternal(e.Node),
-			},
-		}
-	case e.Progress != nil:
-		p := e.Progress
-		return &retrievalv1.ImpactAnalysisEvent{
-			Event: &retrievalv1.ImpactAnalysisEvent_Progress{
-				Progress: &retrievalv1.ImpactProgress{
-					NodesEmitted: uint32(p.NodesExplored),
-					FrontierSize: uint32(p.FrontierSize),
-					CurrentDepth: uint32(p.CurrentDepth),
-					// SPEC-042 ha un solo concetto di troncamento (cap
-					// max_nodes, globale) — mappato su TruncatedByFanoutCap
-					// (concettualmente il cap più vicino nello scaffold
-					// esistente, anche se qui globale non per-hop, ADR-0008).
-					// TruncatedByDepth resta sempre false: raggiungere
-					// max_depth naturalmente non è un troncamento in questo
-					// modello (§3, nessuno scenario lo tratta come tale).
-					TruncatedByFanoutCap: p.Truncated,
-					TruncatedByDepth:     false,
-				},
-			},
-		}
+	case event.Node != nil:
+		return &retrievalv1.ImpactAnalysisEvent{Event: &retrievalv1.ImpactAnalysisEvent_Node{Node: impactedNodeFromInternal(event.Node)}}
+	case event.Progress != nil:
+		progress := event.Progress
+		return &retrievalv1.ImpactAnalysisEvent{Event: &retrievalv1.ImpactAnalysisEvent_Progress{Progress: &retrievalv1.ImpactProgress{
+			NodesEmitted: uint32(progress.NodesExplored), FrontierSize: uint32(progress.FrontierSize),
+			CurrentDepth: uint32(progress.CurrentDepth), TruncatedByFanoutCap: progress.TruncatedByFanout,
+			TruncatedByDepth: progress.TruncatedByDepth, TruncatedByNodeCap: progress.TruncatedByNodes,
+		}}}
 	default:
-		// Invariante violato da un chiamante malformato di emit — non
-		// dovrebbe mai accadere con impactanalysis.StreamImpact reale, ma
-		// un panic silenzioso sarebbe peggio di un evento diagnosticabile.
-		panic(fmt.Sprintf("impactAnalysisEventFromInternal: evento vuoto %+v", e))
+		panic(fmt.Sprintf("impactAnalysisEventFromInternal: empty event %+v", event))
 	}
 }
 
-// impactedNodeFromInternal proietta un impactanalysis.ImpactNode su
-// ImpactedNode proto (ADR-0008): RetrievedNode popolato SOLO con i campi
-// che la traversata BFS conosce davvero (node_id/domain/provenance/
-// scores.hop_distance — stesso principio già stabilito in T1.4/T4.1).
-// ImpactKind (l'enum di severità) resta UNSPECIFIED: richiede GDS (T4.3,
-// fuori scope). PathEdgeTypes porta il concetto "impact_kind" di SPEC-042
-// (tipo d'arco dell'ultimo hop, percorso più breve) come lista di un solo
-// elemento.
-func impactedNodeFromInternal(n *impactanalysis.ImpactNode) *retrievalv1.ImpactedNode {
+func impactedNodeFromInternal(value *impactanalysis.ImpactNode) *retrievalv1.ImpactedNode {
 	node := &retrievalv1.RetrievedNode{
-		NodeId: n.NodeID,
-		Domain: domainFromProperty(n.Domain),
-		Scores: &retrievalv1.NodeScores{
-			HopDistance: uint32(n.HopDistance),
-		},
+		NodeId: value.NodeID, Domain: domainFromProperty(value.Domain), NodeType: value.NodeType,
+		Name: value.Name, Signature: value.Signature, SourceText: value.SourceText, AstHash: value.ASTHash,
+		Scores: &retrievalv1.NodeScores{HopDistance: uint32(value.HopDistance), ImpactScore: value.ImpactScore},
 	}
-	if n.Provenance != nil {
+	if value.Provenance != nil {
 		node.Provenance = &retrievalv1.Provenance{
-			Repo:      n.Provenance.Repo,
-			Path:      n.Provenance.Path,
-			StartLine: uint32(n.Provenance.StartLine),
-			EndLine:   uint32(n.Provenance.EndLine),
-			CommitSha: n.Provenance.Commit,
+			Repo: value.Provenance.Repo, Path: value.Provenance.Path,
+			StartLine: uint32(value.Provenance.StartLine), EndLine: uint32(value.Provenance.EndLine), CommitSha: value.Provenance.Commit,
 		}
 	}
-
-	var pathEdgeTypes []retrievalv1.EdgeType
-	if et, ok := stringToEdgeType[n.EdgeType]; ok {
-		pathEdgeTypes = []retrievalv1.EdgeType{et}
+	path := make([]retrievalv1.EdgeType, 0, len(value.PathEdgeTypes))
+	for _, edge := range value.PathEdgeTypes {
+		if mapped, ok := stringToEdgeType[edge]; ok {
+			path = append(path, mapped)
+		}
 	}
-
-	return &retrievalv1.ImpactedNode{
-		Node:          node,
-		ImpactKind:    retrievalv1.ImpactKind_IMPACT_KIND_UNSPECIFIED,
-		PathEdgeTypes: pathEdgeTypes,
-		Depth:         uint32(n.HopDistance),
+	kinds := map[string]retrievalv1.ImpactKind{
+		"SYNTACTIC":       retrievalv1.ImpactKind_IMPACT_KIND_SYNTACTIC,
+		"BEHAVIORAL":      retrievalv1.ImpactKind_IMPACT_KIND_BEHAVIORAL,
+		"MODULE_BOUNDARY": retrievalv1.ImpactKind_IMPACT_KIND_MODULE_BOUNDARY,
 	}
+	return &retrievalv1.ImpactedNode{Node: node, ImpactKind: kinds[value.ImpactKind], PathEdgeTypes: path, Depth: uint32(value.HopDistance)}
 }

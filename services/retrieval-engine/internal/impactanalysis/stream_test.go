@@ -24,16 +24,20 @@ type fakeFetcher struct {
 	calls     [][]string // frontierIDs per ogni chiamata, nell'ordine ricevuto
 }
 
-func (f *fakeFetcher) fetch(_ context.Context, frontierIDs []string, _ map[string]struct{}) ([]fetchedNode, error) {
+func (f *fakeFetcher) fetch(_ context.Context, frontierIDs []string, _ map[string]struct{}) (levelFetchResult, error) {
 	i := len(f.calls)
 	f.calls = append(f.calls, append([]string{}, frontierIDs...))
 	if i < len(f.errs) && f.errs[i] != nil {
-		return nil, f.errs[i]
+		return levelFetchResult{}, f.errs[i]
 	}
 	if i < len(f.responses) {
-		return f.responses[i], nil
+		return levelFetchResult{Nodes: f.responses[i]}, nil
 	}
-	return nil, nil
+	return levelFetchResult{}, nil
+}
+
+func legacyOptions(maxDepth, maxNodes int) Options {
+	return Options{MaxDepth: maxDepth, MaxNodes: maxNodes, FanoutCap: 1000}
 }
 
 func collectingEmit(events *[]ImpactEvent) func(ImpactEvent) error {
@@ -56,7 +60,7 @@ func TestStreamImpact_PopulatesEdgeTypePerNode(t *testing.T) {
 		},
 	}
 	var events []ImpactEvent
-	err := runBFS(context.Background(), f.fetch, "seed", 2, 100, collectingEmit(&events))
+	err := runBFS(context.Background(), f.fetch, "seed", legacyOptions(2, 100), collectingEmit(&events))
 	if err != nil {
 		t.Fatalf("runBFS: %v", err)
 	}
@@ -92,7 +96,7 @@ func TestStreamImpact_CapTruncatesAndReportsTruncated(t *testing.T) {
 		},
 	}
 	var events []ImpactEvent
-	err := runBFS(context.Background(), f.fetch, "seed", 3, 2, collectingEmit(&events))
+	err := runBFS(context.Background(), f.fetch, "seed", legacyOptions(3, 2), collectingEmit(&events))
 	if err != nil {
 		t.Fatalf("runBFS: %v", err)
 	}
@@ -130,7 +134,7 @@ func TestStreamImpact_NoCapWhenUnderLimit(t *testing.T) {
 		},
 	}
 	var events []ImpactEvent
-	err := runBFS(context.Background(), f.fetch, "seed", 2, 100, collectingEmit(&events))
+	err := runBFS(context.Background(), f.fetch, "seed", legacyOptions(2, 100), collectingEmit(&events))
 	if err != nil {
 		t.Fatalf("runBFS: %v", err)
 	}
@@ -148,7 +152,7 @@ func TestStreamImpact_NoCapWhenUnderLimit(t *testing.T) {
 func TestStreamImpact_EmptyFirstLevelYieldsSingleZeroProgressNoError(t *testing.T) {
 	f := &fakeFetcher{responses: [][]fetchedNode{{}}}
 	var events []ImpactEvent
-	err := runBFS(context.Background(), f.fetch, "does-not-exist", 3, 100, collectingEmit(&events))
+	err := runBFS(context.Background(), f.fetch, "does-not-exist", legacyOptions(3, 100), collectingEmit(&events))
 	if err != nil {
 		t.Fatalf("runBFS: %v", err)
 	}
@@ -167,7 +171,7 @@ func TestStreamImpact_MaxNodesZeroOrNegativeFailsBeforeAnyFetch(t *testing.T) {
 	for _, maxNodes := range []int{0, -1} {
 		f := &fakeFetcher{}
 		var events []ImpactEvent
-		err := runBFS(context.Background(), f.fetch, "seed", 3, maxNodes, collectingEmit(&events))
+		err := runBFS(context.Background(), f.fetch, "seed", legacyOptions(3, maxNodes), collectingEmit(&events))
 		if err == nil {
 			t.Errorf("max_nodes=%d: atteso errore esplicito, ottenuto nil", maxNodes)
 		}
@@ -193,7 +197,7 @@ func TestStreamImpact_FetchFailureMidTraversalReturnsErrorAfterPriorNodesEmitted
 		errs: []error{nil, boom},
 	}
 	var events []ImpactEvent
-	err := runBFS(context.Background(), f.fetch, "seed", 3, 100, collectingEmit(&events))
+	err := runBFS(context.Background(), f.fetch, "seed", legacyOptions(3, 100), collectingEmit(&events))
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want wrapping %v", err, boom)
 	}
@@ -230,7 +234,7 @@ func TestStreamImpact_MultiplePathsToSameNode_ShortestPathWins(t *testing.T) {
 		},
 	}
 	var events []ImpactEvent
-	err := runBFS(context.Background(), f.fetch, "seed", 3, 100, collectingEmit(&events))
+	err := runBFS(context.Background(), f.fetch, "seed", legacyOptions(3, 100), collectingEmit(&events))
 	if err != nil {
 		t.Fatalf("runBFS: %v", err)
 	}
@@ -274,7 +278,7 @@ func TestStreamImpact_EmitErrorStopsTraversalEarly_ProvesGenuineLevelByLevelStre
 		return nil
 	}
 
-	err := runBFS(context.Background(), f.fetch, "seed", 3, 100, emit)
+	err := runBFS(context.Background(), f.fetch, "seed", legacyOptions(3, 100), emit)
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want wrapping %v", err, boom)
 	}
@@ -289,7 +293,7 @@ func TestStreamImpact_EmitErrorStopsTraversalEarly_ProvesGenuineLevelByLevelStre
 func TestStreamImpact_MaxDepthZeroOrNegativeFailsBeforeAnyFetch(t *testing.T) {
 	f := &fakeFetcher{}
 	var events []ImpactEvent
-	err := runBFS(context.Background(), f.fetch, "seed", 0, 100, collectingEmit(&events))
+	err := runBFS(context.Background(), f.fetch, "seed", legacyOptions(0, 100), collectingEmit(&events))
 	if err == nil {
 		t.Fatal("atteso errore esplicito con max_depth=0, ottenuto nil")
 	}

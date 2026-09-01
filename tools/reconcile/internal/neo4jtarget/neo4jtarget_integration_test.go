@@ -180,7 +180,8 @@ func scenario5RepublishedPayloadMatchesPersistParsedFileShape(t *testing.T, ctx 
 	gotPayload := readOutboxPayload(t, ctx, st.db, id)
 
 	// Forma ESATTA prodotta da persist_parsed_file per questa stessa riga
-	// (services/ingestion/src/persist.rs): provenance = {"path": file_path},
+	// (services/ingestion/src/persist.rs): provenance includes the canonical
+	// authenticated scope and path,
 	// ext = {"node_type": ..., "language": "go"} — replicata qui letteralmente
 	// (stessi campi, non un sottoinsieme), NON derivata dall'implementazione
 	// sotto test.
@@ -190,7 +191,10 @@ func scenario5RepublishedPayloadMatchesPersistParsedFileShape(t *testing.T, ctx 
 		"name":     "Process",
 		"ast_hash": scenario5AstHash,
 		"provenance": map[string]any{
-			"path": "order_service.go",
+			"tenant_id": "tenant-reconcile",
+			"repo":      "repo-reconcile",
+			"acl_group": "developers",
+			"path":      "order_service.go",
 		},
 		"ext": map[string]any{
 			"node_type": "Method",
@@ -374,7 +378,12 @@ func startNeo4j(t *testing.T, ctx context.Context) neo4j.DriverWithContext {
 
 func insertCodeNodeRow(t *testing.T, ctx context.Context, db *sql.DB, id, nodeType, name, astHash, path string) {
 	t.Helper()
-	provenance, err := json.Marshal(map[string]any{"path": path})
+	provenance, err := json.Marshal(map[string]any{
+		"tenant_id": "tenant-reconcile",
+		"repo":      "repo-reconcile",
+		"acl_group": "developers",
+		"path":      path,
+	})
 	if err != nil {
 		t.Fatalf("marshal provenance: %v", err)
 	}

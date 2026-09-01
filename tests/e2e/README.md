@@ -8,7 +8,7 @@ del golden dataset (`tests/golden/queries_v0.json`) contro il risultato
 reale. Vedi `docs/specs/SPEC-019-e2e-golden-dataset.md` per il
 comportamento completo.
 
-Non wired in `task test` (SPEC-019 §5): richiede Docker, build
+Wired esplicitamente in `task test:e2e` (SPEC-068), non in `task test`: richiede Docker, build
 multi-linguaggio (Go/Rust) e i toolchain relativi sul PATH — stesso
 perimetro di `persist_integration_test`/`server_integration_test`/
 `services/orchestrator/orchestrator/conftest.py` (SPEC-014/016/018).

@@ -89,7 +89,9 @@ func sourceRows(ctx context.Context, db *sql.DB) ([]framework.SourceRow, error) 
 // documento (entity_id/chunk_index/provenance non servono al confronto
 // del fingerprint).
 type documentSource struct {
-	Text string `json:"text"`
+	ChunkID       string `json:"chunk_id"`
+	EventSequence *int64 `json:"event_sequence"`
+	Text          string `json:"text"`
 }
 
 // newCheck implementa SPEC-040 §2: client.Document.Get(ctx,
@@ -133,7 +135,9 @@ func newCheck(client *opensearchapi.Client) func(ctx context.Context, row framew
 		if err := json.Unmarshal(resp.Source, &source); err != nil {
 			return false, fmt.Errorf("opensearchtarget: decodifica _source id=%s: %w", row.ID, err)
 		}
-		return source.Text == string(row.Fingerprint), nil
+		return source.Text == string(row.Fingerprint) &&
+			source.ChunkID == row.ID &&
+			source.EventSequence != nil && *source.EventSequence >= 0, nil
 	}
 }
 
@@ -155,7 +159,8 @@ func republish(ctx context.Context, tx *sql.Tx, row framework.SourceRow) error {
 		`SELECT cc.entity_id, cc.chunk_index, cc.text, cc.char_count, cn.provenance
 		 FROM code_chunk cc
 		 JOIN code_node cn ON cn.id = cc.entity_id
-		 WHERE cc.id = $1`,
+		 WHERE cc.id = $1
+		 FOR UPDATE OF cn, cc`,
 		row.ID,
 	).Scan(&entityID, &chunkIndex, &text, &charCount, &provenance)
 	if err != nil {

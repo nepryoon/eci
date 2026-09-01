@@ -1,6 +1,6 @@
 // Package consumer implementa il consumer Kafka -> embedding di
 // embedding-worker (SPEC-030 §2): legge da outbox.event.CodeChunk, dedup
-// via processed_events (stesso meccanismo generico di sink-graph,
+// via watermark+processed_events (stesso meccanismo generico di sink-graph,
 // SPEC-015), chiama il client di embedding per il testo del chunk e scrive
 // il vettore risultante in code_embedding più una riga outbox
 // (aggregate_type='CodeEmbedding').
@@ -15,7 +15,11 @@ import (
 	"github.com/lib/pq"
 	kafka "github.com/segmentio/kafka-go"
 
+	"github.com/eci-project/eci/libs/go/eci/eventorder"
 	"github.com/eci-project/eci/libs/go/eci/kafkatrace"
+	"github.com/eci-project/eci/libs/go/eci/models"
+	"github.com/eci-project/eci/libs/go/eci/outboxmeta"
+	"github.com/eci-project/eci/libs/go/eci/securitylabels"
 	"github.com/eci-project/eci/services/embedding-worker/internal/embedclient"
 )
 
@@ -27,10 +31,6 @@ const ConsumerName = "embedding-worker"
 // aggregate_type='CodeChunk' (SPEC-029, verificato end-to-end in quella
 // SPEC: outbox.event.<aggregate_type>).
 const TopicCodeChunk = "outbox.event.CodeChunk"
-
-// eventIDHeaderKey — stesso header promosso dal connector Debezium già
-// consumato da sink-graph (SPEC-015 §2).
-const eventIDHeaderKey = "event_id"
 
 // Deps sono le dipendenze di ProcessMessage — iniettate esplicitamente
 // (nessuno stato globale), stesso principio di sink-graph (SPEC-015 §2).
@@ -51,6 +51,7 @@ type Outcome int
 
 const (
 	OutcomeStored Outcome = iota
+	OutcomeTombstoneAcknowledged
 	OutcomeDuplicate
 	OutcomeInvalidSkipped
 )
@@ -78,6 +79,12 @@ type codeChunkPayload struct {
 	Provenance json.RawMessage `json:"provenance"`
 }
 
+type codeChunkTombstone struct {
+	ID         string            `json:"id"`
+	EntityID   string            `json:"entity_id"`
+	Provenance models.Provenance `json:"provenance"`
+}
+
 // ProcessMessage elabora UN messaggio Kafka già fetchato (SPEC-030 §2/§3):
 //  1. estrae event_id dagli header;
 //  2. chiama il client di embedding per il testo del chunk — un errore qui
@@ -99,15 +106,41 @@ type codeChunkPayload struct {
 // ritorna (OutcomeInvalidSkipped, nil) — il chiamante committa comunque
 // l'offset, stesso principio di sink-graph (SPEC-015 §3 scenario 5).
 func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, headers []kafka.Header) (Outcome, error) {
-	eventID, ok := eventIDFromHeaders(headers)
-	if !ok {
-		deps.Logf("embedding-worker: messaggio su %s senza header %q valido, scartato (offset committato)", topic, eventIDHeaderKey)
+	metadata, metadataErr := outboxmeta.Parse(headers)
+	if metadataErr != nil {
+		deps.Logf("embedding-worker: metadata outbox non valida, scartata")
 		return OutcomeInvalidSkipped, nil
 	}
-
 	if topic != TopicCodeChunk {
-		deps.Logf("embedding-worker: topic sconosciuto %q (event_id=%s), scartato", topic, eventID)
+		deps.Logf("embedding-worker: topic sconosciuto, scartato")
 		return OutcomeInvalidSkipped, nil
+	}
+	eventID := metadata.EventID
+
+	if metadata.Operation == outboxmeta.OperationDelete {
+		var tombstone codeChunkTombstone
+		if err := json.Unmarshal(value, &tombstone); err != nil || tombstone.ID == "" || tombstone.EntityID == "" || tombstone.Provenance.Path == "" {
+			deps.Logf("embedding-worker: tombstone CodeChunk non valido, scartato")
+			return OutcomeInvalidSkipped, nil
+		}
+		if !securitylabels.Valid(tombstone.Provenance.TenantID, tombstone.Provenance.Repo, tombstone.Provenance.ACLGroup) {
+			securitylabels.Observe(ConsumerName, "rejected")
+			deps.Logf("embedding-worker: tombstone CodeChunk senza security labels valide, scartato")
+			return OutcomeInvalidSkipped, nil
+		}
+		securitylabels.Observe(ConsumerName, "accepted")
+		guard, orderState, err := eventorder.Begin(ctx, deps.DB, ConsumerName, "CodeChunk", tombstone.ID, metadata)
+		if err != nil {
+			return OutcomeInvalidSkipped, fmt.Errorf("acquire ordered tombstone: %w", err)
+		}
+		if orderState == eventorder.Duplicate || orderState == eventorder.Stale {
+			return OutcomeDuplicate, nil
+		}
+		defer guard.Abort()
+		if err := guard.Complete(ctx); err != nil {
+			return OutcomeInvalidSkipped, fmt.Errorf("complete ordered tombstone: %w", err)
+		}
+		return OutcomeTombstoneAcknowledged, nil
 	}
 
 	var chunk codeChunkPayload
@@ -119,6 +152,15 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 		deps.Logf("embedding-worker: payload CodeChunk senza id (event_id=%s)", eventID)
 		return OutcomeInvalidSkipped, nil
 	}
+	guard, orderState, err := eventorder.Begin(ctx, deps.DB, ConsumerName, "CodeChunk", chunk.ID, metadata)
+	if err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("acquire ordered event: %w", err)
+	}
+	if orderState == eventorder.Duplicate || orderState == eventorder.Stale {
+		deps.Logf("embedding-worker: evento duplicato o superato, effetto non applicato")
+		return OutcomeDuplicate, nil
+	}
+	defer guard.Abort()
 
 	vector, err := deps.Embed.Embed(ctx, chunk.Text)
 	if err != nil {
@@ -128,72 +170,33 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 
 	traceID, _ := kafkatrace.TraceIDFromHeaders(headers)
 
-	stored, err := storeEmbedding(ctx, deps, eventID, chunk.ID, chunk.EntityID, chunk.Provenance, vector, traceID)
-	if err != nil {
+	if err := storeEmbedding(ctx, guard.Tx(), deps, chunk.ID, chunk.EntityID, chunk.Provenance, vector, traceID); err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("store embedding chunk_id=%s: %w", chunk.ID, err)
 	}
-	if !stored {
-		deps.Logf("embedding-worker: event_id=%s già in processed_events, skip (redelivery)", eventID)
-		return OutcomeDuplicate, nil
+	if err := guard.Complete(ctx); err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("complete ordered event: %w", err)
 	}
 	return OutcomeStored, nil
 }
 
-// eventIDFromHeaders — stessa logica di sink-graph (SPEC-015 §2 punto 1).
-func eventIDFromHeaders(headers []kafka.Header) (string, bool) {
-	for _, h := range headers {
-		if h.Key != eventIDHeaderKey {
-			continue
-		}
-		if len(h.Value) == 0 {
-			return "", false
-		}
-		return string(h.Value), true
-	}
-	return "", false
-}
-
-// storeEmbedding esegue dedup + INSERT code_embedding + INSERT outbox in
-// un'UNICA transazione ACID (SPEC-030 §2, deviazione dichiarata rispetto al
-// pattern letterale di sink-graph — vedi commento su ProcessMessage sopra).
-// stored=false quando l'INSERT di dedup non ha inserito nulla (event_id già
-// presente): la transazione va comunque in ROLLBACK, nessuna scrittura.
-func storeEmbedding(ctx context.Context, deps Deps, eventID, chunkID, entityID string, provenance json.RawMessage, vector []float32, traceID string) (stored bool, err error) {
-	tx, err := deps.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = tx.Rollback() }() // no-op se già committata
-
-	var returnedEventID string
-	err = tx.QueryRowContext(ctx,
-		`INSERT INTO processed_events (event_id, consumer_name)
-		 VALUES ($1, $2)
-		 ON CONFLICT (event_id, consumer_name) DO NOTHING
-		 RETURNING event_id`,
-		eventID, ConsumerName,
-	).Scan(&returnedEventID)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-
+// storeEmbedding inserisce code_embedding e il relativo outbox event nella
+// transazione ordinata aperta dal chiamante. Il completion marker e il
+// watermark del consumer vengono committati atomicamente da Guard.Complete.
+func storeEmbedding(ctx context.Context, tx *sql.Tx, deps Deps, chunkID, entityID string, provenance json.RawMessage, vector []float32, traceID string) error {
 	vector64 := make(pq.Float64Array, len(vector))
 	for i, v := range vector {
 		vector64[i] = float64(v)
 	}
 
 	var embeddingID string
-	err = tx.QueryRowContext(ctx,
+	err := tx.QueryRowContext(ctx,
 		`INSERT INTO code_embedding (chunk_id, vector, model_id, embedding_dim)
 		 VALUES ($1, $2, $3, $4)
 		 RETURNING id::text`,
 		chunkID, vector64, deps.ModelID, len(vector),
 	).Scan(&embeddingID)
 	if err != nil {
-		return false, err
+		return err
 	}
 
 	payloadFields := map[string]any{
@@ -212,7 +215,7 @@ func storeEmbedding(ctx context.Context, deps Deps, eventID, chunkID, entityID s
 	}
 	payload, err := json.Marshal(payloadFields)
 	if err != nil {
-		return false, err
+		return err
 	}
 
 	var traceIDParam any
@@ -225,11 +228,7 @@ func storeEmbedding(ctx context.Context, deps Deps, eventID, chunkID, entityID s
 		embeddingID, payload, traceIDParam,
 	)
 	if err != nil {
-		return false, err
+		return err
 	}
-
-	if err := tx.Commit(); err != nil {
-		return false, err
-	}
-	return true, nil
+	return nil
 }

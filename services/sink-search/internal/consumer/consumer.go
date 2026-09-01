@@ -1,6 +1,6 @@
 // Package consumer implementa il consumer Kafka -> OpenSearch di
 // sink-search (SPEC-034 §2, T3.2): legge da outbox.event.CodeChunk, dedup
-// via processed_events (stessa tabella condivisa, stesso principio già
+// via watermark+processed_events (stessa base condivisa, stesso principio già
 // stabilito da sink-graph/embedding-worker/sink-vector), indicizza
 // ciascun chunk come documento OpenSearch per la ricerca full-text —
 // SECONDO consumatore dello stesso topic già consumato da
@@ -8,18 +8,22 @@
 package consumer
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/opensearch-project/opensearch-go/v4"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchutil"
 	kafka "github.com/segmentio/kafka-go"
 
+	"github.com/eci-project/eci/libs/go/eci/eventorder"
+	"github.com/eci-project/eci/libs/go/eci/outboxmeta"
 	"github.com/eci-project/eci/libs/go/eci/securitylabels"
 )
 
@@ -36,12 +40,12 @@ const ConsumerName = "sink-search"
 // (T3.1), questo topic esiste ed è popolato dal 2026-08-14.
 const TopicCodeChunk = "outbox.event.CodeChunk"
 
-// eventIDHeaderKey — stesso header promosso dal connector Debezium già
-// consumato da sink-graph/embedding-worker/sink-vector.
-const eventIDHeaderKey = "event_id"
-
 // IndexName è il nome dichiarato dell'indice OpenSearch (SPEC-034 §2).
 const IndexName = "code_chunks"
+
+const chunkCursorSchemaVersion = 1
+
+const indexMigrationTimeout = 2 * time.Minute
 
 // EnsureIndex verifica se IndexName esiste già (SPEC-034 §3 scenario 4);
 // se no, lo crea con un mapping minimo: `text` analizzato per full-text,
@@ -72,7 +76,7 @@ func EnsureIndex(ctx context.Context, client *opensearchapi.Client) error {
 	case existsResp == nil:
 		return fmt.Errorf("Indices.Exists(%s): %w", IndexName, err)
 	case existsResp.StatusCode == 200:
-		return ensureSecurityMapping(ctx, client)
+		return migrateExistingIndex(ctx, client)
 	case existsResp.StatusCode != 404:
 		return fmt.Errorf("Indices.Exists(%s): status inatteso %d: %w", IndexName, existsResp.StatusCode, err)
 	}
@@ -80,10 +84,18 @@ func EnsureIndex(ctx context.Context, client *opensearchapi.Client) error {
 
 	mapping := map[string]any{
 		"mappings": map[string]any{
+			"_meta": map[string]any{"eci_chunk_cursor_schema": chunkCursorSchemaVersion},
 			"properties": mergeProperties(map[string]any{
 				"text":        map[string]any{"type": "text"},
 				"entity_id":   map[string]any{"type": "keyword"},
 				"chunk_index": map[string]any{"type": "integer"},
+				// OpenSearch forbids sorting on the _id metadata field. Keep the
+				// canonical chunk UUID as a doc-valued keyword so PIT/search_after
+				// readers have a stable, unique final cursor coordinate.
+				"chunk_id": map[string]any{"type": "keyword"},
+				// Canonical outbox order lets readers select the current document
+				// while replacement DELETE/UPSERT events converge asynchronously.
+				"event_sequence": map[string]any{"type": "long"},
 			}, securityProperties()),
 		},
 	}
@@ -98,15 +110,93 @@ func EnsureIndex(ctx context.Context, client *opensearchapi.Client) error {
 			// Another identical replica won the 404 -> create race. Reconcile
 			// the required security fields so incompatible mappings still fail;
 			// do not suppress any other OpenSearch error.
-			return ensureSecurityMapping(ctx, client)
+			return migrateExistingIndex(ctx, client)
 		}
 		return fmt.Errorf("Indices.Create(%s): %w", IndexName, err)
 	}
 	return nil
 }
 
+// migrateExistingIndex makes the cursor fields introduced for replacement
+// ordering real for every historical document before publishing the mapping
+// marker consumed by retrieval-engine. Mapping updates alone do not populate
+// _source. A legacy document therefore receives its canonical identity from
+// _id and the reserved sequence 0; every real outbox event has a positive
+// sequence and deterministically supersedes it. The marker is written last,
+// so readers cannot enable the new cursor path over a partially migrated
+// index. The whole operation is bounded and fails closed on timeout,
+// conflicts, partial failures, or an unacknowledged marker.
+func migrateExistingIndex(ctx context.Context, client *opensearchapi.Client) error {
+	migrationCtx, cancel := context.WithTimeout(ctx, indexMigrationTimeout)
+	defer cancel()
+	if err := ensureSecurityMapping(migrationCtx, client); err != nil {
+		return err
+	}
+	// Make writes completed by an older sink replica visible to the migration
+	// search before establishing the marker. Without this barrier a just-written
+	// legacy document could be absent from the update-by-query snapshot.
+	refreshResponse, err := client.Indices.Refresh(migrationCtx, &opensearchapi.IndicesRefreshReq{
+		Index: []string{IndexName},
+	})
+	if err != nil || refreshResponse == nil {
+		return fmt.Errorf("Indices.Refresh before legacy cursor migration (%s): %w", IndexName, err)
+	}
+	var shards struct {
+		Failed int `json:"failed"`
+	}
+	if err := json.Unmarshal(refreshResponse.Shards, &shards); err != nil || shards.Failed != 0 {
+		return fmt.Errorf("Indices.Refresh before legacy cursor migration (%s): partial response", IndexName)
+	}
+	body := map[string]any{
+		"query": map[string]any{
+			"bool": map[string]any{
+				"minimum_should_match": 1,
+				"should": []any{
+					map[string]any{"bool": map[string]any{"must_not": map[string]any{"exists": map[string]any{"field": "chunk_id"}}}},
+					map[string]any{"bool": map[string]any{"must_not": map[string]any{"exists": map[string]any{"field": "event_sequence"}}}},
+				},
+			},
+		},
+		"script": map[string]any{
+			"lang":   "painless",
+			"source": "if (ctx._source.chunk_id == null) { ctx._source.chunk_id = ctx._id; } if (ctx._source.event_sequence == null) { ctx._source.event_sequence = 0L; }",
+		},
+	}
+	refresh, wait := true, true
+	response, err := client.UpdateByQuery(migrationCtx, opensearchapi.UpdateByQueryReq{
+		Indices: []string{IndexName},
+		Body:    opensearchutil.NewJSONReader(body),
+		Params: opensearchapi.UpdateByQueryParams{
+			Refresh: &refresh, WaitForCompletion: &wait, Timeout: indexMigrationTimeout,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("UpdateByQuery legacy cursor fields (%s): %w", IndexName, err)
+	}
+	if response == nil || response.TimedOut || response.VersionConflicts != 0 || len(response.Failures) != 0 || response.Updated+response.Noops != response.Total {
+		return fmt.Errorf("UpdateByQuery legacy cursor fields (%s): incomplete migration", IndexName)
+	}
+	marker := map[string]any{"_meta": map[string]any{"eci_chunk_cursor_schema": chunkCursorSchemaVersion}}
+	markerResponse, err := client.Indices.Mapping.Put(migrationCtx, opensearchapi.MappingPutReq{
+		Indices: []string{IndexName}, Body: opensearchutil.NewJSONReader(marker),
+	})
+	if err != nil {
+		return fmt.Errorf("Mapping.Put migration marker (%s): %w", IndexName, err)
+	}
+	if markerResponse == nil || !markerResponse.Acknowledged {
+		return fmt.Errorf("Mapping.Put migration marker (%s): unacknowledged", IndexName)
+	}
+	return nil
+}
+
 func ensureSecurityMapping(ctx context.Context, client *opensearchapi.Client) error {
-	securityMapping := map[string]any{"properties": securityProperties()}
+	// Also reconcile the sortable document identity on an existing index.
+	// Historical views are rebuildable, but accepting the mapping before a
+	// rolling sink deployment keeps new writes and readers compatible.
+	properties := securityProperties()
+	properties["chunk_id"] = map[string]any{"type": "keyword"}
+	properties["event_sequence"] = map[string]any{"type": "long"}
+	securityMapping := map[string]any{"properties": properties}
 	if _, err := client.Indices.Mapping.Put(ctx, opensearchapi.MappingPutReq{
 		Indices: []string{IndexName}, Body: opensearchutil.NewJSONReader(securityMapping),
 	}); err != nil {
@@ -143,6 +233,7 @@ type Outcome int
 
 const (
 	OutcomeStored Outcome = iota
+	OutcomeDeleted
 	OutcomeDuplicate
 	OutcomeInvalidSkipped
 )
@@ -167,11 +258,18 @@ type securityProvenance struct {
 	TenantID string `json:"tenant_id"`
 	Repo     string `json:"repo"`
 	ACLGroup string `json:"acl_group"`
+	Path     string `json:"path"`
+}
+
+type codeChunkTombstone struct {
+	ID       string             `json:"id"`
+	EntityID string             `json:"entity_id"`
+	Security securityProvenance `json:"provenance"`
 }
 
 // ProcessMessage elabora UN messaggio Kafka già fetchato (SPEC-034 §2/§3):
 //  1. estrae event_id dagli header;
-//  2. dedup via processed_events (stesso meccanismo di sink-graph/
+//  2. ordering e dedup via watermark+processed_events (stesso meccanismo di sink-graph/
 //     sink-vector, PRIMA della scrittura OpenSearch — OpenSearch non è
 //     Postgres, non può condividere una transazione col dedup);
 //  3. se nuovo, indicizza UN documento con DocumentID = msg.ID.
@@ -182,15 +280,20 @@ type securityProvenance struct {
 // ritorna (OutcomeInvalidSkipped, nil) — il chiamante committa comunque
 // l'offset, stesso principio di sink-graph (SPEC-015 §3 scenario 5).
 func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, headers []kafka.Header) (Outcome, error) {
-	eventID, ok := eventIDFromHeaders(headers)
-	if !ok {
-		deps.Logf("sink-search: messaggio su %s senza header %q valido, scartato (offset committato)", topic, eventIDHeaderKey)
+	metadata, metadataErr := outboxmeta.Parse(headers)
+	if metadataErr != nil {
+		deps.Logf("sink-search: metadata outbox non valida, scartata")
 		return OutcomeInvalidSkipped, nil
 	}
 
 	if topic != TopicCodeChunk {
-		deps.Logf("sink-search: topic sconosciuto %q (event_id=%s), scartato", topic, eventID)
+		deps.Logf("sink-search: topic sconosciuto, scartato")
 		return OutcomeInvalidSkipped, nil
+	}
+	eventID := metadata.EventID
+
+	if metadata.Operation == outboxmeta.OperationDelete {
+		return processDelete(ctx, deps, value, metadata)
 	}
 
 	var chunk codeChunkPayload
@@ -211,72 +314,55 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	}
 	securitylabels.Observe(ConsumerName, "accepted")
 
-	processed, err := isProcessed(ctx, deps.DB, eventID)
+	guard, orderState, err := eventorder.Begin(ctx, deps.DB, ConsumerName, "CodeChunk", chunk.ID, metadata)
 	if err != nil {
-		return OutcomeInvalidSkipped, fmt.Errorf("dedup event_id=%s: %w", eventID, err)
+		return OutcomeInvalidSkipped, fmt.Errorf("acquire ordered event: %w", err)
 	}
-	if processed {
-		deps.Logf("sink-search: event_id=%s già in processed_events, skip indicizzazione (redelivery)", eventID)
+	if orderState == eventorder.Duplicate || orderState == eventorder.Stale {
+		deps.Logf("sink-search: evento duplicato o superato, effetto non applicato")
 		return OutcomeDuplicate, nil
 	}
+	defer guard.Abort()
 
-	if err := indexDocument(ctx, deps.OpenSearch, chunk); err != nil {
+	if err := indexDocument(ctx, deps.OpenSearch, chunk, metadata.Sequence); err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("indicizzazione documento id=%s: %w", chunk.ID, err)
 	}
-	isNew, err := markProcessed(ctx, deps.DB, eventID)
-	if err != nil {
-		return OutcomeInvalidSkipped, fmt.Errorf("complete dedup event_id=%s after OpenSearch index: %w", eventID, err)
-	}
-	if !isNew {
-		deps.Logf("sink-search: event_id=%s completato concorrentemente, indicizzazione idempotente già applicata", eventID)
-		return OutcomeDuplicate, nil
+	if err := guard.Complete(ctx); err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("complete ordered event: %w", err)
 	}
 	return OutcomeStored, nil
 }
 
-func isProcessed(ctx context.Context, db *sql.DB, eventID string) (bool, error) {
-	var processed bool
-	err := db.QueryRowContext(ctx,
-		`SELECT EXISTS (
-			SELECT 1 FROM processed_events WHERE event_id = $1 AND consumer_name = $2
-		)`,
-		eventID, ConsumerName,
-	).Scan(&processed)
-	return processed, err
-}
-
-// eventIDFromHeaders — stessa logica di sink-graph (SPEC-015 §2 punto 1).
-func eventIDFromHeaders(headers []kafka.Header) (string, bool) {
-	for _, h := range headers {
-		if h.Key != eventIDHeaderKey {
-			continue
-		}
-		if len(h.Value) == 0 {
-			return "", false
-		}
-		return string(h.Value), true
+func processDelete(ctx context.Context, deps Deps, value []byte, metadata outboxmeta.Metadata) (Outcome, error) {
+	var tombstone codeChunkTombstone
+	if err := json.Unmarshal(value, &tombstone); err != nil || tombstone.ID == "" || tombstone.EntityID == "" || tombstone.Security.Path == "" {
+		deps.Logf("sink-search: tombstone CodeChunk non valido, scartato")
+		return OutcomeInvalidSkipped, nil
 	}
-	return "", false
-}
-
-// markProcessed — stesso identico dedup atomico di sink-graph (SPEC-015 §2
-// punto 2): INSERT...ON CONFLICT DO NOTHING RETURNING.
-func markProcessed(ctx context.Context, db *sql.DB, eventID string) (isNew bool, err error) {
-	var returned string
-	err = db.QueryRowContext(ctx,
-		`INSERT INTO processed_events (event_id, consumer_name)
-		 VALUES ($1, $2)
-		 ON CONFLICT (event_id, consumer_name) DO NOTHING
-		 RETURNING event_id`,
-		eventID, ConsumerName,
-	).Scan(&returned)
-	if err == sql.ErrNoRows {
-		return false, nil
+	if !securitylabels.Valid(tombstone.Security.TenantID, tombstone.Security.Repo, tombstone.Security.ACLGroup) {
+		securitylabels.Observe(ConsumerName, "rejected")
+		deps.Logf("sink-search: tombstone CodeChunk senza security labels valide, scartato")
+		return OutcomeInvalidSkipped, nil
 	}
+	securitylabels.Observe(ConsumerName, "accepted")
+
+	guard, orderState, err := eventorder.Begin(ctx, deps.DB, ConsumerName, "CodeChunk", tombstone.ID, metadata)
 	if err != nil {
-		return false, err
+		return OutcomeInvalidSkipped, fmt.Errorf("acquire ordered tombstone: %w", err)
 	}
-	return true, nil
+	if orderState == eventorder.Duplicate || orderState == eventorder.Stale {
+		deps.Logf("sink-search: tombstone duplicato o superato")
+		return OutcomeDuplicate, nil
+	}
+	defer guard.Abort()
+
+	if err := deleteDocument(ctx, deps.OpenSearch, tombstone); err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("delete OpenSearch projection: %w", err)
+	}
+	if err := guard.Complete(ctx); err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("complete ordered tombstone: %w", err)
+	}
+	return OutcomeDeleted, nil
 }
 
 // indexDocument scrive UN documento OpenSearch per il chunk (SPEC-034 §2):
@@ -288,11 +374,13 @@ func markProcessed(ctx context.Context, db *sql.DB, eventID string) (isNew bool,
 // di `Document.Create` (endpoint `_create`, verificato nel sorgente del
 // client: fallisce con 409 su id duplicato), `Index` è la scelta corretta
 // qui per la stessa idempotenza upsert-by-id già scelta per Qdrant/T3.1.
-func indexDocument(ctx context.Context, client *opensearchapi.Client, chunk codeChunkPayload) error {
+func indexDocument(ctx context.Context, client *opensearchapi.Client, chunk codeChunkPayload, eventSequence int64) error {
 	body := map[string]any{
-		"text":        chunk.Text,
-		"entity_id":   chunk.EntityID,
-		"chunk_index": chunk.ChunkIndex,
+		"text":           chunk.Text,
+		"entity_id":      chunk.EntityID,
+		"chunk_index":    chunk.ChunkIndex,
+		"chunk_id":       chunk.ID,
+		"event_sequence": eventSequence,
 	}
 	if len(chunk.Provenance) > 0 {
 		var provenance any
@@ -311,6 +399,69 @@ func indexDocument(ctx context.Context, client *opensearchapi.Client, chunk code
 		Index:      IndexName,
 		DocumentID: chunk.ID,
 		Body:       opensearchutil.NewJSONReader(body),
+		// A following tombstone is implemented as a scope-intersected query.
+		// Do not record the upsert as processed until search can observe it;
+		// otherwise an immediately ordered DELETE can match zero documents
+		// while the realtime GET API still exposes the stale projection.
+		Params: opensearchapi.IndexParams{Refresh: "wait_for"},
 	})
 	return err
+}
+
+func deleteDocument(ctx context.Context, client *opensearchapi.Client, tombstone codeChunkTombstone) error {
+	request, err := buildDeleteRequest(tombstone)
+	if err != nil {
+		return err
+	}
+	response, err := client.Document.DeleteByQuery(ctx, request)
+	if err != nil {
+		return err
+	}
+	return validateDeleteResponse(response)
+}
+
+// buildDeleteRequest performs authorization and deletion as one server-side
+// operation. A preliminary GET followed by DELETE-by-ID would introduce a
+// time-of-check/time-of-use gap and is intentionally not used.
+func buildDeleteRequest(tombstone codeChunkTombstone) (opensearchapi.DocumentDeleteByQueryReq, error) {
+	body, err := json.Marshal(map[string]any{
+		"query": map[string]any{
+			"bool": map[string]any{
+				"filter": []any{
+					map[string]any{"ids": map[string]any{"values": []string{tombstone.ID}}},
+					map[string]any{"term": map[string]any{"tenant_id": tombstone.Security.TenantID}},
+					map[string]any{"term": map[string]any{"repo": tombstone.Security.Repo}},
+					map[string]any{"term": map[string]any{"acl_group": tombstone.Security.ACLGroup}},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return opensearchapi.DocumentDeleteByQueryReq{}, fmt.Errorf("build delete query: %w", err)
+	}
+	refresh, waitForCompletion, allowNoIndices := true, true, false
+	maxDocs := 1
+	return opensearchapi.DocumentDeleteByQueryReq{
+		Indices: []string{IndexName},
+		Body:    bytes.NewReader(body),
+		Params: opensearchapi.DocumentDeleteByQueryParams{
+			AllowNoIndices:    &allowNoIndices,
+			MaxDocs:           &maxDocs,
+			Refresh:           &refresh,
+			WaitForCompletion: &waitForCompletion,
+		},
+	}, nil
+}
+
+func validateDeleteResponse(response *opensearchapi.DocumentDeleteByQueryResp) error {
+	if response == nil {
+		return fmt.Errorf("OpenSearch returned no delete result")
+	}
+	if response.TimedOut || response.VersionConflicts != 0 || len(response.Failures) != 0 {
+		return fmt.Errorf("OpenSearch delete did not complete")
+	}
+	if response.Total < 0 || response.Total > 1 || response.Deleted < 0 || response.Deleted != response.Total {
+		return fmt.Errorf("OpenSearch delete returned inconsistent counts")
+	}
+	return nil
 }

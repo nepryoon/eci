@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Fallisce se contracts/ o docs/add/ sono modificati (M), cancellati (D) o
-# rinominati/copiati (R/C, in entrata o in uscita), senza un ADR aggiunto in
-# docs/decisions/ nello stesso diff. L'aggiunta di file nuovi (A) non
-# richiede ADR. Vedi SPEC-001 §2.
+# Fallisce se contracts/ o l'ADD consolidato reale sono modificati (M),
+# cancellati (D) o rinominati/copiati (R/C, in entrata o in uscita), senza un
+# ADR aggiunto in docs/decisions/ nello stesso diff. Conserva anche il path
+# docs/add/ per compatibilità con eventuali futuri documenti protetti.
 set -euo pipefail
 
 BASE_REF="${BASE_REF:-origin/main}"
@@ -20,7 +20,7 @@ has_adr_added=false
 
 is_protected() {
   case "$1" in
-    contracts/*|docs/add/*) return 0 ;;
+    contracts/*|docs/add/*|docs/ADD_Enterprise_Code_Intelligence_consolidato.md) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -56,7 +56,7 @@ if [ "${has_adr_added}" = true ]; then
   exit 0
 fi
 
-echo "Modifiche a contracts/ o docs/add/ richiedono un ADR in docs/decisions/ nello stesso commit." >&2
+echo "Modifiche a contracts/ o all'ADD protetto richiedono un ADR in docs/decisions/ nello stesso commit." >&2
 echo "" >&2
 echo "File protetti toccati:" >&2
 for line in "${protected_touched[@]}"; do
