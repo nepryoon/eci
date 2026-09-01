@@ -353,5 +353,8 @@ Evidenza finale del 2026-09-01 sul commit `73692c9415f6426b1acf2cf037d57c65603f9
 sono PASS. GitHub Actions run `33451930010` è verde in tutti i sei job
 (build/lint/test, guard, datastore-security, Envoy, Kubernetes e WORM).
 La review automatizzata ha ispezionato lo stesso SHA senza trovare nuovi
-problemi sostanziali e tutte le review thread della PR #76 risultano risolte
-solo dopo la relativa regressione e remediation.
+problemi sostanziali. Tutti i difetti confermati nelle review thread della PR
+#76 sono stati chiusi dopo una regressione e la relativa remediation; il
+finding separato sulla ownership dei file TLS MinIO è stato invece confutato
+contro il `fsGroup: 65532` già presente e protetto con un test di regressione,
+senza una modifica al manifest.
