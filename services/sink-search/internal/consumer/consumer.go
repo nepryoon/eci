@@ -344,6 +344,11 @@ func indexDocument(ctx context.Context, client *opensearchapi.Client, chunk code
 		Index:      IndexName,
 		DocumentID: chunk.ID,
 		Body:       opensearchutil.NewJSONReader(body),
+		// A following tombstone is implemented as a scope-intersected query.
+		// Do not record the upsert as processed until search can observe it;
+		// otherwise an immediately ordered DELETE can match zero documents
+		// while the realtime GET API still exposes the stale projection.
+		Params: opensearchapi.IndexParams{Refresh: "wait_for"},
 	})
 	return err
 }

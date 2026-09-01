@@ -88,6 +88,34 @@ func TestDeleteCompletionRejectsPartialResponses(t *testing.T) {
 	}
 }
 
+func TestIndexWaitsForSearchVisibilityBeforeCompletion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut || request.URL.Path != "/"+IndexName+"/_doc/chunk-id" {
+			http.Error(response, "unexpected request", http.StatusInternalServerError)
+			return
+		}
+		if got := request.URL.Query().Get("refresh"); got != "wait_for" {
+			http.Error(response, "missing refresh visibility barrier", http.StatusBadRequest)
+			return
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"_index":"code_chunks","_id":"chunk-id","_version":1,"result":"created","_shards":{"total":1,"successful":1,"failed":0},"_seq_no":0,"_primary_term":1}`))
+	}))
+	defer server.Close()
+
+	client, err := opensearchapi.NewClient(opensearchapi.Config{
+		Client: opensearch.Config{Addresses: []string{server.URL}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := indexDocument(context.Background(), client, codeChunkPayload{
+		ID: "chunk-id", EntityID: "entity-id", Text: "source",
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProcessRejectsMissingOperationBeforeDependencies(t *testing.T) {
 	outcome, err := ProcessMessage(
 		context.Background(), Deps{Logf: func(string, ...any) {}},
