@@ -45,6 +45,9 @@ jobs:
 
       - name: task test:interop
         run: task test:interop
+        env:
+          # Exercise the portable fallback even on runners that later add rg.
+          ECI_INTEROP_SEARCH_TOOL: grep
 
       - name: task test:security
         run: task test:security
