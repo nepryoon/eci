@@ -195,6 +195,7 @@ func startImpactServer(t *testing.T, driver neo4j.DriverWithContext) retrievalv1
 	}
 	srv := grpc.NewServer(
 		grpc.UnaryInterceptor(secctx.UnaryServerInterceptor()),
+		grpc.StreamInterceptor(secctx.StreamServerInterceptor()),
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 	)
 	retrievalv1.RegisterRetrievalEngineServer(srv, &server.Server{Driver: driver})
