@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT_DIR/deploy/k8s/lib/dev-password.sh"
 source "$ROOT_DIR/deploy/k8s/lib/kind-cluster.sh"
+source "$ROOT_DIR/deploy/k8s/lib/tls-keypair.sh"
 HELM_BIN="${HELM_BIN:-helm}"
 KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
 KIND_BIN="${KIND_BIN:-kind}"
@@ -13,6 +14,7 @@ for executable in "$DOCKER_BIN" "$HELM_BIN" "$KUBECTL_BIN" "$KIND_BIN" openssl b
   command -v "$executable" >/dev/null || { echo "required executable not found: $executable" >&2; exit 1; }
 done
 "$DOCKER_BIN" info >/dev/null
+umask 077
 ECI_DEV_TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$ECI_DEV_TMP_DIR"' EXIT
 
@@ -53,6 +55,60 @@ for namespace in data-plane query-plane ingestion-plane ingress; do
     --from-env-file="$ECI_DEV_TMP_DIR/runtime.env" \
     --dry-run=client -o yaml | "$KUBECTL_BIN" apply -f - >/dev/null
 done
+
+# MinIO is TLS-only in both profiles. Reuse a valid hostname-bound certificate
+# for the disposable cluster, or generate it locally; only the public CA is
+# copied to the ingestion namespace.
+ECI_MINIO_TLS_ROTATED=false
+if "$KUBECTL_BIN" -n data-plane get secret eci-minio-tls >/dev/null 2>&1; then
+  "$KUBECTL_BIN" -n data-plane get secret eci-minio-tls \
+    -o 'jsonpath={.data.tls\.crt}' | base64 --decode >"$ECI_DEV_TMP_DIR/minio.crt"
+  "$KUBECTL_BIN" -n data-plane get secret eci-minio-tls \
+    -o 'jsonpath={.data.ca\.crt}' | base64 --decode >"$ECI_DEV_TMP_DIR/minio-ca.crt"
+  "$KUBECTL_BIN" -n data-plane get secret eci-minio-tls \
+    -o 'jsonpath={.data.tls\.key}' | base64 --decode >"$ECI_DEV_TMP_DIR/minio.key"
+  if ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio.crt" -checkend 86400 -noout >/dev/null 2>&1 || \
+     ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio.crt" -checkhost minio.data-plane.svc.cluster.local -noout >/dev/null 2>&1 || \
+     ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio.crt" -noout -text | grep -q 'CA:FALSE' || \
+     ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio-ca.crt" -checkend 86400 -noout >/dev/null 2>&1 || \
+     ! openssl x509 -in "$ECI_DEV_TMP_DIR/minio-ca.crt" -noout -text | grep -q 'CA:TRUE' || \
+     ! openssl verify -purpose sslserver -CAfile "$ECI_DEV_TMP_DIR/minio-ca.crt" "$ECI_DEV_TMP_DIR/minio.crt" >/dev/null 2>&1 || \
+     ! eci_tls_private_key_matches_certificate "$ECI_DEV_TMP_DIR/minio.crt" "$ECI_DEV_TMP_DIR/minio.key"; then
+    ECI_MINIO_TLS_ROTATED=true
+  fi
+else
+  ECI_MINIO_TLS_ROTATED=true
+fi
+if [[ "$ECI_MINIO_TLS_ROTATED" == true ]]; then
+  openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 365 \
+    -subj '/CN=eci-minio-dev-ca' \
+    -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' \
+    -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+    -keyout "$ECI_DEV_TMP_DIR/minio-ca.key" -out "$ECI_DEV_TMP_DIR/minio-ca.crt" >/dev/null 2>&1
+  openssl req -new -newkey rsa:2048 -sha256 -nodes \
+    -subj '/CN=minio.data-plane.svc' \
+    -keyout "$ECI_DEV_TMP_DIR/minio.key" -out "$ECI_DEV_TMP_DIR/minio.csr" >/dev/null 2>&1
+  printf '%s\n' \
+    'basicConstraints=critical,CA:FALSE' \
+    'keyUsage=critical,digitalSignature,keyEncipherment' \
+    'extendedKeyUsage=serverAuth' \
+    'subjectAltName=DNS:minio,DNS:minio.data-plane.svc,DNS:minio.data-plane.svc.cluster.local,DNS:*.minio-headless.data-plane.svc.cluster.local' \
+    >"$ECI_DEV_TMP_DIR/minio-leaf.ext"
+  openssl x509 -req -in "$ECI_DEV_TMP_DIR/minio.csr" \
+    -CA "$ECI_DEV_TMP_DIR/minio-ca.crt" -CAkey "$ECI_DEV_TMP_DIR/minio-ca.key" \
+    -CAcreateserial -days 365 -sha256 -extfile "$ECI_DEV_TMP_DIR/minio-leaf.ext" \
+    -out "$ECI_DEV_TMP_DIR/minio.crt" >/dev/null 2>&1
+  chmod 0600 "$ECI_DEV_TMP_DIR/minio-ca.key" "$ECI_DEV_TMP_DIR/minio-ca.crt" \
+    "$ECI_DEV_TMP_DIR/minio.key" "$ECI_DEV_TMP_DIR/minio.crt"
+  "$KUBECTL_BIN" -n data-plane create secret generic eci-minio-tls \
+    --from-file=tls.crt="$ECI_DEV_TMP_DIR/minio.crt" \
+    --from-file=tls.key="$ECI_DEV_TMP_DIR/minio.key" \
+    --from-file=ca.crt="$ECI_DEV_TMP_DIR/minio-ca.crt" \
+    --dry-run=client -o yaml | "$KUBECTL_BIN" apply -f - >/dev/null
+fi
+"$KUBECTL_BIN" -n ingestion-plane create secret generic eci-minio-ca \
+  --from-file=ca.crt="$ECI_DEV_TMP_DIR/minio-ca.crt" \
+  --dry-run=client -o yaml | "$KUBECTL_BIN" apply -f - >/dev/null
 
 # The in-cluster development issuer is HTTPS-only. Reuse a still-valid
 # hostname-bound certificate so repeated installs do not rotate trust
@@ -126,6 +182,17 @@ ECI_K8S_PROFILE=dev HELM_BIN="$HELM_BIN" KUBECTL_BIN="$KUBECTL_BIN" "$ROOT_DIR/d
 "$HELM_BIN" upgrade --install eci "$ROOT_DIR/deploy/k8s/eci-platform" \
   --namespace query-plane --values "$ROOT_DIR/deploy/k8s/eci-platform/values-dev.yaml" \
   --wait --atomic --timeout 20m
+
+# CloudNativePG owns the PostgreSQL server CA. Copy only ca.crt to the worker
+# namespace after the Cluster has reconciled; never copy ca.key.
+"$KUBECTL_BIN" -n data-plane wait --for=condition=Ready cluster/eci-postgres --timeout=10m
+"$KUBECTL_BIN" -n data-plane get secret eci-postgres-ca \
+  -o 'jsonpath={.data.ca\.crt}' | base64 --decode >"$ECI_DEV_TMP_DIR/postgres-ca.crt"
+test -s "$ECI_DEV_TMP_DIR/postgres-ca.crt"
+chmod 0600 "$ECI_DEV_TMP_DIR/postgres-ca.crt"
+"$KUBECTL_BIN" -n ingestion-plane create secret generic eci-postgres-ca \
+  --from-file=ca.crt="$ECI_DEV_TMP_DIR/postgres-ca.crt" \
+  --dry-run=client -o yaml | "$KUBECTL_BIN" apply -f - >/dev/null
 if [[ "$ECI_KEYCLOAK_TLS_ROTATED" == true ]]; then
   "$KUBECTL_BIN" -n ingress rollout restart deployment/keycloak >/dev/null
   "$KUBECTL_BIN" -n ingress rollout status deployment/keycloak --timeout=10m
@@ -134,7 +201,7 @@ fi
 # Strimzi owns client private keys in data-plane. The dev bootstrap copies only
 # each workload's own public CA/certificate/private key into ingestion-plane;
 # it never copies a CA private key or shares one client identity across apps.
-for workload in embedding-worker sink-graph sink-vector sink-search; do
+for workload in ingestion embedding-worker sink-graph sink-vector sink-search; do
   user="eci-kafka-${workload}"
   "$KUBECTL_BIN" -n data-plane wait --for=condition=Ready "kafkauser/${user}" --timeout=5m
   identity_dir="$ECI_DEV_TMP_DIR/$user"

@@ -22,8 +22,12 @@ pub mod resolve;
 pub mod hashing;
 pub mod lineage;
 pub mod persist;
+pub mod runtime;
+pub mod worker;
 pub use persist::{
-    persist_parsed_file, scoped_node_id, IngestionScope, PersistError, PersistSummary, ScopeError,
+    inspect_ingestion_command_receipt, persist_ingestion_command, persist_parsed_file,
+    scoped_node_id, CommandOutcome, CommandReceiptStatus, IngestionScope, PersistError,
+    PersistSummary, ScopeError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +85,17 @@ pub fn parse_file(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRela
 /// `unresolved` (SPEC-025/026, non pertinente qui) esattamente come
 /// [`parse_js_file`]/[`parse_ts_file`] già fanno.
 pub fn parse_file_full(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelation>, Vec<chunking::CodeChunk>) {
+    parse_file_full_with_telemetry(file_path, source, true)
+}
+
+/// Runtime-only parsing path for authenticated repository content. It keeps
+/// `file_path` in canonical provenance but deliberately excludes it from span
+/// attributes, as required by SPEC-067's observability boundary.
+pub(crate) fn parse_file_full_private(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<CodeRelation>, Vec<chunking::CodeChunk>) {
+    parse_file_full_with_telemetry(file_path, source, false)
+}
+
+fn parse_file_full_with_telemetry(file_path: &str, source: &str, expose_path_in_span: bool) -> (Vec<CodeNode>, Vec<CodeRelation>, Vec<chunking::CodeChunk>) {
     let language = match std::path::Path::new(file_path)
         .extension()
         .and_then(|e| e.to_str())
@@ -93,7 +108,12 @@ pub fn parse_file_full(file_path: &str, source: &str) -> (Vec<CodeNode>, Vec<Cod
              il dispatch per linguaggio è limitato a .go/.js/.ts (SPEC-024/026 §2)."
         ),
     };
-    let _span = tracing::info_span!("parse_file_full", file_path = file_path, language = language).entered();
+    let span = if expose_path_in_span {
+        tracing::info_span!("parse_file_full", file_path = file_path, language = language)
+    } else {
+        tracing::info_span!("parse_file_full", language = language)
+    };
+    let _span = span.entered();
 
     match language {
         "go" => parse_go_file_full(file_path, source),

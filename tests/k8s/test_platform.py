@@ -81,6 +81,7 @@ class PlatformChartTests(unittest.TestCase):
             ("ingestion-plane", "sink-graph"),
             ("ingestion-plane", "sink-vector"),
             ("ingestion-plane", "sink-search"),
+            ("ingestion-plane", "ingestion"),
             ("gpu-plane", "vllm"),
             ("gpu-plane", "embedder"),
             ("gpu-plane", "reranker"),
@@ -91,19 +92,42 @@ class PlatformChartTests(unittest.TestCase):
         self.assertNotIn(("query-plane", "verification"), deployments)
         self.assertNotIn(("query-plane", "summarization"), deployments)
         cronjobs = {obj["metadata"]["name"] for obj in self.standard if obj.get("kind") == "CronJob"}
-        self.assertEqual(cronjobs, {"gds-impact", "ingestion-template"})
-        ingestion = self.by_key[("CronJob", "ingestion-plane", "ingestion-template")]
-        self.assertTrue(ingestion["spec"]["suspend"])
-        ingestion_pod = ingestion["spec"]["jobTemplate"]["spec"]["template"]["spec"]
-        self.assertEqual(ingestion_pod["containers"][0]["args"], ["/input/source"])
+        self.assertEqual(cronjobs, {"gds-impact"})
+        ingestion = self.by_key[("Deployment", "ingestion-plane", "ingestion")]
+        self.assertEqual(ingestion["spec"]["replicas"], 4)
+        ingestion_pod = ingestion["spec"]["template"]["spec"]
+        self.assertEqual(ingestion_pod["terminationGracePeriodSeconds"], 30)
         self.assertEqual(
             {item["name"] for item in ingestion_pod["containers"][0]["env"]},
-            {"POSTGRES_DSN", "ECI_TENANT_ID", "ECI_REPOSITORY", "ECI_ACL_GROUP"},
+            {
+                "POSTGRES_DSN", "KAFKA_TOPIC", "KAFKA_GROUP_ID",
+                "MINIO_ENDPOINT", "MINIO_BUCKET", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY",
+                "MINIO_CA_FILE", "POSTGRES_CA_FILE", "ECI_INGESTION_MAX_SOURCE_BYTES",
+                "ECI_METRICS_ADDRESS",
+            },
         )
+        container = ingestion_pod["containers"][0]
+        ingestion_env = {item["name"]: item for item in container["env"]}
         self.assertEqual(
-            ingestion_pod["volumes"][1]["persistentVolumeClaim"],
-            {"claimName": "eci-ingestion-source", "readOnly": True},
+            ingestion_env["MINIO_ENDPOINT"]["value"],
+            "https://minio.data-plane.svc.cluster.local:9000",
         )
+        self.assertEqual(ingestion_env["MINIO_CA_FILE"]["value"], "/etc/eci/minio/ca.crt")
+        self.assertEqual(ingestion_env["POSTGRES_CA_FILE"]["value"], "/etc/eci/postgres/ca.crt")
+        self.assertEqual(container["envFrom"], [{"configMapRef": {"name": "eci-runtime-routing"}}])
+        self.assertEqual(container["ports"], [{"name": "service", "containerPort": 9100}])
+        self.assertEqual(container["readinessProbe"]["httpGet"], {"path": "/ready", "port": "service", "scheme": "HTTP"})
+        self.assertEqual(container["startupProbe"]["httpGet"], {"path": "/live", "port": "service", "scheme": "HTTP"})
+        self.assertEqual(container["livenessProbe"]["httpGet"], {"path": "/live", "port": "service", "scheme": "HTTP"})
+        self.assertEqual(ingestion["metadata"]["annotations"], {"eci.io/max-replicas": "40"})
+        self.assertEqual(
+            {volume["name"] for volume in ingestion_pod["volumes"]},
+            {"tmp", "kafka-ca", "minio-ca", "postgres-ca"},
+        )
+        volume_by_name = {volume["name"]: volume for volume in ingestion_pod["volumes"]}
+        self.assertEqual(volume_by_name["minio-ca"]["secret"]["secretName"], "eci-minio-ca")
+        self.assertEqual(volume_by_name["postgres-ca"]["secret"]["secretName"], "eci-postgres-ca")
+        self.assertNotIn(("CronJob", "ingestion-plane", "ingestion-template"), self.by_key)
         gds = self.by_key[("CronJob", "ingestion-plane", "gds-impact")]
         self.assertTrue(gds["spec"]["suspend"])
         gds_container = gds["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]
@@ -250,11 +274,13 @@ class PlatformChartTests(unittest.TestCase):
             "eci_connect_status", "outbox.event.CodeChunk.retry.embedding-worker",
             "outbox.event.CodeNode.retry.sink-graph", "outbox.event.CodeRelation.retry.sink-graph",
             "outbox.event.CodeEmbedding.retry.sink-vector", "outbox.event.CodeChunk.retry.sink-search",
+            "eci.ingestion.file.v1", "eci.ingestion.file.v1.DLQ",
         }
         self.assertEqual(set(topics), expected_topics)
         self.assertTrue(all(topic["spec"]["replicas"] == 3 for topic in topics.values()))
         self.assertEqual(topics["eci_connect_offsets"]["spec"]["partitions"], 25)
         self.assertEqual(topics["eci_connect_status"]["spec"]["partitions"], 5)
+        self.assertEqual(topics["eci.ingestion.file.v1"]["spec"]["partitions"], 40)
         self.assertFalse(kafka["spec"]["kafka"]["config"]["auto.create.topics.enable"])
 
         users = {obj["metadata"]["name"]: obj for obj in self.standard if obj.get("kind") == "KafkaUser"}
@@ -262,7 +288,8 @@ class PlatformChartTests(unittest.TestCase):
             set(users),
             {
                 "eci-kafka-kafka-connect", "eci-kafka-embedding-worker", "eci-kafka-sink-graph",
-                "eci-kafka-sink-vector", "eci-kafka-sink-search",
+                "eci-kafka-sink-vector", "eci-kafka-sink-search", "eci-kafka-ingestion",
+                "eci-kafka-ingestion-commit-producer",
             },
         )
         for name, user in users.items():
@@ -274,6 +301,23 @@ class PlatformChartTests(unittest.TestCase):
                     if resource["type"] in {"topic", "group"}:
                         self.assertEqual(resource["patternType"], "literal")
                         self.assertNotEqual(resource["name"], "*")
+
+        ingestion_acls = users["eci-kafka-ingestion"]["spec"]["authorization"]["acls"]
+        self.assertEqual(
+            {
+                (acl["resource"]["type"], acl["resource"].get("name"), tuple(acl["operations"]))
+                for acl in ingestion_acls
+            },
+            {
+                ("topic", "eci.ingestion.file.v1", ("Describe", "Read")),
+                ("topic", "eci.ingestion.file.v1.DLQ", ("Describe", "Write")),
+                ("group", "ingestion", ("Read",)),
+            },
+        )
+        producer_acls = users["eci-kafka-ingestion-commit-producer"]["spec"]["authorization"]["acls"]
+        self.assertEqual(len(producer_acls), 1)
+        self.assertEqual(producer_acls[0]["resource"]["name"], "eci.ingestion.file.v1")
+        self.assertEqual(producer_acls[0]["operations"], ["Describe", "Write"])
 
         graph_resources = {
             (acl["resource"]["type"], acl["resource"].get("name"))
@@ -471,6 +515,52 @@ class PlatformChartTests(unittest.TestCase):
                     f"{obj['metadata']['name']} grants namespace-membership egress",
                 )
         self.assertNotIn(("observability", "allow-observability-probes"), policies)
+        prometheus_egress = self.by_key[(
+            "NetworkPolicy", "observability", "allow-prometheus-to-ingestion-metrics",
+        )]
+        self.assertEqual(
+            prometheus_egress["spec"],
+            {
+                "podSelector": {
+                    "matchLabels": {"app.kubernetes.io/name": "prometheus"},
+                },
+                "policyTypes": ["Egress"],
+                "egress": [{
+                    "to": [{
+                        "namespaceSelector": {
+                            "matchLabels": {"kubernetes.io/metadata.name": "ingestion-plane"},
+                        },
+                        "podSelector": {
+                            "matchLabels": {"app.kubernetes.io/name": "ingestion"},
+                        },
+                    }],
+                    "ports": [{"protocol": "TCP", "port": 9100}],
+                }],
+            },
+        )
+        ingestion_metrics_ingress = self.by_key[(
+            "NetworkPolicy", "ingestion-plane", "allow-prometheus-to-ingestion-metrics-ingress",
+        )]
+        self.assertEqual(
+            ingestion_metrics_ingress["spec"],
+            {
+                "podSelector": {
+                    "matchLabels": {"app.kubernetes.io/name": "ingestion"},
+                },
+                "policyTypes": ["Ingress"],
+                "ingress": [{
+                    "from": [{
+                        "namespaceSelector": {
+                            "matchLabels": {"kubernetes.io/metadata.name": "observability"},
+                        },
+                        "podSelector": {
+                            "matchLabels": {"app.kubernetes.io/name": "prometheus"},
+                        },
+                    }],
+                    "ports": [{"protocol": "TCP", "port": 9100}],
+                }],
+            },
+        )
         self.assertNotIn(("Service", "data-plane", "kafka-connect"), self.by_key)
         for name in {
             "allow-kafka-connect-to-kafka", "allow-kafka-connect-to-kafka-ingress",
@@ -555,9 +645,37 @@ class PlatformChartTests(unittest.TestCase):
         minio = self.by_key[("StatefulSet", "data-plane", "minio")]
         self.assertEqual(minio["spec"]["replicas"], 4)
         self.assertEqual(minio["spec"]["podManagementPolicy"], "Parallel")
+        self.assertEqual(
+            minio["spec"]["template"]["spec"]["securityContext"],
+            {
+                "runAsNonRoot": True,
+                "runAsUser": 65532,
+                "runAsGroup": 65532,
+                "fsGroup": 65532,
+                "seccompProfile": {"type": "RuntimeDefault"},
+            },
+        )
         self.assertEqual(minio["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"], "100Gi")
         minio_args = minio["spec"]["template"]["spec"]["containers"][0]["args"]
-        self.assertTrue(any("minio-{0...3}" in value for value in minio_args))
+        self.assertIn("--certs-dir", minio_args)
+        self.assertTrue(any("https://minio-{0...3}" in value for value in minio_args))
+        minio_container = minio["spec"]["template"]["spec"]["containers"][0]
+        for probe in ("startupProbe", "readinessProbe", "livenessProbe"):
+            self.assertEqual(minio_container[probe]["httpGet"]["scheme"], "HTTPS")
+        tls_volume = next(
+            volume for volume in minio["spec"]["template"]["spec"]["volumes"]
+            if volume["name"] == "tls"
+        )
+        self.assertEqual(tls_volume["secret"]["secretName"], "eci-minio-tls")
+        self.assertEqual(tls_volume["secret"]["defaultMode"], 0o440)
+        self.assertEqual(
+            tls_volume["secret"]["items"],
+            [
+                {"key": "tls.crt", "path": "public.crt"},
+                {"key": "tls.key", "path": "private.key"},
+                {"key": "ca.crt", "path": "CAs/ca.crt"},
+            ],
+        )
         dev_minio = keyed(self.dev)[("StatefulSet", "data-plane", "minio")]
         self.assertEqual(dev_minio["spec"]["replicas"], 1)
 
@@ -727,9 +845,30 @@ class PlatformChartTests(unittest.TestCase):
         self.assertIn("create secret tls eci-keycloak-tls", up)
         self.assertIn("subjectAltName=DNS:keycloak.ingress.svc", up)
         self.assertIn("create configmap eci-keycloak-ca", up)
-        self.assertNotIn("--from-file=tls.key", up)
+        keycloak_ca_copy = up.split("create configmap eci-keycloak-ca", 1)[1].split("printf", 1)[0]
+        self.assertNotIn("tls.key", keycloak_ca_copy)
+        self.assertIn("create secret generic eci-minio-tls", up)
+        self.assertIn("create secret generic eci-minio-ca", up)
+        self.assertIn("basicConstraints=critical,CA:FALSE", up)
+        self.assertIn("--from-file=ca.crt=\"$ECI_DEV_TMP_DIR/minio-ca.crt\"", up)
+        self.assertIn(
+            "openssl verify -purpose sslserver -CAfile "
+            '"$ECI_DEV_TMP_DIR/minio-ca.crt"',
+            up,
+        )
+        self.assertIn(
+            "openssl x509 -in \"$ECI_DEV_TMP_DIR/minio.crt\" "
+            "-checkhost minio.data-plane.svc.cluster.local",
+            up,
+        )
+        self.assertIn("create secret generic eci-postgres-ca", up)
+        self.assertIn("--from-file=tls.key", up)
         self.assertIn("https://keycloak.ingress.svc:8443", verify)
         self.assertIn("--cacert /etc/eci/keycloak/ca.crt", verify)
+        self.assertIn(
+            "https://minio.data-plane.svc.cluster.local:9000/minio/health/ready",
+            verify,
+        )
         self.assertIn("rollout status statefulset/redis", verify)
         self.assertNotIn("deployment/redis", verify)
 
@@ -808,6 +947,116 @@ class PlatformChartTests(unittest.TestCase):
         first_runtime_secret_write = "create secret generic eci-runtime"
         self.assertIn(resolution, up)
         self.assertLess(up.index(resolution), up.index(first_runtime_secret_write))
+
+    def test_review_minio_tls_reuse_requires_matching_private_key(self) -> None:
+        policy = ROOT / "deploy/k8s/lib/tls-keypair.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            cert = temp / "server.crt"
+            matching_key = temp / "server.key"
+            other_key = temp / "other.key"
+            subprocess.run(
+                [
+                    "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-days", "1", "-subj", "/CN=minio.data-plane.svc",
+                    "-keyout", str(matching_key), "-out", str(cert),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "openssl", "genpkey", "-algorithm", "RSA",
+                    "-pkeyopt", "rsa_keygen_bits:2048", "-out", str(other_key),
+                ],
+                check=True,
+                capture_output=True,
+            )
+
+            def matches(key: Path) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [
+                        "bash", "-c",
+                        'source "$1"; eci_tls_private_key_matches_certificate "$2" "$3"',
+                        "_", str(policy), str(cert), str(key),
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+
+            self.assertEqual(matches(matching_key).returncode, 0)
+            self.assertNotEqual(matches(other_key).returncode, 0)
+            self.assertNotEqual(matches(temp / "missing.key").returncode, 0)
+
+        up = (ROOT / "deploy/k8s/dev-up.sh").read_text()
+        self.assertIn("eci_tls_private_key_matches_certificate", up)
+        self.assertIn("jsonpath={.data.tls\\.key}", up)
+
+    def test_review_minio_tls_reuse_requires_server_auth_purpose(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            ca_cert = temp / "ca.crt"
+            ca_key = temp / "ca.key"
+            leaf_key = temp / "leaf.key"
+            leaf_csr = temp / "leaf.csr"
+            client_cert = temp / "client-only.crt"
+            server_cert = temp / "server.crt"
+            subprocess.run(
+                [
+                    "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-days", "1", "-subj", "/CN=eci-test-ca",
+                    "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
+                    "-keyout", str(ca_key), "-out", str(ca_cert),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes",
+                    "-subj", "/CN=minio.data-plane.svc.cluster.local",
+                    "-keyout", str(leaf_key), "-out", str(leaf_csr),
+                ],
+                check=True,
+                capture_output=True,
+            )
+
+            def signed_leaf(purpose: str, output: Path, createserial: bool) -> None:
+                extensions = temp / f"{purpose}.ext"
+                extensions.write_text(
+                    "basicConstraints=critical,CA:FALSE\n"
+                    f"extendedKeyUsage={purpose}\n"
+                    "subjectAltName=DNS:minio.data-plane.svc.cluster.local\n"
+                )
+                command = [
+                    "openssl", "x509", "-req", "-in", str(leaf_csr),
+                    "-CA", str(ca_cert), "-CAkey", str(ca_key),
+                ]
+                if createserial:
+                    command.append("-CAcreateserial")
+                else:
+                    command.extend(["-CAserial", str(temp / "ca.srl")])
+                command.extend([
+                    "-days", "1", "-sha256", "-extfile", str(extensions),
+                    "-out", str(output),
+                ])
+                subprocess.run(command, check=True, capture_output=True)
+
+            signed_leaf("clientAuth", client_cert, True)
+            signed_leaf("serverAuth", server_cert, False)
+
+            def verifies_for_server(cert: Path) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [
+                        "openssl", "verify", "-purpose", "sslserver",
+                        "-CAfile", str(ca_cert), str(cert),
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+
+            self.assertNotEqual(verifies_for_server(client_cert).returncode, 0)
+            self.assertEqual(verifies_for_server(server_cert).returncode, 0)
 
     def test_review_existing_kind_cluster_must_match_pinned_image_and_version(self) -> None:
         policy = ROOT / "deploy/k8s/lib/kind-cluster.sh"

@@ -2,7 +2,7 @@
 Stato: implemented
 Task-tree: T7.1 · Servizi: `deploy/k8s`, tutti i workload ECI · ADD: Modulo 4 §1.3, §2.1–§2.3, D8
 Contratti: nessuna modifica; `contracts/**` è consumato in sola lettura dalle immagini applicative
-ADR: ADR-0016 (CLI ingestion one-shot rappresentato senza fingere un server)
+ADR: ADR-0016, superato per ingestion runtime da ADR-0023 / SPEC-067
 
 ## 1. Obiettivo
 
@@ -152,7 +152,7 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    stesso namespace non conferisce accesso ai datastore. Il probe dev gira nel
    data-plane e ottiene solo due eccezioni esplicite verso OPA/Keycloak;
    observability non riceve accesso generale alle API dati.
-   Startup/readiness dei quattro worker Kafka chiama `/ready`, che usa lo
+   Startup/readiness dei quattro worker Kafka downstream CDC chiama `/ready`, che usa lo
    stesso transport del consumer e verifica metadata di ogni topic,
    coordinator, offset access del gruppo e una Fetch non-consumante al log end
    che esercita realmente la Topic Read ACL. Errori TLS/topic/group rispondono
@@ -183,10 +183,9 @@ sono rifiutati. Envoy richiede inoltre ConfigMap `eci-envoy-config` generato da
    le NetworkPolicy. `dev-up.sh` genera localmente una identità hostname-bound
    non versionata; il gateway monta soltanto il certificato pubblico come CA
    aggiuntiva e lo smoke verifica discovery TLS e issuer esatto.
-   Il binario ingestion corrente è one-shot: il chart lo rappresenta come
-   template CronJob sospeso, con PVC sorgente read-only e scope Secret
-   enumerato, non come Deployment/listener inesistente. ADR-0016 e T7.1a
-   rendono esplicito che il worker pool D8 resta da implementare.
+   Ingestion è ora il worker long-running di SPEC-067: consuma il topic Kafka
+   autenticato di ADR-0023, legge la sorgente immutabile da MinIO e rende probe
+   reali; il precedente CronJob sospeso di ADR-0016 non viene più renderizzato.
    Anche l'orchestrator corrente espone soltanto il CLI `eci ask`/`eval-golden`:
    non viene renderizzato come Deployment con listener inventato. ADR-0017 e
    T7.1b rendono esplicito il runtime API/streaming ancora da implementare.
@@ -276,8 +275,8 @@ NetworkPolicy default-deny e allow-list, SA dedicati senza automount, identità
 mTLS Kafka per workload con ACL literal, pod security, secret references, pin
 di release/immagini, script con target fisso e fail-closed.
 
-Non-goals: worker ingestion long-running (T7.1a), orchestrator server/API
-long-running (T7.1b), verification/summarization server API (T7.1c),
+Non-goals residui: orchestrator server/API long-running (T7.1b),
+verification/summarization server API (T7.1c),
 autoscaling HPA/KEDA (T7.2), collector/dashboard/alert completi
 (T7.3), pipeline eval (T7.4), load test/SLO (T7.5), produzione cloud,
 provisioning DNS/certificati/GPU, accettazione licenza Neo4j per conto di un
@@ -342,7 +341,7 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
 - [x] Test §3/§7 registrati red-before-green e poi verdi.
 - [x] Chart standard/dev lintano e renderizzano deterministicamente.
 - [x] Catalogo delle implementazioni correnti completo sotto opt-in con digest
-      obbligatori; gap worker D8 dichiarato in ADR-0016/T7.1a, nessun
+      obbligatori; nessun
       placeholder/sleep container o immagine ECI inesistente di default.
 - [x] Debezium/Kafka Connect è pinned, usa una propria identità mTLS/ACL verso Strimzi e non incorpora
       la password PostgreSQL nella ConfigMap del connector; il ruolo PostgreSQL
@@ -353,8 +352,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
 - [x] Standard: Kafka/PG/OpenSearch 3 nodi, Neo4j core+GDS, Qdrant 3 nodi e
       collection con replication factor 2/shard 3.
 - [x] Tutti i server stateless hanno rollout, PDB, due topology spread, risorse
-      e probe reali; il CLI one-shot ha lifecycle Job, il profilo dev dichiara
-      onestamente le riduzioni.
+      e probe reali; ingestion ha lifecycle worker reale e il profilo dev
+      dichiara onestamente le riduzioni.
 - [x] Nessun Secret/credenziale/tag mutable versionato; ogni override immagine
       runtime renderizzato (inclusi CDC, Envoy, MinIO e PostgreSQL) è validato
       come `name@sha256`; Envoy monta config,
@@ -373,7 +372,7 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       Secret reference è omesso e resta presente il carrier NOLOGIN senza
       password necessario al grant upgrade-safe; `Recreate` impedisce surge
       temporanei e slot failover Debezium/CNPG preservano la posizione CDC dopo
-      promozione PostgreSQL 17; i quattro worker sono Ready solo dopo topic Read+group access via
+      promozione PostgreSQL 17; i quattro worker CDC sono Ready solo dopo topic Read+group access via
       il transport Kafka autenticato e embedding-worker entra nel consume-loop
       solo dopo `/health` TEI e mantiene tale dipendenza nella readiness;
       Semantic Cache è Ready solo dopo PING
@@ -392,8 +391,9 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       digest; il tag semver richiesto dal chart non arriva mai al kubelet.
 - [x] vLLM/TEI usano path modello canonici da PVC esterno read-only e startup
       probe bounded; nessun download di pesi è implicito.
-- [x] Ingestion CLI è modellato come template Job sospeso con input/scope
-      espliciti, mai come server fittizio; deviazione D8 tracciata in ADR-0016.
+- [x] Ingestion è un Deployment 4–40-ready con input Kafka autenticato,
+      persistenza idempotente, backpressure e probe reali secondo
+      ADR-0023/SPEC-067; il template Job transitorio è stato rimosso.
 - [x] Orchestrator CLI non è modellato come Deployment/listener fittizio;
       deviazione runtime tracciata in ADR-0017/T7.1b.
 - [x] Verification/summarization library-only non sono modellati come server;
@@ -419,8 +419,8 @@ dimostra HA, RBAC Enterprise, isolamento hardware GPU o performance D9.
       senza dichiarare quel criterio soddisfatto.
 - [x] Runbook documenta install, upgrade atomico, rollback, backup boundary,
       teardown scoped e raccolta diagnostica.
-- [ ] T7.1a sostituisce il Job transitorio con worker Deployment 4–40 e
-      readiness/backpressure reali; solo allora lo stato può diventare verified.
+- [x] T7.1a sostituisce il Job transitorio con worker Deployment 4–40 e
+      readiness/backpressure reali (SPEC-067).
 - [ ] T7.1b fornisce il server orchestrator autenticato/streaming e probe reali;
       solo allora l'inventario applicativo T7.1 può diventare verified.
 - [ ] T7.1c fornisce server verification/summarization autenticati e probe

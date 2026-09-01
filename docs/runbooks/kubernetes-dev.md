@@ -112,23 +112,27 @@ passes those paths to vLLM/TEI explicitly and has no network egress fallback
 for model download. Missing model data therefore keeps the rollout Not Ready;
 it is never replaced with a different model or an online mutable revision.
 
-The current ingestion binary is a one-shot CLI, so the chart deliberately
-renders `ingestion-template` as a suspended CronJob and never as a fake TCP
-server. Before cloning it, provision the read-only `eci-ingestion-source` PVC
-with the exact source snapshot and create `eci-runtime-ingestion` containing
-only `POSTGRES_DSN`, `ECI_TENANT_ID`, `ECI_REPOSITORY` and `ECI_ACL_GROUP`.
-Then create one bounded Job explicitly:
-
-```bash
-kubectl -n ingestion-plane create job ingestion-<commit-id> \
-  --from=cronjob/ingestion-template
-kubectl -n ingestion-plane wait --for=condition=complete \
-  job/ingestion-<commit-id> --timeout=1h
-```
-
-Do not unsuspend the schedule or run two scopes through the same prepared
-Secret/PVC. ADR-0016 records the boundary; T7.1a replaces it with the
-authenticated durable worker pool required by D8 and T7.2 HPA.
+Ingestion is the authenticated durable worker pool from ADR-0023/SPEC-067.
+Before enabling applications, provision bucket `eci-sources`, immutable source
+objects at the derived `sources/v1/...` keys, and `eci-runtime-ingestion` with
+only `POSTGRES_DSN`, `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`. The workload
+also mounts only the Strimzi-created identity `eci-kafka-ingestion`, the public
+MinIO CA from `eci-minio-ca` and the CloudNativePG public CA from
+`eci-postgres-ca`; do not copy the producer identity, `ca.key`, or the MinIO
+server key into its namespace. `POSTGRES_DSN` must name the certificate-bound
+cluster Service and MinIO must remain HTTPS; plaintext endpoints fail startup.
+The dev bootstrap validates and the smoke probe uses the exact configured
+MinIO hostname `minio.data-plane.svc.cluster.local`; a reusable certificate
+that covers only the abbreviated Service name or lacks the `serverAuth` purpose
+is rotated before rollout.
+A trusted commit producer must use
+`eci-kafka-ingestion-commit-producer`, publish the closed
+`contracts/jsonschema/ingestion-file-command.json` value and set exactly one
+each of `eci-tenant-id`, `eci-repository` and `eci-acl-group`. Scope in the JSON
+body is rejected. The worker commits offsets only after PostgreSQL commit or a
+confirmed sanitized DLQ publication; missing Kafka, PostgreSQL, bucket or
+credentials keeps `/ready` at 503. ADR-0016 remains historical and its CronJob
+is no longer rendered. T7.2 owns CPU HPA.
 
 The current orchestrator image must not be added to `applications.workloads`:
 it contains only the `eci ask` and `eci eval-golden` CLI entrypoints and opens

@@ -45,11 +45,20 @@ only the explicitly mapped keys for that process. NetworkPolicy likewise
 selects the source workload, destination workload/store and TCP port; namespace
 membership alone grants no datastore access.
 
-The current Rust ingestion executable is truthfully packaged as the suspended
-`ingestion-template` one-shot Job template, not as a listening Deployment. It
-requires an external read-only source PVC and a scope-only per-workload Secret.
-ADR-0016 records this temporary boundary; T7.1a owns the durable authenticated
-worker runtime required before CPU HPA can be claimed.
+Rust ingestion is a long-running Deployment (SPEC-067). It consumes only
+`eci.ingestion.file.v1` with its dedicated Strimzi mTLS identity, derives the
+MinIO object key from authenticated scope headers and persists canonical rows,
+outbox and command receipt atomically. Provision the `eci-sources` bucket and
+the enumerated `eci-runtime-ingestion` keys before enabling applications.
+MinIO and PostgreSQL are TLS-only: provision `eci-minio-tls` in `data-plane`
+with `tls.crt`, `tls.key` and the signing `ca.crt` (the latter is mounted under
+MinIO's `CAs/` peer trust directory), and copy only public CAs into
+`eci-minio-ca` and `eci-postgres-ca` in `ingestion-plane`. Never copy a CA
+private key or MinIO server key to the worker. A missing dependency or trust
+anchor keeps startup/readiness failed closed. The distinct
+`eci-kafka-ingestion-commit-producer` identity is the only writer of the input
+topic. ADR-0023 supersedes the temporary Job boundary in ADR-0016. CPU scaling
+remains T7.2.
 The Python orchestrator is likewise CLI-only today, so this chart does not
 render an orchestrator Deployment or fictional listener. ADR-0017 records that
 truth boundary; T7.1b owns the authenticated long-running API, streaming,

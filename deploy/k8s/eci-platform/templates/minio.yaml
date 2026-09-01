@@ -97,8 +97,10 @@ spec:
           image: {{ include "eci.digestImage" (dict "field" "dataPlane.minio.image" "value" .Values.dataPlane.minio.image) | quote }}
           args:
             - server
+            - --certs-dir
+            - /certs
             {{- if gt (int .Values.dataPlane.minio.replicas) 1 }}
-            - {{ printf "http://minio-{0...%d}.minio-headless.data-plane.svc.cluster.local/data" (sub (int .Values.dataPlane.minio.replicas) 1) | quote }}
+            - {{ printf "https://minio-{0...%d}.minio-headless.data-plane.svc.cluster.local/data" (sub (int .Values.dataPlane.minio.replicas) 1) | quote }}
             {{- else }}
             - /data
             {{- end }}
@@ -115,17 +117,17 @@ spec:
             - name: MINIO_ROOT_PASSWORD
               valueFrom: {secretKeyRef: {name: {{ .Values.global.existingSecret }}, key: minio-password}}
           startupProbe:
-            httpGet: {path: /minio/health/live, port: api}
+            httpGet: {path: /minio/health/live, port: api, scheme: HTTPS}
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 60
           readinessProbe:
-            httpGet: {path: /minio/health/ready, port: api}
+            httpGet: {path: /minio/health/ready, port: api, scheme: HTTPS}
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 12
           livenessProbe:
-            httpGet: {path: /minio/health/live, port: api}
+            httpGet: {path: /minio/health/live, port: api, scheme: HTTPS}
             periodSeconds: 10
             timeoutSeconds: 2
             failureThreshold: 3
@@ -134,8 +136,17 @@ spec:
           volumeMounts:
             - {name: data, mountPath: /data}
             - {name: tmp, mountPath: /tmp}
+            - {name: tls, mountPath: /certs, readOnly: true}
       volumes:
         - {name: tmp, emptyDir: {}}
+        - name: tls
+          secret:
+            secretName: {{ required "dataPlane.minio.tlsSecret is required" .Values.dataPlane.minio.tlsSecret }}
+            defaultMode: 0440
+            items:
+              - {key: tls.crt, path: public.crt}
+              - {key: tls.key, path: private.key}
+              - {key: ca.crt, path: CAs/ca.crt}
   volumeClaimTemplates:
     - metadata: {name: data}
       spec:

@@ -38,7 +38,7 @@ resources:
 dataPlane:
   redis: {storage: 1Gi}
   postgres: {instances: 1, storage: 1Gi}
-  kafka: {replicas: 1, storage: 1Gi, topicPartitions: 1}
+  kafka: {replicas: 1, storage: 1Gi, topicPartitions: 1, ingestionTopicPartitions: 1}
   openSearch:
     replicas: 1
     storage: 2Gi

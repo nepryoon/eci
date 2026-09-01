@@ -414,6 +414,48 @@ spec:
 {{- if and (ne .Values.global.profile "dev") (not .Values.routing.oidcIssuerEgressCIDRs) }}
 {{- fail "routing.oidcIssuerEgressCIDRs must contain explicit trusted issuer/proxy CIDRs when applications.enabled=true outside the bundled dev profile" }}
 {{- end }}
+---
+# Metrics scraping is an explicit cross-namespace flow. Both sides are needed
+# because the chart applies default-deny egress in observability and
+# default-deny ingress in ingestion-plane. Exact pod selectors prevent other
+# observability workloads from reaching the ingestion listener.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-to-ingestion-metrics
+  namespace: observability
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: prometheus}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: ingestion-plane}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: ingestion}
+      ports: [{protocol: TCP, port: 9100}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-to-ingestion-metrics-ingress
+  namespace: ingestion-plane
+  labels:
+    {{- include "eci.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: ingestion}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: observability}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: prometheus}
+      ports: [{protocol: TCP, port: 9100}]
 {{- if .Values.routing.oidcIssuerEgressCIDRs }}
 ---
 apiVersion: networking.k8s.io/v1
@@ -449,7 +491,8 @@ spec:
   (dict "name" "semantic-cache-to-opa" "sourceNamespace" "query-plane" "source" "semantic-cache" "destinationNamespace" "query-plane" "destinationSelector" (dict "app.kubernetes.io/name" "opa") "port" 8181)
   (dict "name" "semantic-cache-to-redis" "sourceNamespace" "query-plane" "source" "semantic-cache" "destinationNamespace" "data-plane" "destinationSelector" (dict "app.kubernetes.io/name" "redis") "port" 6379)
   (dict "name" "ingestion-to-postgres" "sourceNamespace" "ingestion-plane" "source" "ingestion" "destinationNamespace" "data-plane" "destinationSelector" (dict "cnpg.io/cluster" "eci-postgres") "port" 5432)
-  (dict "name" "ingestion-to-embedder" "sourceNamespace" "ingestion-plane" "source" "ingestion" "destinationNamespace" "gpu-plane" "destinationSelector" (dict "app.kubernetes.io/name" "embedder") "port" 80)
+  (dict "name" "ingestion-to-kafka" "sourceNamespace" "ingestion-plane" "source" "ingestion" "destinationNamespace" "data-plane" "destinationSelector" (dict "strimzi.io/cluster" "eci-kafka" "strimzi.io/component-type" "kafka") "port" 9093)
+  (dict "name" "ingestion-to-minio" "sourceNamespace" "ingestion-plane" "source" "ingestion" "destinationNamespace" "data-plane" "destinationSelector" (dict "app.kubernetes.io/name" "minio") "port" 9000)
   (dict "name" "embedding-worker-to-postgres" "sourceNamespace" "ingestion-plane" "source" "embedding-worker" "destinationNamespace" "data-plane" "destinationSelector" (dict "cnpg.io/cluster" "eci-postgres") "port" 5432)
   (dict "name" "embedding-worker-to-kafka" "sourceNamespace" "ingestion-plane" "source" "embedding-worker" "destinationNamespace" "data-plane" "destinationSelector" (dict "strimzi.io/cluster" "eci-kafka" "strimzi.io/component-type" "kafka") "port" 9093)
   (dict "name" "embedding-worker-to-embedder" "sourceNamespace" "ingestion-plane" "source" "embedding-worker" "destinationNamespace" "gpu-plane" "destinationSelector" (dict "app.kubernetes.io/name" "embedder") "port" 80)

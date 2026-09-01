@@ -24,11 +24,15 @@ kind: Deployment
 metadata:
   name: {{ $workload.name }}
   namespace: {{ $workload.namespace }}
+  {{- with $workload.maxReplicas }}
+  annotations:
+    eci.io/max-replicas: {{ . | quote }}
+  {{- end }}
   labels:
     {{- include "eci.labels" $ | nindent 4 }}
     app.kubernetes.io/name: {{ $workload.name }}
 spec:
-  replicas: {{ $workload.replicas }}
+  replicas: {{ ternary 1 $workload.replicas (and (eq $.Values.global.profile "dev") (eq $workload.name "ingestion")) }}
   strategy:
     type: RollingUpdate
     rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
@@ -48,6 +52,11 @@ spec:
     spec:
       serviceAccountName: {{ $workload.name }}
       automountServiceAccountToken: false
+      {{- if eq $workload.name "ingestion" }}
+      # Runtime command drain (20s) plus bounded blocking-pool teardown (5s)
+      # must complete before kubelet's hard termination boundary.
+      terminationGracePeriodSeconds: 30
+      {{- end }}
       securityContext:
         {{- include "eci.podSecurityContext" $ | nindent 8 }}
       topologySpreadConstraints:
@@ -90,8 +99,12 @@ spec:
           envFrom:
             - configMapRef:
                 name: eci-runtime-routing
-          {{- with $workload.secretEnv }}
+          {{- if or $workload.fixedEnv $workload.secretEnv }}
           env:
+            {{- range $fixed := $workload.fixedEnv }}
+            - {name: {{ $fixed.name }}, value: {{ $fixed.value | quote }}}
+            {{- end }}
+          {{- with $workload.secretEnv }}
             {{- range $secret := . }}
             - name: {{ $secret.name }}
               valueFrom:
@@ -105,6 +118,7 @@ spec:
             - {name: SSL_CERT_DIR, value: "/etc/eci/oidc:/etc/ssl/certs"}
             {{- end }}
           {{- end }}
+          {{- end }}
           readinessProbe:
             {{- if or (eq $workload.name "semantic-cache") (eq $workload.name "retrieval-engine") (eq $workload.name "llm-gateway") }}
             httpGet: {path: /ready, port: {{ ternary "service" "metrics" (eq $workload.name "llm-gateway") }}, scheme: HTTP}
@@ -117,7 +131,9 @@ spec:
             timeoutSeconds: 2
             failureThreshold: 6
           startupProbe:
-            {{- if or (eq $workload.name "semantic-cache") (eq $workload.name "retrieval-engine") (eq $workload.name "llm-gateway") }}
+            {{- if eq $workload.name "ingestion" }}
+            httpGet: {path: /live, port: service, scheme: HTTP}
+            {{- else if or (eq $workload.name "semantic-cache") (eq $workload.name "retrieval-engine") (eq $workload.name "llm-gateway") }}
             httpGet: {path: /ready, port: {{ ternary "service" "metrics" (eq $workload.name "llm-gateway") }}, scheme: HTTP}
             {{- else if eq $workload.namespace "ingestion-plane" }}
             httpGet: {path: /ready, port: service, scheme: HTTP}
@@ -128,7 +144,11 @@ spec:
             timeoutSeconds: 2
             failureThreshold: 180
           livenessProbe:
+            {{- if eq $workload.name "ingestion" }}
+            httpGet: {path: /live, port: service, scheme: HTTP}
+            {{- else }}
             tcpSocket: {port: service}
+            {{- end }}
             periodSeconds: 10
             timeoutSeconds: 2
             failureThreshold: 3
@@ -141,6 +161,10 @@ spec:
             {{- end }}
             {{- if or (eq $workload.name "retrieval-engine") (eq $workload.name "sink-search") }}
             - {name: opensearch-ca, mountPath: /etc/eci/opensearch, readOnly: true}
+            {{- end }}
+            {{- if eq $workload.name "ingestion" }}
+            - {name: minio-ca, mountPath: /etc/eci/minio, readOnly: true}
+            - {name: postgres-ca, mountPath: /etc/eci/postgres, readOnly: true}
             {{- end }}
             {{- if and (eq $.Values.global.profile "dev") (eq $workload.name "api-gateway") }}
             - {name: oidc-ca, mountPath: /etc/eci/oidc, readOnly: true}
@@ -164,6 +188,16 @@ spec:
         - name: opensearch-ca
           secret:
             secretName: {{ $.Values.routing.openSearchTLSSecret }}
+            items: [{key: ca.crt, path: ca.crt}]
+        {{- end }}
+        {{- if eq $workload.name "ingestion" }}
+        - name: minio-ca
+          secret:
+            secretName: {{ required "routing.minioTLSSecret is required for ingestion" $.Values.routing.minioTLSSecret }}
+            items: [{key: ca.crt, path: ca.crt}]
+        - name: postgres-ca
+          secret:
+            secretName: {{ required "routing.postgresTLSSecret is required for ingestion" $.Values.routing.postgresTLSSecret }}
             items: [{key: ca.crt, path: ca.crt}]
         {{- end }}
         {{- if and (eq $.Values.global.profile "dev") (eq $workload.name "api-gateway") }}

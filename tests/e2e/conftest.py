@@ -226,7 +226,16 @@ def _run_ingestion(filename: str, postgres_dsn_: str) -> str:
         "ECI_ACL_GROUP": "developers",
     }
     proc = subprocess.run(
-        ["cargo", "run", "--quiet", "--manifest-path", str(INGESTION_DIR / "Cargo.toml"), "--", filename],
+        [
+            "cargo",
+            "run",
+            "--quiet",
+            "--manifest-path",
+            str(INGESTION_DIR / "Cargo.toml"),
+            "--",
+            "oneshot",
+            filename,
+        ],
         cwd=FIXTURE_DIR,
         env=env,
         capture_output=True,
@@ -245,8 +254,8 @@ def _run_ingestion(filename: str, postgres_dsn_: str) -> str:
 def ingested_fixture(migrated_postgres) -> dict[str, str]:
     """Ingerisce i 4 file del fixture SPEC-009 attraverso il binario
     REALE `ingestion` (T1.1/T1.2), uno alla volta, invocato con cwd
-    dentro tests/fixtures/sample-repo e il solo nome file (bare) come
-    argomento — così `CodeNode.name`/`file_path` del File risultante è
+    dentro tests/fixtures/sample-repo e il nome file tramite il subcommand
+    esplicito `oneshot` — così `CodeNode.name`/`file_path` del File risultante è
     esattamente "order_service.go" ecc. (stesso identificatore usato
     dal golden dataset e ricalcolabile deterministicamente da
     `harness.file_node_id`, senza dover passare per una ricerca
