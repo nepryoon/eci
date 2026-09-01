@@ -23,6 +23,9 @@ import (
 func TestHydrateSourceTextBatchesSortsAndCarriesAuthenticatedScope(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if serveTestPIT(w, request) {
+			return
+		}
 		calls.Add(1)
 		if request.Header.Get("x-proxy-ext-tenant_id") != "tenant" || !strings.Contains(request.Header.Get("x-proxy-ext-allowed_repos"), "repo") {
 			t.Errorf("missing authenticated scope headers: %v", request.Header)
@@ -42,7 +45,10 @@ func TestHydrateSourceTextBatchesSortsAndCarriesAuthenticatedScope(t *testing.T)
 }
 
 func TestHydrateSourceTextRejectsPartialResults(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if serveTestPIT(w, request) {
+			return
+		}
 		w.Header().Set("content-type", "application/json")
 		_, _ = fmt.Fprint(w, `{"took":1,"timed_out":false,"_shards":{"total":1,"successful":1,"skipped":0,"failed":0},"hits":{"total":{"value":2,"relation":"eq"},"hits":[{"_id":"1","_source":{"entity_id":"n","chunk_index":0,"text":"A"}}]}}`)
 	}))
@@ -55,6 +61,9 @@ func TestHydrateSourceTextRejectsPartialResults(t *testing.T) {
 func TestHydrateSourceTextPaginatesBeyondOneThousandChunks(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if serveTestPIT(w, request) {
+			return
+		}
 		call := calls.Add(1)
 		var body map[string]any
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
@@ -81,7 +90,7 @@ func TestHydrateSourceTextPaginatesBeyondOneThousandChunks(t *testing.T) {
 			hits = append(hits, map[string]any{
 				"_id":     fmt.Sprintf("chunk-%04d", i),
 				"_source": map[string]any{"entity_id": "n", "chunk_index": i, "text": fmt.Sprintf("C%d", i)},
-				"sort":    []any{"n", i},
+				"sort":    []any{"n", i, i},
 			})
 		}
 		w.Header().Set("content-type", "application/json")
@@ -101,6 +110,85 @@ func TestHydrateSourceTextPaginatesBeyondOneThousandChunks(t *testing.T) {
 	}
 	if calls.Load() != 2 || !strings.HasPrefix(nodes[0].SourceText, "C0\nC1\n") || !strings.HasSuffix(nodes[0].SourceText, "\nC1000") {
 		t.Fatalf("calls=%d source prefix/suffix unexpected", calls.Load())
+	}
+}
+
+func serveTestPIT(w http.ResponseWriter, request *http.Request) bool {
+	w.Header().Set("content-type", "application/json")
+	if request.Method == http.MethodPost && request.URL.Path == "/code_chunks/_search/point_in_time" {
+		_, _ = fmt.Fprint(w, `{"pit_id":"pit-test","_shards":{"total":1,"successful":1,"skipped":0,"failed":0}}`)
+		return true
+	}
+	if request.Method == http.MethodDelete && request.URL.Path == "/_search/point_in_time" {
+		_, _ = fmt.Fprint(w, `{"pits":[{"pit_id":"pit-test","successful":true}]}`)
+		return true
+	}
+	return false
+}
+
+func TestHydrateSourceTextUsesSnapshotAndUniqueCursorAtLogicalTie(t *testing.T) {
+	var searchCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch {
+		case request.Method == http.MethodPost && request.URL.Path == "/code_chunks/_search/point_in_time":
+			_, _ = fmt.Fprint(w, `{"pit_id":"pit-1","_shards":{"total":1,"successful":1,"skipped":0,"failed":0}}`)
+		case request.Method == http.MethodDelete && request.URL.Path == "/_search/point_in_time":
+			_, _ = fmt.Fprint(w, `{"pits":[{"pit_id":"pit-1","successful":true}]}`)
+		case request.Method == http.MethodPost && request.URL.Path == "/_search":
+			call := searchCalls.Add(1)
+			var body map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Errorf("decode PIT search: %v", err)
+			}
+			sortFields, _ := body["sort"].([]any)
+			if len(sortFields) != 3 {
+				t.Errorf("sort=%v, want logical coordinates plus unique tiebreaker", sortFields)
+			}
+			pit, _ := body["pit"].(map[string]any)
+			if pit["id"] != "pit-1" {
+				t.Errorf("pit=%v", pit)
+			}
+			if call == 2 {
+				cursor, _ := body["search_after"].([]any)
+				if len(cursor) != 3 || cursor[2] != "old-0999" {
+					t.Errorf("second-page cursor=%v, want unique third coordinate", cursor)
+				}
+			}
+
+			hits := make([]map[string]any, 0, 1000)
+			if call == 1 {
+				for i := 0; i < 1000; i++ {
+					hits = append(hits, map[string]any{
+						"_id": fmt.Sprintf("old-%04d", i), "_source": map[string]any{
+							"entity_id": "n", "chunk_index": i, "text": fmt.Sprintf("C%d", i),
+						}, "sort": []any{"n", i, fmt.Sprintf("old-%04d", i)},
+					})
+				}
+			} else {
+				hits = append(hits, map[string]any{
+					"_id": "replacement-999", "_source": map[string]any{
+						"entity_id": "n", "chunk_index": 999, "text": "replacement",
+					}, "sort": []any{"n", 999, "replacement-999"},
+				})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"took": 1, "timed_out": false,
+				"_shards": map[string]any{"total": 1, "successful": 1, "skipped": 0, "failed": 0},
+				"hits":    map[string]any{"total": map[string]any{"value": 1001, "relation": "eq"}, "hits": hits},
+			})
+		default:
+			http.Error(w, "unexpected non-PIT request", http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	nodes := []RetrievedNode{{NodeID: "n"}}
+	if err := HydrateSourceText(hydrationContext(t), openSearchTestClient(t, server.URL), nodes); err != nil {
+		t.Fatal(err)
+	}
+	if searchCalls.Load() != 2 {
+		t.Fatalf("search calls=%d want 2", searchCalls.Load())
 	}
 }
 

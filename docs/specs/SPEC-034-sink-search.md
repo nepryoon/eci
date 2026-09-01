@@ -11,7 +11,7 @@ Indicizzare su OpenSearch il testo dei chunk (SPEC-029) per ricerca full-text �
 
 **ID documento**: `chunk.id` (non `entity_id` — stessa lezione di T3.1: un'entità produce più chunk, `entity_id` come id causerebbe sovrascritture silenziose). A differenza di Qdrant, **nessuna derivazione necessaria** — OpenSearch accetta stringhe arbitrarie come `DocumentID` (unico vincolo: 512 byte), i nostri id SHA-256 esadecimali funzionano direttamente — **da confermare comunque con una scrittura reale**, non presunto dalla sola documentazione.
 
-**Indice**: nome dichiarato `code_chunks`, creato idempotentemente al via del servizio (stesso principio già stabilito per la collection Qdrant in T3.1) se non esiste. Mapping minimo: `text` (analizzato per full-text), `entity_id`/`provenance`/`chunk_index` (memorizzati, non necessariamente analizzati per full-text).
+**Indice**: nome dichiarato `code_chunks`, creato idempotentemente al via del servizio (stesso principio già stabilito per la collection Qdrant in T3.1) se non esiste. Mapping minimo: `text` (analizzato per full-text), `entity_id`/`provenance`/`chunk_index` (memorizzati, non necessariamente analizzati per full-text) e `chunk_id` keyword. `chunk_id` duplica il DocumentID canonico in un campo con doc values, necessario per il tie-break deterministico PIT/`search_after` di SPEC-069 perché OpenSearch non permette di ordinare sul metadata `_id`.
 
 **Consumer**: stesso scheletro Kafka-consumer+dedup già stabilito (`sink-graph`/`embedding-worker`/`sink-vector`) — consuma `outbox.event.CodeChunk` con un **consumer group id proprio e distinto** da quello di `embedding-worker` (necessario perché entrambi devono ricevere OGNI messaggio indipendentemente — due consumer group diversi sullo stesso topic, non uno condiviso), dedup via `processed_events` (stessa tabella condivisa, chiave `(event_id, consumer_name)` secondo ADR-0021, quindi un consumer non sopprime la copia legittima dell'altro).
 
@@ -21,7 +21,7 @@ e non viene classificato come duplicato.
 
 ## 3. Comportamento (scenari)
 
-1. **Dato** un messaggio `CodeChunk` reale, **quando** il servizio lo consuma, **allora** un documento esiste in OpenSearch con quell'id, `text` corrispondente, `entity_id`/`provenance` nei campi memorizzati.
+1. **Dato** un messaggio `CodeChunk` reale, **quando** il servizio lo consuma, **allora** un documento esiste in OpenSearch con quell'id, `chunk_id` uguale all'id, `text` corrispondente, `entity_id`/`provenance` nei campi memorizzati.
 2. **Dato** lo stesso messaggio consumato una seconda volta (ridelivery), **quando** il servizio lo riprocessa, **allora** nessun documento duplicato — dedup via `processed_events`.
 3. **Dato** una query full-text semplice contro l'indice (es. cercare una parola presente nel testo di un chunk noto), **quando** eseguo la ricerca, **allora** il documento corretto compare tra i risultati — verifica diretta che l'indicizzazione full-text funzioni, non solo che il documento esista.
 4. **Dato** il servizio avviato per la prima volta senza l'indice `code_chunks`, **quando** parte, **allora** lo crea prima di iniziare a consumare; riavviato con l'indice già esistente, non tenta di ricrearlo.

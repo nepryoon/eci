@@ -44,6 +44,10 @@ Tombstone relazione: `{"id":"...","rel_type":"CALLS","from_id":"...","to_id":"..
 9. **Dato** un vecchio UPSERT dal retry topic dopo una DELETE completata,
    **quando** la sua sequence non supera il watermark CodeNode/CodeRelation,
    **allora** viene marcato processed senza MERGE o modifica generation.
+10. **Date** due righe CodeRelation con UUID diversi ma medesima tripla logica,
+    **quando** il nuovo UPSERT precede un vecchio tombstone in redelivery,
+    **allora** lock e watermark sulla tripla `(rel_type, from_id, to_id)`
+    classificano il tombstone stale e l'arco nuovo resta presente.
 
 ## 4. Errori & edge case
 
@@ -75,7 +79,8 @@ Tombstone relazione: `{"id":"...","rel_type":"CALLS","from_id":"...","to_id":"..
 - Unit: parser metadata prima delle dipendenze; query delete whitelist/scope,
   assenza di interpolazione e generation condizionale.
 - Integration Neo4j+PostgreSQL: relazione e nodo, scope mismatch, replay,
-  marker failure, dependency failure e DELETE-newer/UPSERT-older.
+  marker failure, dependency failure, DELETE-newer/UPSERT-older e UUID
+  relazionali diversi per la medesima identita' logica.
 - `go test`, vet, race CPU dove possibile; integration via aggregate Docker.
 
 ## 8. Osservabilita'

@@ -61,8 +61,10 @@ func StreamImpact(context.Context, neo4j.DriverWithContext, string, Options,
    repository non possono ampliare lo scope autenticato.
 6. **Dato** `include_source_text=true`, **quando** un livello e' pronto,
    **allora** i chunk autorizzati OpenSearch sono idratati con paginazione
-   `search_after` e ordinati per `(entity_id, chunk_index)`; livelli oltre
-   1.000 chunk restano completi e false non chiama OpenSearch.
+   PIT+`search_after` e ordinati per
+   `(entity_id, chunk_index, chunk_id)`; `chunk_id` e' il tie-breaker univoco
+   keyword per vecchie/nuove proiezioni della stessa coordinata logica. Livelli
+   oltre 1.000 chunk restano completi e false non chiama OpenSearch.
 7. **Dato** un percorso, **quando** il nodo viene convertito, **allora** i
    campi base Neo4j, provenance, score e `ImpactKind` seguono ADR-0024.
 8. **Dato** input fuori bound, dipendenza fallita, deadline o cancellazione,
@@ -110,7 +112,8 @@ func StreamImpact(context.Context, neo4j.DriverWithContext, string, Options,
 - Integrazione Neo4j: filtri prima dell'espansione, top-N per padre, direzioni,
   isolamento tenant/repository/ACL e path multi-hop.
 - Integrazione OpenSearch + gRPC: idratazione paginata autorizzata, inclusa la
-  boundary regression a 1.001 chunk, e codici errore.
+  boundary regression a 1.001 chunk, snapshot PIT e tie di coordinate logiche,
+  e codici errore.
 - Buf + rigenerazione Go/Python con clean diff.
 
 ## 8. Osservabilita'
@@ -158,3 +161,12 @@ dependency sono `Unavailable` sanitizzati. La query OpenSearch rifiuta timeout,
 total instabile, cursor incompleto, duplicati, oltre 100.000 risultati, errori
 e risultati parziali invece di restituire source incompleto. Non sono
 stati aggiunti log o attributi con scope, ID, path o sorgente.
+
+La review di paginazione ha inoltre riprodotto lo skip possibile quando due
+documenti hanno gli stessi `entity_id` e `chunk_index` al confine pagina. Ogni
+ricerca apre ora un PIT con TTL di un minuto e usa il `chunk_id` canonico,
+duplicato da `_id` in un campo keyword con doc values, come terza coordinata.
+OpenSearch 2.11.1 reale ha confermato il percorso: `_shard_doc` e `_id` non sono
+sort key portabili per questo indice. La chiusura PIT usa un context separato
+bounded, quindi sopravvive alla cancellazione client senza lasciare risorse
+oltre il TTL server.

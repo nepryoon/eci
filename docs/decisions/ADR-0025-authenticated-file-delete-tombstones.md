@@ -77,6 +77,15 @@ Un crash post-effetto/pre-commit puo' ripetere l'effetto, mai riordinare due
 effetti concorrenti. Un nuovo UPSERT autorizzato con sequenza maggiore puo'
 ricreare legittimamente la vista dopo una DELETE.
 
+L'identita' di ordering e' quella dell'oggetto realmente materializzato, non
+necessariamente la primary key canonica. Per CodeNode, CodeChunk e
+CodeEmbedding coincide con l'ID della riga. Neo4j, invece, materializza una
+CodeRelation per la tripla `(rel_type, from_id, to_id)` e non conserva l'UUID
+SQL: il watermark di sink-graph per una relazione usa quindi una codifica
+length-prefixed della stessa tripla logica. In questo modo un tombstone tardivo
+per una vecchia riga UUID non puo' eliminare una relazione reingerita con UUID
+diverso e sequenza piu' recente.
+
 ## Conseguenze
 
 - Nessun nuovo writer canonico o topic: PostgreSQL+outbox/CDC restano l'unico
@@ -88,6 +97,9 @@ ricreare legittimamente la vista dopo una DELETE.
 - La sequenza e' globale per semplicita' operativa, mentre il watermark resta
   per-consumer/per-aggregate: nessun consumer dipende dalla continuita' della
   sequenza o da eventi di altri aggregate.
+- Per le relazioni Neo4j, `aggregate_id` e' l'identita' logica tipizzata degli
+  endpoint, non l'UUID della riga PostgreSQL; questo rispecchia esattamente la
+  chiave del `MERGE` della vista.
 - Il lock PostgreSQL viene mantenuto durante l'effetto esterno bounded. Questo
   sacrifica throughput sul singolo aggregate, non tra aggregate indipendenti,
   e rende esplicita la backpressure necessaria per l'ordine.
@@ -128,3 +140,9 @@ vista non venga ricreata. La delete di relazioni entranti impedisce riferimenti
 cross-file orfani, mentre i predicati scope impediscono che un path omonimo
 elimini un altro tenant/repository. Nessun payload di delete contiene
 contenuto da esporre.
+
+Una regressione distinta usa due UUID canonici per la medesima tripla
+relazionale: applica il nuovo UPSERT e poi il vecchio tombstone. Il lock e il
+watermark sulla tripla logica classificano il tombstone come stale e
+mantengono l'arco nuovo; usare gli UUID separati riprodurrebbe invece la delete
+errata osservata durante la review.

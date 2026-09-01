@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
@@ -23,6 +24,7 @@ const codeChunksIndex = "code_chunks"
 
 const (
 	sourceHydrationPageSize = 1000
+	sourceHydrationPITTTL   = time.Minute
 	// A request can select at most 10,000 nodes. This independent chunk cap
 	// keeps pagination, response memory and concatenation bounded even when a
 	// valid node has many chunks.
@@ -127,17 +129,45 @@ func HydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes 
 	for i, n := range nodes {
 		ids[i] = n.NodeID
 	}
+	securityHeaders := securityfilter.OpenSearchHeaders(scope)
+	pit, err := client.PointInTime.Create(ctx, opensearchapi.PointInTimeCreateReq{
+		Indices: []string{codeChunksIndex},
+		Header:  securityHeaders,
+		Params:  opensearchapi.PointInTimeCreateParams{KeepAlive: sourceHydrationPITTTL},
+	})
+	if err != nil {
+		return fmt.Errorf("apertura snapshot code_chunks: %w", err)
+	}
+	pitInspect := pit.Inspect()
+	if pitInspect.Response == nil || pitInspect.Response.StatusCode < 200 || pitInspect.Response.StatusCode >= 300 ||
+		pit.PitID == "" || pit.Shards.Failed != 0 {
+		return fmt.Errorf("apertura snapshot code_chunks: risposta OpenSearch non valida")
+	}
+	defer func() {
+		// Cleanup must survive client cancellation; the independent deadline and
+		// server-side one-minute TTL keep both the call and leaked PIT bounded.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer cancel()
+		_, _ = client.PointInTime.Delete(cleanupCtx, opensearchapi.PointInTimeDeleteReq{
+			PitID: []string{pit.PitID}, Header: securityHeaders,
+		})
+	}()
 
 	query := map[string]any{
 		"query":            securityfilter.OpenSearchFilter(scope, ids),
 		"track_total_hits": true,
 		"size":             sourceHydrationPageSize,
-		// (entity_id, chunk_index) is unique in canonical PostgreSQL and both
-		// fields have sortable OpenSearch mappings. It therefore provides a
-		// stable search_after cursor without relying on the non-sortable _id.
+		"pit": map[string]any{
+			"id": pit.PitID, "keep_alive": "1m",
+		},
+		// Re-ingestion can leave two projection documents for the same logical
+		// chunk until reconciliation. PIT freezes the result set and the indexed
+		// canonical chunk UUID is its unique sortable tiebreaker, so search_after
+		// cannot skip a logical-coordinate tie. OpenSearch forbids sorting on _id.
 		"sort": []any{
 			map[string]any{"entity_id": "asc"},
 			map[string]any{"chunk_index": "asc"},
+			map[string]any{"chunk_id": "asc"},
 		},
 	}
 	byEntity := make(map[string][]chunkHit)
@@ -145,9 +175,8 @@ func HydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes 
 	expectedTotal := -1
 	for {
 		resp, err := client.Search(ctx, &opensearchapi.SearchReq{
-			Indices: []string{codeChunksIndex},
-			Body:    opensearchutil.NewJSONReader(query),
-			Header:  securityfilter.OpenSearchHeaders(scope),
+			Body:   opensearchutil.NewJSONReader(query),
+			Header: securityHeaders,
 		})
 		if err != nil {
 			return fmt.Errorf("ricerca batch code_chunks: %w", err)
@@ -186,7 +215,7 @@ func HydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes 
 			return fmt.Errorf("ricerca batch code_chunks: paginazione incompleta")
 		}
 		lastSort := resp.Hits.Hits[len(resp.Hits.Hits)-1].Sort
-		if len(lastSort) != 2 {
+		if len(lastSort) != 3 {
 			return fmt.Errorf("ricerca batch code_chunks: cursore di paginazione non valido")
 		}
 		query["search_after"] = lastSort

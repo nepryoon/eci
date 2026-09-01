@@ -98,6 +98,15 @@ func TestIndexWaitsForSearchVisibilityBeforeCompletion(t *testing.T) {
 			http.Error(response, "missing refresh visibility barrier", http.StatusBadRequest)
 			return
 		}
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			http.Error(response, "invalid body", http.StatusBadRequest)
+			return
+		}
+		if body["chunk_id"] != "chunk-id" {
+			http.Error(response, "missing sortable chunk identity", http.StatusBadRequest)
+			return
+		}
 		response.Header().Set("Content-Type", "application/json")
 		_, _ = response.Write([]byte(`{"_index":"code_chunks","_id":"chunk-id","_version":1,"result":"created","_shards":{"total":1,"successful":1,"failed":0},"_seq_no":0,"_primary_term":1}`))
 	}))

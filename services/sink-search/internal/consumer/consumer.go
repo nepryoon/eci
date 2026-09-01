@@ -83,6 +83,10 @@ func EnsureIndex(ctx context.Context, client *opensearchapi.Client) error {
 				"text":        map[string]any{"type": "text"},
 				"entity_id":   map[string]any{"type": "keyword"},
 				"chunk_index": map[string]any{"type": "integer"},
+				// OpenSearch forbids sorting on the _id metadata field. Keep the
+				// canonical chunk UUID as a doc-valued keyword so PIT/search_after
+				// readers have a stable, unique final cursor coordinate.
+				"chunk_id": map[string]any{"type": "keyword"},
 			}, securityProperties()),
 		},
 	}
@@ -105,7 +109,12 @@ func EnsureIndex(ctx context.Context, client *opensearchapi.Client) error {
 }
 
 func ensureSecurityMapping(ctx context.Context, client *opensearchapi.Client) error {
-	securityMapping := map[string]any{"properties": securityProperties()}
+	// Also reconcile the sortable document identity on an existing index.
+	// Historical views are rebuildable, but accepting the mapping before a
+	// rolling sink deployment keeps new writes and readers compatible.
+	properties := securityProperties()
+	properties["chunk_id"] = map[string]any{"type": "keyword"}
+	securityMapping := map[string]any{"properties": properties}
 	if _, err := client.Indices.Mapping.Put(ctx, opensearchapi.MappingPutReq{
 		Indices: []string{IndexName}, Body: opensearchutil.NewJSONReader(securityMapping),
 	}); err != nil {
@@ -288,6 +297,7 @@ func indexDocument(ctx context.Context, client *opensearchapi.Client, chunk code
 		"text":        chunk.Text,
 		"entity_id":   chunk.EntityID,
 		"chunk_index": chunk.ChunkIndex,
+		"chunk_id":    chunk.ID,
 	}
 	if len(chunk.Provenance) > 0 {
 		var provenance any

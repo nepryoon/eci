@@ -45,3 +45,19 @@ func TestProcessMessageRejectsNonCanonicalMetadataBeforeDependencies(t *testing.
 		})
 	}
 }
+
+func TestRelationAggregateIDUsesLogicalProjectedIdentity(t *testing.T) {
+	got, err := RelationAggregateID("CALLS", "a:b", "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "5:CALLS3:a:b1:c" {
+		t.Fatalf("logical relation identity=%q", got)
+	}
+	if _, err := RelationAggregateID("INJECTED", "a", "b"); err == nil {
+		t.Fatal("unknown relation type accepted")
+	}
+	if _, err := RelationAggregateID("CALLS", "", "b"); err == nil {
+		t.Fatal("empty endpoint accepted")
+	}
+}

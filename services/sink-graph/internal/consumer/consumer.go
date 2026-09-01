@@ -125,20 +125,42 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 }
 
 func graphAggregateCoordinates(topic string, value []byte) (string, string, bool) {
-	var envelope struct {
-		ID string `json:"id"`
-	}
-	if json.Unmarshal(value, &envelope) != nil || envelope.ID == "" {
-		return "", "", false
-	}
 	switch topic {
 	case TopicCodeNode:
-		return "CodeNode", envelope.ID, true
+		var node struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(value, &node) != nil || node.ID == "" {
+			return "", "", false
+		}
+		return "CodeNode", node.ID, true
 	case TopicCodeRelation:
-		return "CodeRelation", envelope.ID, true
+		var relation struct {
+			RelType string `json:"rel_type"`
+			FromID  string `json:"from_id"`
+			ToID    string `json:"to_id"`
+		}
+		if json.Unmarshal(value, &relation) != nil {
+			return "", "", false
+		}
+		identity, err := RelationAggregateID(relation.RelType, relation.FromID, relation.ToID)
+		if err != nil {
+			return "", "", false
+		}
+		return "CodeRelation", identity, true
 	default:
 		return "", "", false
 	}
+}
+
+// RelationAggregateID identifies the logical edge represented in Neo4j.
+// PostgreSQL row UUIDs change across delete/re-ingest, while the projection is
+// a single rel_type/from/to edge. Length-prefixing avoids delimiter ambiguity.
+func RelationAggregateID(relType, fromID, toID string) (string, error) {
+	if !allowedRelTypes[relType] || fromID == "" || toID == "" {
+		return "", errors.New("invalid relation aggregate coordinates")
+	}
+	return fmt.Sprintf("%d:%s%d:%s%d:%s", len(relType), relType, len(fromID), fromID, len(toID), toID), nil
 }
 
 // mergeCodeNode decodifica il payload CodeNode (stessa forma prodotta da

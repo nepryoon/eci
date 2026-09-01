@@ -97,6 +97,59 @@ func TestSinkGraphConsumer(t *testing.T) {
 	t.Run("Review_OlderRetryCannotRecreateDeletedNode", func(t *testing.T) {
 		reviewOlderRetryCannotRecreateDeletedNode(t, ctx, st)
 	})
+	t.Run("Review_OldRelationUUIDCannotDeleteNewLogicalEdge", func(t *testing.T) {
+		reviewOldRelationUUIDCannotDeleteNewLogicalEdge(t, ctx, st)
+	})
+}
+
+func reviewOldRelationUUIDCannotDeleteNewLogicalEdge(t *testing.T, ctx context.Context, st *stack) {
+	deps := newDeps(st)
+	fromID := uniqueID(t, "relation-order-from")
+	toID := uniqueID(t, "relation-order-to")
+	for _, node := range []struct{ id, name string }{{fromID, "From"}, {toID, "To"}} {
+		outcome, err := consumer.ProcessMessage(
+			ctx, deps, consumer.TopicCodeNode,
+			codeNodePayload(node.id, node.name, "Function", "go", "relation-order.go"),
+			eventHeaders(uniqueEventID(t), "UPSERT"),
+		)
+		if err != nil || outcome != consumer.OutcomeMerged {
+			t.Fatalf("seed node outcome=%v err=%v", outcome, err)
+		}
+	}
+
+	newRelationID := uuid.NewString()
+	newPayload, _ := json.Marshal(map[string]any{
+		"id": newRelationID, "domain": "code", "rel_type": "CALLS",
+		"from_id": fromID, "to_id": toID, "weight": 1,
+	})
+	outcome, err := consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeRelation, newPayload,
+		eventHeadersAt(uniqueEventID(t), "UPSERT", 40_001),
+	)
+	if err != nil || outcome != consumer.OutcomeMerged {
+		t.Fatalf("new logical relation outcome=%v err=%v", outcome, err)
+	}
+
+	oldTombstone, _ := json.Marshal(map[string]any{
+		"id": uuid.NewString(), "rel_type": "CALLS",
+		"from_id": fromID, "to_id": toID,
+		"provenance": map[string]any{
+			"tenant_id": tenantPlaceholder, "repo": repoPlaceholder,
+			"acl_group": aclPlaceholder, "path": "relation-order.go",
+		},
+	})
+	delayedID := uniqueEventID(t)
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeRelation, oldTombstone,
+		eventHeadersAt(delayedID, "DELETE", 40_000),
+	)
+	if err != nil || outcome != consumer.OutcomeDuplicate {
+		t.Fatalf("delayed old tombstone outcome=%v err=%v", outcome, err)
+	}
+	if count := countRelationships(t, ctx, st.driver, fromID, toID, "CALLS"); count != 1 {
+		t.Fatalf("old relation UUID deleted replacement logical edge: count=%d", count)
+	}
+	assertProcessedEvent(t, ctx, st.db, delayedID)
 }
 
 func reviewOlderRetryCannotRecreateDeletedNode(t *testing.T, ctx context.Context, st *stack) {
@@ -817,10 +870,14 @@ func spec073DeleteRelationAndNodeIdempotently(t *testing.T, ctx context.Context,
 	); err != nil {
 		t.Fatal(err)
 	}
+	relationAggregateID, err := consumer.RelationAggregateID("CALLS", fromID, toID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.db.ExecContext(ctx, `
 		DELETE FROM consumer_projection_watermark
 		WHERE consumer_name=$1 AND aggregate_type='CodeRelation' AND aggregate_id=$2`,
-		consumer.ConsumerName, fromID+"->"+toID); err != nil {
+		consumer.ConsumerName, relationAggregateID); err != nil {
 		t.Fatal(err)
 	}
 	generationBeforeReplay := readPartitionGeneration(t, ctx, st.driver, aclPlaceholder)
