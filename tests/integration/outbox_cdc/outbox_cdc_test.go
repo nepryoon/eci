@@ -115,7 +115,7 @@ func TestOutboxCDCEndToEnd(t *testing.T) {
 	// topic, key e payload conservano il comportamento EventRouter esistente.
 	const deleteChunkID = "33333333-3333-3333-3333-333333333333"
 	const deleteChunkPayload = `{"id":"33333333-3333-3333-3333-333333333333","entity_id":"node-42"}`
-	insertOutboxRow(t, ctx, st.db, deleteChunkID, "CodeChunk", deleteChunkID, "DELETE", deleteChunkPayload)
+	deleteSequence := insertOutboxRow(t, ctx, st.db, deleteChunkID, "CodeChunk", deleteChunkID, "DELETE", deleteChunkPayload)
 
 	t.Run("SPEC071_DELETECarriesSingleOperationHeader", func(t *testing.T) {
 		headers, key, value, ok := tryConsumeOneWithHeaders(
@@ -130,6 +130,10 @@ func TestOutboxCDCEndToEnd(t *testing.T) {
 		assertJSONEqual(t, value, deleteChunkPayload)
 		if strings.Count(headers, "event_type:DELETE") != 1 {
 			t.Fatalf("header event_type DELETE assente o duplicato: %q", headers)
+		}
+		sequenceHeader := fmt.Sprintf("event_sequence:%d", deleteSequence)
+		if strings.Count(headers, sequenceHeader) != 1 {
+			t.Fatalf("header %s assente o duplicato: %q", sequenceHeader, headers)
 		}
 		for _, forbidden := range []string{"tenant", "repository", "acl", "path", "payload"} {
 			if strings.Contains(strings.ToLower(headers), forbidden) {
@@ -458,15 +462,18 @@ func waitConnectorRunning(t *testing.T, ctx context.Context, connectURL string) 
 // Postgres: INSERT nella tabella outbox.
 // ============================================================
 
-func insertOutboxRow(t *testing.T, ctx context.Context, db *sql.DB, id, aggregateType, aggregateID, eventType, payload string) {
+func insertOutboxRow(t *testing.T, ctx context.Context, db *sql.DB, id, aggregateType, aggregateID, eventType, payload string) int64 {
 	t.Helper()
-	_, err := db.ExecContext(ctx, `
+	var sequence int64
+	err := db.QueryRowContext(ctx, `
 		INSERT INTO outbox (id, aggregate_type, aggregate_id, event_type, payload)
-		VALUES ($1, $2, $3, $4, $5::jsonb)`,
-		id, aggregateType, aggregateID, eventType, payload)
+		VALUES ($1, $2, $3, $4, $5::jsonb)
+		RETURNING event_sequence`,
+		id, aggregateType, aggregateID, eventType, payload).Scan(&sequence)
 	if err != nil {
 		t.Fatalf("INSERT INTO outbox (aggregate_type=%s, aggregate_id=%s): %v", aggregateType, aggregateID, err)
 	}
+	return sequence
 }
 
 // ============================================================

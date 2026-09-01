@@ -1258,7 +1258,10 @@ pub fn postgres_runtime_schema_ready(client: &mut postgres::Client) -> bool {
                 AND has_table_privilege(current_user, to_regclass('code_embedding'), 'SELECT')\
                 AND has_table_privilege(current_user, to_regclass('code_embedding'), 'DELETE')\
                 AND has_table_privilege(current_user, to_regclass('lineage'), 'DELETE')\
-                AND has_table_privilege(current_user, to_regclass('outbox'), 'INSERT'),\
+                AND has_table_privilege(current_user, to_regclass('outbox'), 'INSERT')\
+                AND has_sequence_privilege(\
+                    current_user, pg_get_serial_sequence('outbox', 'event_sequence'), 'USAGE'\
+                ),\
                 false\
             )",
             &[],

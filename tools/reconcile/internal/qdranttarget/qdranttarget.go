@@ -166,7 +166,8 @@ func republish(ctx context.Context, tx *sql.Tx, row framework.SourceRow) error {
 		 FROM code_embedding ce
 		 JOIN code_chunk cc ON cc.id = ce.chunk_id
 		 JOIN code_node cn ON cn.id = cc.entity_id
-		 WHERE ce.id = $1`,
+		 WHERE ce.id = $1
+		 FOR UPDATE OF cn, cc, ce`,
 		row.ID,
 	).Scan(&chunkID, &vector, &modelID, &embeddingDim, &entityID, &provenance)
 	if err != nil {

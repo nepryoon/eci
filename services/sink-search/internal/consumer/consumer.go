@@ -1,6 +1,6 @@
 // Package consumer implementa il consumer Kafka -> OpenSearch di
 // sink-search (SPEC-034 §2, T3.2): legge da outbox.event.CodeChunk, dedup
-// via processed_events (stessa tabella condivisa, stesso principio già
+// via watermark+processed_events (stessa base condivisa, stesso principio già
 // stabilito da sink-graph/embedding-worker/sink-vector), indicizza
 // ciascun chunk come documento OpenSearch per la ricerca full-text —
 // SECONDO consumatore dello stesso topic già consumato da
@@ -21,6 +21,7 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4/opensearchutil"
 	kafka "github.com/segmentio/kafka-go"
 
+	"github.com/eci-project/eci/libs/go/eci/eventorder"
 	"github.com/eci-project/eci/libs/go/eci/outboxmeta"
 	"github.com/eci-project/eci/libs/go/eci/securitylabels"
 )
@@ -177,7 +178,7 @@ type codeChunkTombstone struct {
 
 // ProcessMessage elabora UN messaggio Kafka già fetchato (SPEC-034 §2/§3):
 //  1. estrae event_id dagli header;
-//  2. dedup via processed_events (stesso meccanismo di sink-graph/
+//  2. ordering e dedup via watermark+processed_events (stesso meccanismo di sink-graph/
 //     sink-vector, PRIMA della scrittura OpenSearch — OpenSearch non è
 //     Postgres, non può condividere una transazione col dedup);
 //  3. se nuovo, indicizza UN documento con DocumentID = msg.ID.
@@ -201,7 +202,7 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	eventID := metadata.EventID
 
 	if metadata.Operation == outboxmeta.OperationDelete {
-		return processDelete(ctx, deps, value, eventID)
+		return processDelete(ctx, deps, value, metadata)
 	}
 
 	var chunk codeChunkPayload
@@ -222,30 +223,26 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	}
 	securitylabels.Observe(ConsumerName, "accepted")
 
-	processed, err := isProcessed(ctx, deps.DB, eventID)
+	guard, orderState, err := eventorder.Begin(ctx, deps.DB, ConsumerName, "CodeChunk", chunk.ID, metadata)
 	if err != nil {
-		return OutcomeInvalidSkipped, fmt.Errorf("dedup event_id=%s: %w", eventID, err)
+		return OutcomeInvalidSkipped, fmt.Errorf("acquire ordered event: %w", err)
 	}
-	if processed {
-		deps.Logf("sink-search: event_id=%s già in processed_events, skip indicizzazione (redelivery)", eventID)
+	if orderState == eventorder.Duplicate || orderState == eventorder.Stale {
+		deps.Logf("sink-search: evento duplicato o superato, effetto non applicato")
 		return OutcomeDuplicate, nil
 	}
+	defer guard.Abort()
 
 	if err := indexDocument(ctx, deps.OpenSearch, chunk); err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("indicizzazione documento id=%s: %w", chunk.ID, err)
 	}
-	isNew, err := markProcessed(ctx, deps.DB, eventID)
-	if err != nil {
-		return OutcomeInvalidSkipped, fmt.Errorf("complete dedup event_id=%s after OpenSearch index: %w", eventID, err)
-	}
-	if !isNew {
-		deps.Logf("sink-search: event_id=%s completato concorrentemente, indicizzazione idempotente già applicata", eventID)
-		return OutcomeDuplicate, nil
+	if err := guard.Complete(ctx); err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("complete ordered event: %w", err)
 	}
 	return OutcomeStored, nil
 }
 
-func processDelete(ctx context.Context, deps Deps, value []byte, eventID string) (Outcome, error) {
+func processDelete(ctx context.Context, deps Deps, value []byte, metadata outboxmeta.Metadata) (Outcome, error) {
 	var tombstone codeChunkTombstone
 	if err := json.Unmarshal(value, &tombstone); err != nil || tombstone.ID == "" || tombstone.EntityID == "" || tombstone.Security.Path == "" {
 		deps.Logf("sink-search: tombstone CodeChunk non valido, scartato")
@@ -258,58 +255,23 @@ func processDelete(ctx context.Context, deps Deps, value []byte, eventID string)
 	}
 	securitylabels.Observe(ConsumerName, "accepted")
 
-	processed, err := isProcessed(ctx, deps.DB, eventID)
+	guard, orderState, err := eventorder.Begin(ctx, deps.DB, ConsumerName, "CodeChunk", tombstone.ID, metadata)
 	if err != nil {
-		return OutcomeInvalidSkipped, fmt.Errorf("check tombstone completion: %w", err)
+		return OutcomeInvalidSkipped, fmt.Errorf("acquire ordered tombstone: %w", err)
 	}
-	if processed {
-		deps.Logf("sink-search: tombstone CodeChunk gia' completato")
+	if orderState == eventorder.Duplicate || orderState == eventorder.Stale {
+		deps.Logf("sink-search: tombstone duplicato o superato")
 		return OutcomeDuplicate, nil
 	}
+	defer guard.Abort()
 
 	if err := deleteDocument(ctx, deps.OpenSearch, tombstone); err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("delete OpenSearch projection: %w", err)
 	}
-	completed, err := markProcessed(ctx, deps.DB, eventID)
-	if err != nil {
-		return OutcomeInvalidSkipped, fmt.Errorf("complete tombstone after OpenSearch delete: %w", err)
-	}
-	if !completed {
-		deps.Logf("sink-search: tombstone CodeChunk completato concorrentemente")
-		return OutcomeDuplicate, nil
+	if err := guard.Complete(ctx); err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("complete ordered tombstone: %w", err)
 	}
 	return OutcomeDeleted, nil
-}
-
-func isProcessed(ctx context.Context, db *sql.DB, eventID string) (bool, error) {
-	var processed bool
-	err := db.QueryRowContext(ctx,
-		`SELECT EXISTS (
-			SELECT 1 FROM processed_events WHERE event_id = $1 AND consumer_name = $2
-		)`,
-		eventID, ConsumerName,
-	).Scan(&processed)
-	return processed, err
-}
-
-// markProcessed — stesso identico dedup atomico di sink-graph (SPEC-015 §2
-// punto 2): INSERT...ON CONFLICT DO NOTHING RETURNING.
-func markProcessed(ctx context.Context, db *sql.DB, eventID string) (isNew bool, err error) {
-	var returned string
-	err = db.QueryRowContext(ctx,
-		`INSERT INTO processed_events (event_id, consumer_name)
-		 VALUES ($1, $2)
-		 ON CONFLICT (event_id, consumer_name) DO NOTHING
-		 RETURNING event_id`,
-		eventID, ConsumerName,
-	).Scan(&returned)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
 }
 
 // indexDocument scrive UN documento OpenSearch per il chunk (SPEC-034 §2):

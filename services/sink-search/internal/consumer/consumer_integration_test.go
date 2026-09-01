@@ -16,6 +16,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -89,6 +90,38 @@ func TestSinkSearchConsumer(t *testing.T) {
 	t.Run("SPEC076_FailedDeleteDoesNotMarkProcessed", func(t *testing.T) {
 		spec076FailedDeleteDoesNotMarkProcessed(t, ctx, st)
 	})
+	t.Run("Review_OlderRetryCannotRecreateDeletedDocument", func(t *testing.T) {
+		reviewOlderRetryCannotRecreateDeletedDocument(t, ctx, st)
+	})
+}
+
+func reviewOlderRetryCannotRecreateDeletedDocument(t *testing.T, ctx context.Context, st *stack) {
+	deps := newDeps(st)
+	chunkID := uuid.NewString()
+	entityID := "entity-ordered-delete"
+	deleteID := uuid.NewString()
+	outcome, err := consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeChunk,
+		codeChunkTombstone(chunkID, entityID, "developers", "ordered.go"),
+		eventHeadersAt(deleteID, "DELETE", 20_000),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("newer delete outcome=%v err=%v", outcome, err)
+	}
+
+	staleID := uuid.NewString()
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeChunk,
+		codeChunkPayload(chunkID, entityID, 0, "func Stale() {}", map[string]any{"path": "ordered.go"}),
+		eventHeadersAt(staleID, "UPSERT", 19_999),
+	)
+	if err != nil || outcome != consumer.OutcomeDuplicate {
+		t.Fatalf("stale retry outcome=%v err=%v", outcome, err)
+	}
+	if documentExists(t, ctx, st.opensearch, chunkID) {
+		t.Fatal("stale UPSERT recreated deleted document")
+	}
+	assertProcessedEvent(t, ctx, st.db, staleID, consumer.ConsumerName)
 }
 
 func reviewFailedOpenSearchWriteDoesNotMarkProcessed(t *testing.T, ctx context.Context, st *stack) {
@@ -175,6 +208,12 @@ func spec076DeleteDocumentScopeSafeAndIdempotent(t *testing.T, ctx context.Conte
 		deleteEventID, consumer.ConsumerName,
 	); err != nil {
 		t.Fatalf("remove marker for failure-window replay: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+		DELETE FROM consumer_projection_watermark
+		WHERE consumer_name=$1 AND aggregate_type='CodeChunk' AND aggregate_id=$2`,
+		consumer.ConsumerName, chunkID); err != nil {
+		t.Fatalf("remove watermark for failure-window replay: %v", err)
 	}
 	outcome, err = consumer.ProcessMessage(
 		ctx, deps, consumer.TopicCodeChunk, deletePayload,
@@ -623,7 +662,7 @@ func startPostgres(t *testing.T, ctx context.Context) *sql.DB {
 		t.Fatalf("ConnectionString: %v", err)
 	}
 
-	// processed_events (D1, 0001_init.up.sql) è l'unica tabella richiesta
+	// Le tabelle di completion e ordering sono le sole richieste
 	// da questo consumer (nessuna tabella specifica di sink-search) — DDL
 	// applicato qui direttamente, senza il CLI 'migrate' esterno (stesso
 	// principio di sink-vector/SPEC-033: questo servizio non ha
@@ -642,8 +681,17 @@ func startPostgres(t *testing.T, ctx context.Context) *sql.DB {
 			consumer_name  TEXT NOT NULL,
 			processed_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
 			PRIMARY KEY (event_id, consumer_name)
+		);
+		CREATE TABLE consumer_projection_watermark (
+			consumer_name TEXT NOT NULL,
+			aggregate_type TEXT NOT NULL,
+			aggregate_id TEXT NOT NULL,
+			event_sequence BIGINT NOT NULL CHECK (event_sequence > 0),
+			operation TEXT NOT NULL CHECK (operation IN ('UPSERT', 'DELETE')),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp(),
+			PRIMARY KEY (consumer_name, aggregate_type, aggregate_id)
 		)`); err != nil {
-		t.Fatalf("creazione processed_events: %v", err)
+		t.Fatalf("creazione tabelle consumer: %v", err)
 	}
 	return db
 }
@@ -675,11 +723,18 @@ func produce(t *testing.T, ctx context.Context, brokers []string, topic, key str
 }
 
 func eventHeaders(eventID, operation string) []kafka.Header {
+	return eventHeadersAt(eventID, operation, syntheticEventSequence.Add(1))
+}
+
+func eventHeadersAt(eventID, operation string, sequence int64) []kafka.Header {
 	return []kafka.Header{
 		{Key: "event_id", Value: []byte(eventID)},
 		{Key: "event_type", Value: []byte(operation)},
+		{Key: "event_sequence", Value: []byte(fmt.Sprintf("%d", sequence))},
 	}
 }
+
+var syntheticEventSequence atomic.Int64
 
 // SPEC-035: FetchAndProcess accetta ora un resilience.ProcessFunc iniettato
 // (nessuna modifica alla logica applicativa di ProcessMessage stessa) e

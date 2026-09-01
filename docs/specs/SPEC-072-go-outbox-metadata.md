@@ -19,7 +19,7 @@ const (
     OperationUpsert Operation = "UPSERT"
     OperationDelete Operation = "DELETE"
 )
-type Metadata struct { EventID string; Operation Operation }
+type Metadata struct { EventID string; Operation Operation; Sequence int64 }
 func Parse(headers []kafka.Header) (Metadata, error)
 ```
 
@@ -35,6 +35,9 @@ func Parse(headers []kafka.Header) (Metadata, error)
    **quando** Parse viene chiamato, **allora** fallisce chiuso.
 5. **Dato** trace header o metadata estranei, **quando** Parse viene chiamato,
    **allora** non diventano autorita' e non cambiano il risultato.
+6. **Dato** un singolo `event_sequence`, **quando** e' una rappresentazione
+   decimale positiva canonica entro int64, **allora** viene restituito; zero,
+   segno, leading zero, overflow, UTF-8 invalido o duplicato falliscono chiuso.
 
 ## 4. Errori & edge case
 
@@ -45,6 +48,7 @@ func Parse(headers []kafka.Header) (Metadata, error)
 | valore con byte UTF-8 invalido | errore permanente |
 | ordine header diverso | stesso metadata |
 | slice nil | errore permanente |
+| sequence `0`, `01`, `+1`, negativa o oltre int64 | errore permanente |
 
 ## 5. Non-goals
 
@@ -57,7 +61,7 @@ func Parse(headers []kafka.Header) (Metadata, error)
 
 - Modulo 1 §2.2.2: CDC e' il boundary dell'envelope.
 - Modulo 1 §2.2.3–§2.2.4: replay at-least-once e marker post-effetto.
-- ADR-0025: solo `UPSERT|DELETE`; assente/duplicato/ignoto fail-closed.
+- ADR-0025: operation e sequence canoniche; assente/duplicato/ignoto fail-closed.
 
 ## 7. Test plan
 

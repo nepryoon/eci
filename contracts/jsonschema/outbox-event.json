@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Outbox Event Envelope",
   "type": "object",
-  "required": ["id", "aggregate_type", "aggregate_id", "event_type", "payload", "created_at"],
+  "required": ["id", "aggregate_type", "aggregate_id", "event_type", "event_sequence", "payload", "created_at"],
   "properties": {
     "id": { "type": "string", "format": "uuid" },
     "aggregate_type": {
@@ -11,6 +11,7 @@
     },
     "aggregate_id": { "type": "string" },
     "event_type": { "type": "string", "enum": ["UPSERT", "DELETE"] },
+    "event_sequence": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 },
     "payload": { "type": "object" },
     "created_at": { "type": "string", "format": "date-time" },
     "trace_id": { "type": ["string", "null"] }

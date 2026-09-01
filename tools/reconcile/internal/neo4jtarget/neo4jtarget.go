@@ -114,7 +114,7 @@ func republish(ctx context.Context, tx *sql.Tx, row framework.SourceRow) error {
 	var domain, nodeType, name, astHash string
 	var provenance []byte
 	err := tx.QueryRowContext(ctx,
-		`SELECT domain, node_type, name, ast_hash, provenance FROM code_node WHERE id = $1`,
+		`SELECT domain, node_type, name, ast_hash, provenance FROM code_node WHERE id = $1 FOR UPDATE`,
 		row.ID,
 	).Scan(&domain, &nodeType, &name, &astHash, &provenance)
 	if err != nil {

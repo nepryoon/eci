@@ -1,6 +1,6 @@
 // Package consumer implementa il consumer Kafka -> proiezione Neo4j di
 // sink-graph (SPEC-015, T1.3): legge da outbox.event.CodeNode/CodeRelation,
-// dedup via processed_events, MERGE idempotente su Neo4j rispettando i
+// ordering/dedup via watermark+processed_events, MERGE idempotente su Neo4j rispettando i
 // vincoli reali di D3 (contracts/cypher/schema.cypher).
 package consumer
 
@@ -14,6 +14,7 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	kafka "github.com/segmentio/kafka-go"
 
+	"github.com/eci-project/eci/libs/go/eci/eventorder"
 	"github.com/eci-project/eci/libs/go/eci/models"
 	"github.com/eci-project/eci/libs/go/eci/outboxmeta"
 	"github.com/eci-project/eci/libs/go/eci/securitylabels"
@@ -57,9 +58,9 @@ const (
 // ProcessMessage elabora UN messaggio Kafka già fetchato (SPEC-015 §2,
 // passi 1-3):
 //  1. valida event_id e operation dagli header CDC;
-//  2. verifica processed_events senza prenotare l'evento;
+//  2. serializza l'aggregate e rifiuta duplicate/retry superati dal watermark;
 //  3. se nuovo, applica MERGE o DELETE idempotente su Neo4j;
-//  4. solo dopo l'effetto riuscito registra processed_events.
+//  4. solo dopo l'effetto riuscito registra watermark e processed_events.
 //
 // Un errore ritornato (non-nil) significa "infrastruttura irraggiungibile,
 // NON committare l'offset" (SPEC-015 §4: Postgres/Neo4j persi a metà
@@ -76,15 +77,20 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 		return OutcomeInvalidSkipped, nil
 	}
 	eventID := metadata.EventID
-
-	processed, err := isProcessed(ctx, deps.DB, eventID)
-	if err != nil {
-		return OutcomeInvalidSkipped, fmt.Errorf("dedup event_id=%s: %w", eventID, err)
+	aggregateType, aggregateID, valid := graphAggregateCoordinates(topic, value)
+	if !valid {
+		deps.Logf("sink-graph: payload senza coordinate aggregate valide, scartato")
+		return OutcomeInvalidSkipped, nil
 	}
-	if processed {
-		deps.Logf("sink-graph: event_id=%s già in processed_events, skip MERGE (redelivery)", eventID)
+	guard, orderState, err := eventorder.Begin(ctx, deps.DB, ConsumerName, aggregateType, aggregateID, metadata)
+	if err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("acquire ordered event: %w", err)
+	}
+	if orderState == eventorder.Duplicate || orderState == eventorder.Stale {
+		deps.Logf("sink-graph: evento duplicato o superato, effetto non applicato")
 		return OutcomeDuplicate, nil
 	}
+	defer guard.Abort()
 
 	var outcome Outcome
 	switch metadata.Operation {
@@ -112,48 +118,27 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	if err != nil || (outcome != OutcomeMerged && outcome != OutcomeDeleted) {
 		return outcome, err
 	}
-	isNew, err := markProcessed(ctx, deps.DB, eventID)
-	if err != nil {
-		return OutcomeInvalidSkipped, fmt.Errorf("complete dedup event_id=%s after MERGE: %w", eventID, err)
-	}
-	if !isNew {
-		deps.Logf("sink-graph: event_id=%s completato concorrentemente, MERGE idempotente già applicato", eventID)
-		return OutcomeDuplicate, nil
+	if err := guard.Complete(ctx); err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("complete ordered event: %w", err)
 	}
 	return outcome, nil
 }
 
-func isProcessed(ctx context.Context, db *sql.DB, eventID string) (bool, error) {
-	var processed bool
-	err := db.QueryRowContext(ctx,
-		`SELECT EXISTS (
-			SELECT 1 FROM processed_events WHERE event_id = $1 AND consumer_name = $2
-		)`,
-		eventID, ConsumerName,
-	).Scan(&processed)
-	return processed, err
-}
-
-// markProcessed registra il completamento solo dopo l'effetto esterno.
-// isNew=false quando l'INSERT non ha inserito nulla (event_id già
-// presente): sql.ErrNoRows su una query con RETURNING è esattamente
-// questo, non un errore da propagare.
-func markProcessed(ctx context.Context, db *sql.DB, eventID string) (isNew bool, err error) {
-	var returned string
-	err = db.QueryRowContext(ctx,
-		`INSERT INTO processed_events (event_id, consumer_name)
-		 VALUES ($1, $2)
-		 ON CONFLICT (event_id, consumer_name) DO NOTHING
-		 RETURNING event_id`,
-		eventID, ConsumerName,
-	).Scan(&returned)
-	if err == sql.ErrNoRows {
-		return false, nil
+func graphAggregateCoordinates(topic string, value []byte) (string, string, bool) {
+	var envelope struct {
+		ID string `json:"id"`
 	}
-	if err != nil {
-		return false, err
+	if json.Unmarshal(value, &envelope) != nil || envelope.ID == "" {
+		return "", "", false
 	}
-	return true, nil
+	switch topic {
+	case TopicCodeNode:
+		return "CodeNode", envelope.ID, true
+	case TopicCodeRelation:
+		return "CodeRelation", envelope.ID, true
+	default:
+		return "", "", false
+	}
 }
 
 // mergeCodeNode decodifica il payload CodeNode (stessa forma prodotta da

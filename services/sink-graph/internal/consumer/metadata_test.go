@@ -11,15 +11,17 @@ import (
 func TestProcessMessageRejectsNonCanonicalMetadataBeforeDependencies(t *testing.T) {
 	eventID := "11111111-1111-1111-1111-111111111111"
 	cases := map[string][]kafka.Header{
-		"missing operation": {{Key: "event_id", Value: []byte(eventID)}},
+		"missing operation": {{Key: "event_id", Value: []byte(eventID)}, {Key: "event_sequence", Value: []byte("42")}},
 		"duplicate operation": {
 			{Key: "event_id", Value: []byte(eventID)},
 			{Key: "event_type", Value: []byte("UPSERT")},
 			{Key: "event_type", Value: []byte("DELETE")},
+			{Key: "event_sequence", Value: []byte("42")},
 		},
 		"noncanonical event id": {
 			{Key: "event_id", Value: []byte("not-an-id")},
 			{Key: "event_type", Value: []byte("DELETE")},
+			{Key: "event_sequence", Value: []byte("42")},
 		},
 	}
 	for name, headers := range cases {

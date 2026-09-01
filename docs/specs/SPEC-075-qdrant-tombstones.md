@@ -34,6 +34,10 @@ func buildDeleteRequest(msg codeEmbeddingTombstone) *qdrant.DeletePoints
    **allora** nessun marker/offset viene completato.
 7. **Dato** marker fallito dopo delete, **quando** replay avviene, **allora**
    delete assente no-op e marker viene ritentato.
+8. **Dato** un UPSERT vecchio dal retry topic dopo una DELETE piu' recente,
+   **quando** la sequence e' sotto watermark, **allora** non ricrea il punto.
+9. **Dato** un nuovo UPSERT autorizzato dopo la DELETE, **quando** la sequence
+   supera il watermark, **allora** puo' ricreare legittimamente la proiezione.
 
 ## 4. Errori & edge case
 
@@ -63,7 +67,7 @@ func buildDeleteRequest(msg codeEmbeddingTombstone) *qdrant.DeletePoints
 
 - Unit: metadata fail-closed e DeletePoints con ID+tre label, wait=true.
 - Integration Qdrant+PostgreSQL: delete, cross-scope, replay, assente,
-  Qdrant failure e marker failure window.
+  Qdrant failure, marker failure window e DELETE-newer/UPSERT-older.
 - Go test/vet/race, integration compile e aggregate gates.
 
 ## 8. Osservabilita'

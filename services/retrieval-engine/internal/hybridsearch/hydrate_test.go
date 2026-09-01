@@ -2,6 +2,7 @@ package hybridsearch
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -48,6 +49,58 @@ func TestHydrateSourceTextRejectsPartialResults(t *testing.T) {
 	t.Cleanup(server.Close)
 	if err := HydrateSourceText(hydrationContext(t), openSearchTestClient(t, server.URL), []RetrievedNode{{NodeID: "n"}}); err == nil {
 		t.Fatal("partial source hydration was silently accepted")
+	}
+}
+
+func TestHydrateSourceTextPaginatesBeyondOneThousandChunks(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		call := calls.Add(1)
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Errorf("decode search body: %v", err)
+		}
+		if call == 1 {
+			if _, ok := body["search_after"]; ok {
+				t.Error("first page unexpectedly contains search_after")
+			}
+		} else if call == 2 {
+			if _, ok := body["search_after"]; !ok {
+				t.Error("second page is missing search_after")
+			}
+		} else {
+			t.Fatalf("unexpected hydration page %d", call)
+		}
+
+		first, last := 0, 1000
+		if call == 2 {
+			first, last = 1000, 1001
+		}
+		hits := make([]map[string]any, 0, last-first)
+		for i := first; i < last; i++ {
+			hits = append(hits, map[string]any{
+				"_id":     fmt.Sprintf("chunk-%04d", i),
+				"_source": map[string]any{"entity_id": "n", "chunk_index": i, "text": fmt.Sprintf("C%d", i)},
+				"sort":    []any{"n", i},
+			})
+		}
+		w.Header().Set("content-type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"took": 1, "timed_out": false,
+			"_shards": map[string]any{"total": 1, "successful": 1, "skipped": 0, "failed": 0},
+			"hits":    map[string]any{"total": map[string]any{"value": 1001, "relation": "eq"}, "hits": hits},
+		}); err != nil {
+			t.Errorf("encode search response: %v", err)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	nodes := []RetrievedNode{{NodeID: "n"}}
+	if err := HydrateSourceText(hydrationContext(t), openSearchTestClient(t, server.URL), nodes); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 2 || !strings.HasPrefix(nodes[0].SourceText, "C0\nC1\n") || !strings.HasSuffix(nodes[0].SourceText, "\nC1000") {
+		t.Fatalf("calls=%d source prefix/suffix unexpected", calls.Load())
 	}
 }
 

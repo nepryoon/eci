@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 PLACEMENT = (
     "trace_id:header:trace_id,id:header:event_id,"
-    "event_type:header:event_type"
+    "event_type:header:event_type,event_sequence:header:event_sequence"
 )
 
 

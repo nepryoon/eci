@@ -72,7 +72,7 @@ func TestPostgresDDLMigration(t *testing.T) {
 	// Scenario 1: DB vuoto, applico `up` -> le 4 tabelle esistono.
 	runMigrateCLI(t, migrationsDir, dsn, "up")
 
-	assertTablesExist(t, db, "code_node", "code_relation", "outbox", "processed_events", "ingestion_command_receipt")
+	assertTablesExist(t, db, "code_node", "code_relation", "outbox", "processed_events", "ingestion_command_receipt", "consumer_projection_watermark")
 
 	if _, err := db.ExecContext(ctx, `CREATE ROLE eci_cdc LOGIN REPLICATION NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS IN ROLE eci_cdc_outbox_reader`); err != nil {
 		t.Fatalf("abilitazione ruolo CDC dopo migrations: %v", err)
@@ -175,6 +175,59 @@ func TestPostgresDDLMigration(t *testing.T) {
 		if _, err := db.ExecContext(ctx, `INSERT INTO processed_events (event_id, consumer_name) VALUES ($1, 'sink-search')`, eventID); err != nil {
 			t.Fatalf("ripristino fixture fan-out dopo up migration: %v", err)
 		}
+	})
+
+	t.Run("SPEC070_DeleteReceiptRollbackIsRepresentable", func(t *testing.T) {
+		const commandID = "22222222-2222-2222-2222-222222222222"
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO ingestion_command_receipt
+			(command_id, fingerprint, tenant_id, repository, commit_sha, path, source_sha256, operation)
+			VALUES ($1, $2, 'tenant-a', 'repo-a', $3, 'deleted.go', NULL, 'DELETE')`,
+			commandID, sha256Fixture("delete-receipt"), "1111111111111111111111111111111111111111"); err != nil {
+			t.Fatalf("insert DELETE receipt fixture: %v", err)
+		}
+
+		runMigrateCLI(t, migrationsDir, dsn, "down", "1")
+		var receiptCount int
+		if err := db.QueryRowContext(ctx,
+			`SELECT count(*) FROM ingestion_command_receipt WHERE command_id = $1`, commandID,
+		).Scan(&receiptCount); err != nil {
+			t.Fatalf("count receipt after 0008 down: %v", err)
+		}
+		if receiptCount != 0 {
+			t.Fatalf("DELETE receipt survived rollback into UPSERT-only schema: count=%d", receiptCount)
+		}
+		runMigrateCLI(t, migrationsDir, dsn, "up", "1")
+	})
+
+	t.Run("ADR0025_OutboxSequenceAndConsumerWatermarkAreBounded", func(t *testing.T) {
+		var first, second int64
+		if err := db.QueryRowContext(ctx, `
+			INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload)
+			VALUES ('CodeNode', 'sequence-node', 'UPSERT', '{}'::jsonb)
+			RETURNING event_sequence`).Scan(&first); err != nil {
+			t.Fatalf("insert first sequenced outbox event: %v", err)
+		}
+		if err := db.QueryRowContext(ctx, `
+			INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload)
+			VALUES ('CodeNode', 'sequence-node', 'DELETE', '{}'::jsonb)
+			RETURNING event_sequence`).Scan(&second); err != nil {
+			t.Fatalf("insert second sequenced outbox event: %v", err)
+		}
+		if second <= first {
+			t.Fatalf("outbox event sequence is not monotonic: first=%d second=%d", first, second)
+		}
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO consumer_projection_watermark
+			(consumer_name, aggregate_type, aggregate_id, event_sequence, operation)
+			VALUES ('sink-graph', 'CodeNode', 'sequence-node', $1, 'DELETE')`, second); err != nil {
+			t.Fatalf("insert consumer watermark: %v", err)
+		}
+		_, err := db.ExecContext(ctx, `
+			INSERT INTO consumer_projection_watermark
+			(consumer_name, aggregate_type, aggregate_id, event_sequence, operation)
+			VALUES ('sink-graph', 'CodeNode', 'invalid', 0, 'UPSERT')`)
+		assertPQErrorCode(t, err, "23514", "zero consumer watermark")
 	})
 
 	// Scenario 4: atomicità. INSERT code_node + INSERT outbox nella stessa

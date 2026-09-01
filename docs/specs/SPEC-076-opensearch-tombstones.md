@@ -38,6 +38,8 @@ func validateDeleteResponse(resp *opensearchapi.DocumentDeleteByQueryResp) error
    **quando** DELETE avviene, **allora** nessun marker/offset viene completato.
 7. **Dato** marker gia' presente, **quando** l'evento viene riconsegnato,
    **allora** il backend non viene richiamato e l'esito e' duplicate.
+8. **Dato** un UPSERT vecchio dal retry topic dopo una DELETE piu' recente,
+   **quando** la sequence e' sotto watermark, **allora** non ricrea il documento.
 
 ## 4. Errori & edge case
 
@@ -70,7 +72,7 @@ func validateDeleteResponse(resp *opensearchapi.DocumentDeleteByQueryResp) error
 - Unit HTTP/request: query bool con ID e tre label, refresh e completion
   sincrona; risposta parziale/timed-out rifiutata; metadata fail-closed.
 - Integration OpenSearch+PostgreSQL: delete, cross-scope, replay assente,
-  marker failure window e backend irraggiungibile.
+  marker failure window, backend irraggiungibile e DELETE-newer/UPSERT-older.
 - Go test/vet/race, integration compile e aggregate gates.
 
 ## 8. Osservabilita'

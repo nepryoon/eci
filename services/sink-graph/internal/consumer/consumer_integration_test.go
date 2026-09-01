@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -93,6 +94,37 @@ func TestSinkGraphConsumer(t *testing.T) {
 	t.Run("Review_FailedNeo4jWriteDoesNotMarkProcessed", func(t *testing.T) {
 		reviewFailedNeo4jWriteDoesNotMarkProcessed(t, st)
 	})
+	t.Run("Review_OlderRetryCannotRecreateDeletedNode", func(t *testing.T) {
+		reviewOlderRetryCannotRecreateDeletedNode(t, ctx, st)
+	})
+}
+
+func reviewOlderRetryCannotRecreateDeletedNode(t *testing.T, ctx context.Context, st *stack) {
+	deps := newDeps(st)
+	nodeID := uniqueID(t, "ordered-delete")
+	deleteID := uniqueEventID(t)
+	outcome, err := consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeNode,
+		codeNodeTombstone(nodeID, "ordered.go", aclPlaceholder),
+		eventHeadersAt(deleteID, "DELETE", 20_000),
+	)
+	if err != nil || outcome != consumer.OutcomeDeleted {
+		t.Fatalf("newer delete outcome=%v err=%v", outcome, err)
+	}
+
+	staleID := uniqueEventID(t)
+	outcome, err = consumer.ProcessMessage(
+		ctx, deps, consumer.TopicCodeNode,
+		codeNodePayload(nodeID, "StaleNode", "Function", "go", "ordered.go"),
+		eventHeadersAt(staleID, "UPSERT", 19_999),
+	)
+	if err != nil || outcome != consumer.OutcomeDuplicate {
+		t.Fatalf("stale retry outcome=%v err=%v", outcome, err)
+	}
+	if count := countNodesWithID(t, ctx, st.driver, nodeID); count != 0 {
+		t.Fatalf("stale UPSERT recreated deleted node: count=%d", count)
+	}
+	assertProcessedEvent(t, ctx, st.db, staleID)
 }
 
 func reviewFailedNeo4jWriteDoesNotMarkProcessed(t *testing.T, st *stack) {
@@ -569,6 +601,12 @@ func scenario2RedeliveryDoesNotDuplicate(t *testing.T, ctx context.Context, st *
 	); err != nil {
 		t.Fatalf("rimozione marker per simulare failure window: %v", err)
 	}
+	if _, err := st.db.ExecContext(ctx, `
+		DELETE FROM consumer_projection_watermark
+		WHERE consumer_name=$1 AND aggregate_type='CodeNode' AND aggregate_id=$2`,
+		consumer.ConsumerName, nodeID); err != nil {
+		t.Fatalf("rimozione watermark per simulare rollback completion: %v", err)
+	}
 	replayOutcome, err := consumer.ProcessMessage(ctx, deps, msg1.Topic, msg1.Value, msg1.Headers)
 	if err != nil {
 		t.Fatalf("ProcessMessage dopo marker failure simulata: %v", err)
@@ -777,6 +815,12 @@ func spec073DeleteRelationAndNodeIdempotently(t *testing.T, ctx context.Context,
 		"DELETE FROM processed_events WHERE event_id=$1 AND consumer_name=$2",
 		relationDeleteID, consumer.ConsumerName,
 	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+		DELETE FROM consumer_projection_watermark
+		WHERE consumer_name=$1 AND aggregate_type='CodeRelation' AND aggregate_id=$2`,
+		consumer.ConsumerName, fromID+"->"+toID); err != nil {
 		t.Fatal(err)
 	}
 	generationBeforeReplay := readPartitionGeneration(t, ctx, st.driver, aclPlaceholder)
@@ -1010,11 +1054,18 @@ func produce(t *testing.T, ctx context.Context, brokers []string, topic, key str
 }
 
 func eventHeaders(eventID, operation string) []kafka.Header {
+	return eventHeadersAt(eventID, operation, syntheticEventSequence.Add(1))
+}
+
+func eventHeadersAt(eventID, operation string, sequence int64) []kafka.Header {
 	return []kafka.Header{
 		{Key: "event_id", Value: []byte(eventID)},
 		{Key: "event_type", Value: []byte(operation)},
+		{Key: "event_sequence", Value: []byte(fmt.Sprintf("%d", sequence))},
 	}
 }
+
+var syntheticEventSequence atomic.Int64
 
 // fetchAndProcessOnce usa un consumer group DEDICATO (univoco per
 // chiamata) — ogni scenario legge il proprio messaggio in isolamento,

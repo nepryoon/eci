@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict
+from pydantic import AwareDatetime, BaseModel, ConfigDict, conint
 
 
 class AggregateType(StrEnum):
@@ -30,6 +30,7 @@ class OutboxEvent(BaseModel):
     aggregate_type: AggregateType
     aggregate_id: str
     event_type: EventType
+    event_sequence: conint(ge=1, le=9223372036854775807)
     payload: dict[str, Any]
     created_at: AwareDatetime
     trace_id: str | None = None

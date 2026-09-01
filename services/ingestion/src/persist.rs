@@ -163,6 +163,38 @@ pub enum CommandReceiptStatus {
     Conflict,
 }
 
+/// Canonical file mutations must be serialized independently of command-id
+/// replay protection. This length-delimited key prevents delimiter ambiguity
+/// while keeping the advisory-lock input free of source content or credentials.
+fn file_mutation_lock_key(scope: &crate::worker::AuthenticatedCommitScope, path: &str) -> String {
+    let mut key = String::from("eci-file-mutation-v1");
+    for component in [
+        scope.tenant_id(),
+        scope.repository(),
+        scope.acl_group(),
+        path,
+    ] {
+        key.push(':');
+        key.push_str(&component.len().to_string());
+        key.push(':');
+        key.push_str(component);
+    }
+    key
+}
+
+fn lock_file_mutation(
+    tx: &mut postgres::Transaction<'_>,
+    scope: &crate::worker::AuthenticatedCommitScope,
+    path: &str,
+) -> Result<(), postgres::Error> {
+    let key = file_mutation_lock_key(scope, path);
+    tx.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        &[&key],
+    )?;
+    Ok(())
+}
+
 pub fn inspect_ingestion_command_receipt(
     client: &mut postgres::Client,
     scope: &crate::worker::AuthenticatedCommitScope,
@@ -271,6 +303,7 @@ fn persist_ingestion_command_inner(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
         &[&command_id.to_string()],
     )?;
+    lock_file_mutation(&mut tx, scope, command.path())?;
     if let Some(row) = tx.query_opt(
         "SELECT fingerprint FROM ingestion_command_receipt WHERE command_id = $1",
         &[&command_id],
@@ -349,6 +382,7 @@ fn persist_ingestion_delete_command_inner(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
         &[&command_id.to_string()],
     )?;
+    lock_file_mutation(&mut tx, scope, command.path())?;
     if let Some(row) = tx.query_opt(
         "SELECT fingerprint FROM ingestion_command_receipt WHERE command_id = $1",
         &[&command_id],
@@ -770,5 +804,37 @@ mod tests {
             &nodes,
             &chunks,
         ));
+    }
+
+    #[test]
+    fn file_mutation_lock_key_is_length_delimited_and_scope_bound() {
+        let payload = br#"{
+            "schema_version":"1",
+            "command_id":"018f0806-3d73-7a8f-b5a5-c4b25f9d4701",
+            "commit_sha":"32cd8e17643358a7a4307c92dfb3a025d59045f4",
+            "path":"src/a_b.go",
+            "source_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "source_size_bytes":1
+        }"#;
+        let headers = |tenant: &str, repository: &str| {
+            vec![
+                ("eci-tenant-id".to_owned(), tenant.as_bytes().to_vec()),
+                ("eci-repository".to_owned(), repository.as_bytes().to_vec()),
+                ("eci-acl-group".to_owned(), b"group".to_vec()),
+            ]
+        };
+        let (scope, _) =
+            crate::worker::parse_authenticated_command(payload, &headers("tenant:a", "repo"), 1024)
+                .expect("valid scope");
+        let key = file_mutation_lock_key(&scope, "src/a_b.go");
+        assert_eq!(
+            key,
+            "eci-file-mutation-v1:8:tenant:a:4:repo:5:group:10:src/a_b.go"
+        );
+
+        let (other_scope, _) =
+            crate::worker::parse_authenticated_command(payload, &headers("tenant", "a:repo"), 1024)
+                .expect("valid scope");
+        assert_ne!(key, file_mutation_lock_key(&other_scope, "src/a_b.go"));
     }
 }

@@ -41,6 +41,9 @@ func TestParseOutboxEventFieldValues(t *testing.T) {
 	if event.EventType != "UPSERT" {
 		t.Fatalf("EventType = %q, want %q", event.EventType, "UPSERT")
 	}
+	if event.EventSequence != 42 {
+		t.Fatalf("EventSequence = %d, want 42", event.EventSequence)
+	}
 }
 
 func TestParseOutboxEventAcceptsEveryMaterializedAggregateTombstone(t *testing.T) {
@@ -51,11 +54,31 @@ func TestParseOutboxEventAcceptsEveryMaterializedAggregateTombstone(t *testing.T
 				"aggregate_type":%q,
 				"aggregate_id":"entity-id",
 				"event_type":"DELETE",
+				"event_sequence":42,
 				"payload":{},
 				"created_at":"2025-01-01T00:00:00Z"
 			}`, aggregateType))
 			if _, err := ParseOutboxEvent(data); err != nil {
 				t.Fatalf("ParseOutboxEvent(%s DELETE): %v", aggregateType, err)
+			}
+		})
+	}
+}
+
+func TestParseOutboxEventRejectsSequenceOutsidePostgresBigint(t *testing.T) {
+	for _, sequence := range []string{"0", "9223372036854775808"} {
+		t.Run(sequence, func(t *testing.T) {
+			data := []byte(fmt.Sprintf(`{
+				"id":"11111111-1111-1111-1111-111111111111",
+				"aggregate_type":"CodeNode",
+				"aggregate_id":"entity-id",
+				"event_type":"UPSERT",
+				"event_sequence":%s,
+				"payload":{},
+				"created_at":"2025-01-01T00:00:00Z"
+			}`, sequence))
+			if _, err := ParseOutboxEvent(data); err == nil {
+				t.Fatal("out-of-range sequence accepted")
 			}
 		})
 	}

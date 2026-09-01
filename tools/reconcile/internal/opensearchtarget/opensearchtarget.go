@@ -155,7 +155,8 @@ func republish(ctx context.Context, tx *sql.Tx, row framework.SourceRow) error {
 		`SELECT cc.entity_id, cc.chunk_index, cc.text, cc.char_count, cn.provenance
 		 FROM code_chunk cc
 		 JOIN code_node cn ON cn.id = cc.entity_id
-		 WHERE cc.id = $1`,
+		 WHERE cc.id = $1
+		 FOR UPDATE OF cn, cc`,
 		row.ID,
 	).Scan(&entityID, &chunkIndex, &text, &charCount, &provenance)
 	if err != nil {

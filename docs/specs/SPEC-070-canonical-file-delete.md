@@ -60,6 +60,9 @@ Tombstone payload:
 8. **Dato** DELETE nel runtime, **quando** viene processata, **allora** non
    avviene alcuna chiamata MinIO/parser e l'offset e' committato solo dopo il
    commit DB; errori transient non committano.
+9. **Dato** UPSERT e DELETE con command ID distinti sullo stesso file,
+   **quando** si sovrappongono, **allora** il lock scope/path li serializza e
+   ogni tombstone DELETE ha `event_sequence` maggiore degli UPSERT precedenti.
 
 ## 4. Errori & edge case
 
@@ -72,6 +75,7 @@ Tombstone payload:
 | receipt schema/constraint non disponibile | retry PostgreSQL, nessun offset |
 | errore DB/lock/statement timeout | rollback e retry, nessun marker parziale |
 | comando DELETE sul topic con key errata | DLQ `invalid_message_key` |
+| rollback verso schema UPSERT-only | elimina receipt DELETE; non inventa digest e non ripristina dati |
 
 ## 5. Non-goals
 
@@ -97,6 +101,8 @@ Tombstone payload:
   FK order, duplicate/conflict/absent, rollback forzato; suite due volte sullo
   stesso stato per replay.
 - Migration up/down e JSON Schema fixture/codegen consistency.
+- Concurrency PostgreSQL con failpoint: DELETE osservata in attesa sul lock
+  same-file e boundary `max(UPSERT sequence) < min(DELETE sequence)`.
 - Security: payload/log/metric non contengono path, scope o source values.
 
 ## 8. Osservabilita'

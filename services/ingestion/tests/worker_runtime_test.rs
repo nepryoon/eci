@@ -388,7 +388,8 @@ fn command_receipt_is_atomic_idempotent_and_conflict_closed() {
              GRANT SELECT, INSERT, DELETE ON code_relation, code_chunk TO ingestion_runtime_probe;
              GRANT SELECT, DELETE ON code_embedding TO ingestion_runtime_probe;
              GRANT DELETE ON lineage TO ingestion_runtime_probe;
-             GRANT INSERT ON outbox TO ingestion_runtime_probe;",
+             GRANT INSERT ON outbox TO ingestion_runtime_probe;
+             GRANT USAGE ON SEQUENCE outbox_event_sequence_seq TO ingestion_runtime_probe;",
         )
         .expect("create least-privilege runtime probe role");
     let probe_dsn = runtime_dsn.replace(
@@ -400,6 +401,13 @@ fn command_receipt_is_atomic_idempotent_and_conflict_closed() {
     client
         .batch_execute("REVOKE SELECT ON ingestion_command_receipt FROM ingestion_runtime_probe")
         .expect("revoke required receipt permission");
+    assert!(!postgres_runtime_schema_ready(&mut probe));
+    client
+        .batch_execute(
+            "GRANT SELECT ON ingestion_command_receipt TO ingestion_runtime_probe;
+             REVOKE USAGE ON SEQUENCE outbox_event_sequence_seq FROM ingestion_runtime_probe",
+        )
+        .expect("isolate required outbox sequence permission");
     assert!(!postgres_runtime_schema_ready(&mut probe));
 }
 
@@ -570,6 +578,112 @@ fn file_delete_is_atomic_idempotent_and_scope_isolated() {
             .unwrap()
             .get::<_, i64>(0),
         outbox_before
+    );
+}
+
+#[test]
+#[ignore = "requires Docker and the migrate CLI; run through task test:integration"]
+fn concurrent_same_file_mutations_publish_in_canonical_sequence_order() {
+    let (_container, mut observer, dsn) = start_migrated_postgres();
+    observer
+        .batch_execute(
+            "CREATE FUNCTION pause_upsert_outbox() RETURNS trigger LANGUAGE plpgsql AS $$
+               BEGIN
+                 IF NEW.event_type = 'UPSERT' THEN
+                   PERFORM pg_sleep(0.20);
+                 END IF;
+                 RETURN NEW;
+               END;
+             $$;
+             CREATE TRIGGER pause_upsert_outbox
+               BEFORE INSERT ON outbox
+               FOR EACH ROW EXECUTE FUNCTION pause_upsert_outbox();",
+        )
+        .expect("install deterministic UPSERT overlap failpoint");
+
+    let (scope, upsert) =
+        parse_authenticated_command(&valid_payload(), &valid_headers(), 16 * 1024 * 1024).unwrap();
+    let (nodes, relations, chunks) =
+        parse_file_full(upsert.path(), "package orders\n\nfunc Process() {}\n");
+    let upsert_dsn = dsn.clone();
+    let upsert_thread = std::thread::spawn(move || {
+        let mut client = Client::connect(&upsert_dsn, NoTls).expect("connect concurrent UPSERT");
+        persist_ingestion_command(&mut client, &scope, &upsert, nodes, relations, &chunks)
+            .expect("concurrent UPSERT applies");
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let sleeping: bool = observer
+            .query_one(
+                "SELECT EXISTS (
+                   SELECT 1 FROM pg_stat_activity
+                   WHERE pid <> pg_backend_pid()
+                     AND wait_event = 'PgSleep'
+                     AND query LIKE '%INSERT INTO outbox%')",
+                &[],
+            )
+            .expect("observe UPSERT failpoint")
+            .get(0);
+        if sleeping {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "UPSERT never reached deterministic overlap failpoint"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let (delete_scope, delete) =
+        parse_authenticated_command(&valid_delete_payload(), &valid_headers(), 16 * 1024 * 1024)
+            .unwrap();
+    let delete_dsn = dsn.clone();
+    let delete_thread = std::thread::spawn(move || {
+        let mut client = Client::connect(&delete_dsn, NoTls).expect("connect concurrent DELETE");
+        persist_ingestion_delete_command(&mut client, &delete_scope, &delete)
+            .expect("concurrent DELETE applies");
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let waiting: bool = observer
+            .query_one(
+                "SELECT EXISTS (
+                   SELECT 1 FROM pg_stat_activity
+                   WHERE pid <> pg_backend_pid()
+                     AND wait_event_type = 'Lock'
+                     AND query LIKE '%pg_advisory_xact_lock%')",
+                &[],
+            )
+            .expect("observe DELETE serialization")
+            .get(0);
+        if waiting {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "DELETE did not wait on the same-file mutation lock"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    upsert_thread.join().expect("UPSERT thread");
+    delete_thread.join().expect("DELETE thread");
+
+    let row = observer
+        .query_one(
+            "SELECT max(event_sequence) FILTER (WHERE event_type = 'UPSERT'),
+                    min(event_sequence) FILTER (WHERE event_type = 'DELETE')
+             FROM outbox",
+            &[],
+        )
+        .expect("read canonical event sequence boundary");
+    let last_upsert: i64 = row.get(0);
+    let first_delete: i64 = row.get(1);
+    assert!(
+        last_upsert < first_delete,
+        "causally later DELETE must have a higher canonical sequence: UPSERT={last_upsert}, DELETE={first_delete}"
     );
 }
 

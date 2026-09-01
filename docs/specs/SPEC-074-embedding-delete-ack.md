@@ -31,6 +31,9 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string,
    **allora** viene scartato senza marker.
 6. **Dato** PostgreSQL indisponibile durante acknowledgement, **quando** avviene
    la DELETE, **allora** ritorna errore e offset non viene committato.
+7. **Dato** un vecchio CodeChunk UPSERT riconsegnato dopo una DELETE con
+   sequence maggiore, **quando** viene processato, **allora** non contatta
+   l'embedder e non crea CodeEmbedding/outbox.
 
 ## 4. Errori & edge case
 

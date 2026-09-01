@@ -251,7 +251,7 @@ class PlatformChartTests(unittest.TestCase):
         self.assertEqual(connector["slot.failover"], "true")
         self.assertEqual(
             connector["transforms.outbox.table.fields.additional.placement"],
-            "trace_id:header:trace_id,id:header:event_id,event_type:header:event_type",
+            "trace_id:header:trace_id,id:header:event_id,event_type:header:event_type,event_sequence:header:event_sequence",
         )
         self.assertEqual(connect_container["securityContext"]["readOnlyRootFilesystem"], True)
         self.assertEqual(env["BOOTSTRAP_SERVERS"]["value"], "eci-kafka-kafka-bootstrap.data-plane.svc:9093")

@@ -41,6 +41,9 @@ Tombstone relazione: `{"id":"...","rel_type":"CALLS","from_id":"...","to_id":"..
 8. **Dato** marker PostgreSQL fallisce dopo l'effetto, **quando** avviene replay,
    **allora** la delete esterna no-op non incrementa di nuovo generation e il
    marker viene poi scritto.
+9. **Dato** un vecchio UPSERT dal retry topic dopo una DELETE completata,
+   **quando** la sua sequence non supera il watermark CodeNode/CodeRelation,
+   **allora** viene marcato processed senza MERGE o modifica generation.
 
 ## 4. Errori & edge case
 
@@ -72,7 +75,7 @@ Tombstone relazione: `{"id":"...","rel_type":"CALLS","from_id":"...","to_id":"..
 - Unit: parser metadata prima delle dipendenze; query delete whitelist/scope,
   assenza di interpolazione e generation condizionale.
 - Integration Neo4j+PostgreSQL: relazione e nodo, scope mismatch, replay,
-  marker failure e dependency failure; esecuzione seriale due volte.
+  marker failure, dependency failure e DELETE-newer/UPSERT-older.
 - `go test`, vet, race CPU dove possibile; integration via aggregate Docker.
 
 ## 8. Osservabilita'

@@ -21,6 +21,14 @@ import (
 // modulo Go — stesso principio già accettato per embedclient/T4.1).
 const codeChunksIndex = "code_chunks"
 
+const (
+	sourceHydrationPageSize = 1000
+	// A request can select at most 10,000 nodes. This independent chunk cap
+	// keeps pagination, response memory and concatenation bounded even when a
+	// valid node has many chunks.
+	maxSourceHydrationChunks = 100_000
+)
+
 // hydrateNames popola RetrievedNode.Name per ogni nodo con Name=="" (i
 // risultati della sola gamba grafo lo hanno già, popolato direttamente
 // dalla query di GraphTraversal — SPEC-045 §2). UNA query batch (UNWIND)
@@ -123,39 +131,65 @@ func HydrateSourceText(ctx context.Context, client *opensearchapi.Client, nodes 
 	query := map[string]any{
 		"query":            securityfilter.OpenSearchFilter(scope, ids),
 		"track_total_hits": true,
-		// Limite esplicito generoso: il default OpenSearch (10 risultati)
-		// troncherebbe silenziosamente un'entità con molti chunk o un
-		// candidate set con molte entità — scelta dichiarata, non presunta
-		// dal default.
-		"size": 1000,
+		"size":             sourceHydrationPageSize,
+		// (entity_id, chunk_index) is unique in canonical PostgreSQL and both
+		// fields have sortable OpenSearch mappings. It therefore provides a
+		// stable search_after cursor without relying on the non-sortable _id.
+		"sort": []any{
+			map[string]any{"entity_id": "asc"},
+			map[string]any{"chunk_index": "asc"},
+		},
 	}
-
-	resp, err := client.Search(ctx, &opensearchapi.SearchReq{
-		Indices: []string{codeChunksIndex},
-		Body:    opensearchutil.NewJSONReader(query),
-		Header:  securityfilter.OpenSearchHeaders(scope),
-	})
-	if err != nil {
-		return fmt.Errorf("ricerca batch code_chunks: %w", err)
-	}
-	inspect := resp.Inspect()
-	if inspect.Response == nil || inspect.Response.StatusCode < 200 || inspect.Response.StatusCode >= 300 {
-		return fmt.Errorf("ricerca batch code_chunks: risposta OpenSearch non valida")
-	}
-	if resp.Timeout || resp.Errors {
-		return fmt.Errorf("ricerca batch code_chunks: risposta parziale")
-	}
-	if resp.Hits.Total.Value > len(resp.Hits.Hits) {
-		return fmt.Errorf("ricerca batch code_chunks: %d chunk superano il limite bounded %d", resp.Hits.Total.Value, len(resp.Hits.Hits))
-	}
-
 	byEntity := make(map[string][]chunkHit)
-	for _, hit := range resp.Hits.Hits {
-		var c chunkHit
-		if err := json.Unmarshal(hit.Source, &c); err != nil {
-			continue // documento malformato: scartato, non un errore fatale della ricerca
+	seenIDs := make(map[string]struct{})
+	expectedTotal := -1
+	for {
+		resp, err := client.Search(ctx, &opensearchapi.SearchReq{
+			Indices: []string{codeChunksIndex},
+			Body:    opensearchutil.NewJSONReader(query),
+			Header:  securityfilter.OpenSearchHeaders(scope),
+		})
+		if err != nil {
+			return fmt.Errorf("ricerca batch code_chunks: %w", err)
 		}
-		byEntity[c.EntityID] = append(byEntity[c.EntityID], c)
+		inspect := resp.Inspect()
+		if inspect.Response == nil || inspect.Response.StatusCode < 200 || inspect.Response.StatusCode >= 300 {
+			return fmt.Errorf("ricerca batch code_chunks: risposta OpenSearch non valida")
+		}
+		if resp.Timeout || resp.Errors || resp.Hits.Total.Relation != "eq" {
+			return fmt.Errorf("ricerca batch code_chunks: risposta parziale")
+		}
+		if expectedTotal < 0 {
+			expectedTotal = resp.Hits.Total.Value
+			if expectedTotal > maxSourceHydrationChunks {
+				return fmt.Errorf("ricerca batch code_chunks: limite bounded superato")
+			}
+		} else if resp.Hits.Total.Value != expectedTotal {
+			return fmt.Errorf("ricerca batch code_chunks: risultato cambiato durante la paginazione")
+		}
+
+		for _, hit := range resp.Hits.Hits {
+			if _, duplicate := seenIDs[hit.ID]; duplicate {
+				return fmt.Errorf("ricerca batch code_chunks: pagina duplicata")
+			}
+			seenIDs[hit.ID] = struct{}{}
+			var c chunkHit
+			if err := json.Unmarshal(hit.Source, &c); err != nil {
+				continue // documento malformato: scartato, non un errore fatale della ricerca
+			}
+			byEntity[c.EntityID] = append(byEntity[c.EntityID], c)
+		}
+		if len(seenIDs) == expectedTotal {
+			break
+		}
+		if len(resp.Hits.Hits) == 0 || len(resp.Hits.Hits) > sourceHydrationPageSize {
+			return fmt.Errorf("ricerca batch code_chunks: paginazione incompleta")
+		}
+		lastSort := resp.Hits.Hits[len(resp.Hits.Hits)-1].Sort
+		if len(lastSort) != 2 {
+			return fmt.Errorf("ricerca batch code_chunks: cursore di paginazione non valido")
+		}
+		query["search_after"] = lastSort
 	}
 	for _, chunks := range byEntity {
 		sort.Slice(chunks, func(i, j int) bool { return chunks[i].ChunkIndex < chunks[j].ChunkIndex })

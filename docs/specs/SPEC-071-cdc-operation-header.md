@@ -5,17 +5,18 @@ Contratti: contracts/jsonschema/outbox-event.json, deploy/compose/debezium-outbo
 
 ## 1. Obiettivo
 
-Debezium promuove l'operazione canonica `event_type` in un header Kafka
-obbligatorio, lasciando il payload invariato. I consumer possono cosi'
-distinguere UPSERT e DELETE senza inferirli dal contenuto e senza ampliare il
-trust boundary.
+Debezium promuove l'operazione canonica `event_type` e la coordinata monotona
+`event_sequence` in header Kafka obbligatori, lasciando il payload invariato.
+I consumer possono distinguere UPSERT/DELETE e rifiutare retry superati senza
+inferire autorita' dal contenuto.
 
 ## 2. Interfaccia
 
 ```text
 Kafka header: event_type = UTF-8("UPSERT" | "DELETE")
+Kafka header: event_sequence = UTF-8(canonical positive int64, max 9223372036854775807)
 Connector placement:
-event_type:header:event_type
+event_type:header:event_type,event_sequence:header:event_sequence
 ```
 
 ## 3. Comportamento
@@ -31,6 +32,8 @@ event_type:header:event_type
    **allora** usa la stessa placement esatta del template Compose.
 5. **Dato** un payload tombstone, **quando** attraversa CDC, **allora** nessun
    testo, vettore, scope o secret viene copiato in nuovi header.
+6. **Dato** un record reale, **quando** attraversa PostgreSQL/Debezium/Kafka,
+   **allora** `event_sequence` corrisponde esattamente alla colonna identity.
 
 ## 4. Errori & edge case
 
@@ -40,11 +43,12 @@ event_type:header:event_type
 | `trace_id` nullo | header trace opzionale; event type resta presente |
 | riavvio/replay connector | stessa operazione deriva dalla riga canonica |
 | config Compose/chart divergenti | test statico e render falliscono |
+| sequence assente/non positiva/duplicata | consumer fail-closed |
 
 ## 5. Non-goals
 
 - Interpretare DELETE dentro i sink.
-- Cambiare topic, key, value o schema outbox.
+- Cambiare topic, key o value Kafka.
 - Aggiungere l'intero envelope PostgreSQL al valore Kafka.
 - Registrare header provenienti dal payload applicativo.
 
@@ -63,7 +67,7 @@ event_type:header:event_type
 
 ## 8. Osservabilita'
 
-Nessuna nuova metrica o span. L'header ha cardinalita' chiusa e non contiene
+Nessuna nuova metrica o span. La sequence e' bounded e non contiene
 coordinate di tenant, repository, path, contenuto o credenziali.
 
 ## 9. Criteri di accettazione

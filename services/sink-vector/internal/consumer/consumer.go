@@ -1,6 +1,6 @@
 // Package consumer implementa il consumer Kafka -> Qdrant di sink-vector
 // (SPEC-033 §2, T3.1): legge da outbox.event.CodeEmbedding, dedup via
-// processed_events (stessa tabella condivisa, stesso principio già
+// watermark+processed_events (stessa base condivisa, stesso principio già
 // stabilito da sink-graph/SPEC-015 ed embedding-worker/SPEC-030), scrive
 // ciascun embedding come punto Qdrant con payload
 // {node_id, domain, provenance}.
@@ -16,6 +16,7 @@ import (
 	"github.com/qdrant/go-client/qdrant"
 	kafka "github.com/segmentio/kafka-go"
 
+	"github.com/eci-project/eci/libs/go/eci/eventorder"
 	"github.com/eci-project/eci/libs/go/eci/outboxmeta"
 	"github.com/eci-project/eci/libs/go/eci/securitylabels"
 )
@@ -169,10 +170,10 @@ type codeEmbeddingTombstone struct {
 
 // ProcessMessage elabora UN messaggio Kafka già fetchato (SPEC-033 §2/§3):
 //  1. estrae event_id dagli header;
-//  2. verifica processed_events senza prenotare l'evento;
+//  2. serializza l'aggregate e verifica processed_events/watermark;
 //  3. se nuovo, upsert idempotente di UN punto Qdrant con id derivato
 //     dall'id dell'embedding e payload {node_id, domain, provenance?}.
-//  4. solo dopo l'upsert riuscito registra processed_events.
+//  4. solo dopo l'upsert riuscito registra watermark e processed_events.
 //
 // Un errore ritornato (non-nil) significa "infrastruttura irraggiungibile,
 // NON committare l'offset" (SPEC-033 §4). Un payload malformato o senza id
@@ -193,7 +194,7 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	eventID := metadata.EventID
 
 	if metadata.Operation == outboxmeta.OperationDelete {
-		return processDelete(ctx, deps, value, eventID)
+		return processDelete(ctx, deps, value, metadata)
 	}
 
 	var msg codeEmbeddingPayload
@@ -214,30 +215,26 @@ func ProcessMessage(ctx context.Context, deps Deps, topic string, value []byte, 
 	}
 	securitylabels.Observe(ConsumerName, "accepted")
 
-	processed, err := isProcessed(ctx, deps.DB, eventID)
+	guard, orderState, err := eventorder.Begin(ctx, deps.DB, ConsumerName, "CodeEmbedding", msg.ID, metadata)
 	if err != nil {
-		return OutcomeInvalidSkipped, fmt.Errorf("dedup event_id=%s: %w", eventID, err)
+		return OutcomeInvalidSkipped, fmt.Errorf("acquire ordered event: %w", err)
 	}
-	if processed {
-		deps.Logf("sink-vector: event_id=%s già in processed_events, skip upsert (redelivery)", eventID)
+	if orderState == eventorder.Duplicate || orderState == eventorder.Stale {
+		deps.Logf("sink-vector: evento duplicato o superato, effetto non applicato")
 		return OutcomeDuplicate, nil
 	}
+	defer guard.Abort()
 
 	if err := upsertPoint(ctx, deps.Qdrant, msg); err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("upsert punto Qdrant id=%s: %w", msg.ID, err)
 	}
-	isNew, err := markProcessed(ctx, deps.DB, eventID)
-	if err != nil {
-		return OutcomeInvalidSkipped, fmt.Errorf("complete dedup event_id=%s after Qdrant upsert: %w", eventID, err)
-	}
-	if !isNew {
-		deps.Logf("sink-vector: event_id=%s completato concorrentemente, upsert idempotente già applicato", eventID)
-		return OutcomeDuplicate, nil
+	if err := guard.Complete(ctx); err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("complete ordered event: %w", err)
 	}
 	return OutcomeStored, nil
 }
 
-func processDelete(ctx context.Context, deps Deps, value []byte, eventID string) (Outcome, error) {
+func processDelete(ctx context.Context, deps Deps, value []byte, metadata outboxmeta.Metadata) (Outcome, error) {
 	var tombstone codeEmbeddingTombstone
 	if err := json.Unmarshal(value, &tombstone); err != nil || tombstone.ID == "" || tombstone.EntityID == "" || tombstone.Security.Path == "" {
 		deps.Logf("sink-vector: tombstone CodeEmbedding non valido, scartato")
@@ -250,58 +247,23 @@ func processDelete(ctx context.Context, deps Deps, value []byte, eventID string)
 	}
 	securitylabels.Observe(ConsumerName, "accepted")
 
-	processed, err := isProcessed(ctx, deps.DB, eventID)
+	guard, orderState, err := eventorder.Begin(ctx, deps.DB, ConsumerName, "CodeEmbedding", tombstone.ID, metadata)
 	if err != nil {
-		return OutcomeInvalidSkipped, fmt.Errorf("check tombstone completion: %w", err)
+		return OutcomeInvalidSkipped, fmt.Errorf("acquire ordered tombstone: %w", err)
 	}
-	if processed {
-		deps.Logf("sink-vector: tombstone CodeEmbedding gia' completato")
+	if orderState == eventorder.Duplicate || orderState == eventorder.Stale {
+		deps.Logf("sink-vector: tombstone duplicato o superato")
 		return OutcomeDuplicate, nil
 	}
+	defer guard.Abort()
 
 	if err := deletePoint(ctx, deps.Qdrant, tombstone); err != nil {
 		return OutcomeInvalidSkipped, fmt.Errorf("delete Qdrant projection: %w", err)
 	}
-	completed, err := markProcessed(ctx, deps.DB, eventID)
-	if err != nil {
-		return OutcomeInvalidSkipped, fmt.Errorf("complete tombstone after Qdrant delete: %w", err)
-	}
-	if !completed {
-		deps.Logf("sink-vector: tombstone CodeEmbedding completato concorrentemente")
-		return OutcomeDuplicate, nil
+	if err := guard.Complete(ctx); err != nil {
+		return OutcomeInvalidSkipped, fmt.Errorf("complete ordered tombstone: %w", err)
 	}
 	return OutcomeDeleted, nil
-}
-
-func isProcessed(ctx context.Context, db *sql.DB, eventID string) (bool, error) {
-	var processed bool
-	err := db.QueryRowContext(ctx,
-		`SELECT EXISTS (
-			SELECT 1 FROM processed_events WHERE event_id = $1 AND consumer_name = $2
-		)`,
-		eventID, ConsumerName,
-	).Scan(&processed)
-	return processed, err
-}
-
-// markProcessed — stesso identico dedup atomico di sink-graph (SPEC-015 §2
-// punto 2): INSERT...ON CONFLICT DO NOTHING RETURNING.
-func markProcessed(ctx context.Context, db *sql.DB, eventID string) (isNew bool, err error) {
-	var returned string
-	err = db.QueryRowContext(ctx,
-		`INSERT INTO processed_events (event_id, consumer_name)
-		 VALUES ($1, $2)
-		 ON CONFLICT (event_id, consumer_name) DO NOTHING
-		 RETURNING event_id`,
-		eventID, ConsumerName,
-	).Scan(&returned)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
 }
 
 // upsertPoint scrive UN punto Qdrant per il messaggio (SPEC-033 §2): id
