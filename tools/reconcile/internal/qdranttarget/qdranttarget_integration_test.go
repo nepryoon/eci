@@ -225,7 +225,12 @@ func scenario5PointIDDerivationMatchesSinkVector(t *testing.T, ctx context.Conte
 func scenario6RepublishedPayloadMatchesEmbeddingWorkerShape(t *testing.T, ctx context.Context, st *stack) {
 	entityID := hash64("scenario6-entity")
 	vector := smallVector(6)
-	provenance := map[string]any{"path": "order_service.go"}
+	provenance := map[string]any{
+		"tenant_id": "tenant-reconcile",
+		"repo":      "repo-reconcile",
+		"acl_group": "developers",
+		"path":      "order_service.go",
+	}
 	provenanceJSON, err := json.Marshal(provenance)
 	if err != nil {
 		t.Fatalf("marshal provenance: %v", err)
@@ -452,7 +457,8 @@ func startQdrant(t *testing.T, ctx context.Context) *qdrant.Client {
 
 func insertFullRow(t *testing.T, ctx context.Context, db *sql.DB, entityID string, vector []float32) (embeddingID string) {
 	t.Helper()
-	return insertFullRowWithProvenance(t, ctx, db, entityID, vector, []byte(`{"path":"default.go"}`))
+	return insertFullRowWithProvenance(t, ctx, db, entityID, vector,
+		[]byte(`{"tenant_id":"tenant-reconcile","repo":"repo-reconcile","acl_group":"developers","path":"default.go"}`))
 }
 
 // insertFullRowWithProvenance inserisce code_node+code_chunk+code_embedding

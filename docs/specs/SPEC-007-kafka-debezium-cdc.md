@@ -33,7 +33,7 @@ environment:
 I tre `*_REPLICATION_FACTOR`/`MIN_ISR` a 1 sono **obbligatori su singolo broker**: senza, Kafka si aspetta un replication factor ≥3 di default sui topic interni e fallisce ad avviarsi o resta in uno stato inconsistente — errore comune e ben documentato di setup single-node. `KAFKA_ADVERTISED_LISTENERS` distingue esplicitamente il listener interno (`kafka:9092`, usato da `kafka-connect` sulla rete Docker) da quello esterno (`localhost:9094`, per client dall'host) — un mismatch qui è la causa più comune di client che si connettono e poi falliscono sulle richieste successive di metadata.
 Porta host `9094:9094` (solo il listener esterno). Volume nominato `eci_kafka_data` su `/var/lib/kafka/data`. Healthcheck: `kafka-broker-api-versions.sh --bootstrap-server localhost:9092` (script nativo incluso nell'immagine).
 
-**kafka-connect** — immagine `debezium/connect:latest` (Kafka Connect con i plugin Debezium — incluso il connector PostgreSQL — già preinstallati; nessuna installazione manuale di plugin necessaria). Env:
+**kafka-connect** — immagine ufficiale `quay.io/debezium/connect` bloccata al digest `sha256:698f0559e667a242f962221079e75917b2b7a3ad4de62661e977628da0e33b45` (Kafka Connect con i plugin Debezium — incluso il connector PostgreSQL — già preinstallati; nessuna installazione manuale di plugin necessaria). Env:
 ```yaml
 environment:
   BOOTSTRAP_SERVERS: kafka:9092
@@ -116,8 +116,8 @@ Non applicabile in questa SPEC (osservabilità vera è Fase 7 / Modulo 4). I log
 1. **`debezium/connect:latest` non esiste**: `docker pull debezium/connect:latest`
    fallisce (`not found`) — quel repository su Docker Hub pubblica solo tag
    di versione esplicita (es. `2.7.3.Final`), mai `latest`. Usata invece
-   `quay.io/debezium/connect:latest`, l'immagine ufficiale equivalente con
-   tag `latest` mantenuta da Debezium stesso su Quay — stessi plugin
+   `quay.io/debezium/connect` bloccata al digest `sha256:698f0559e667a242f962221079e75917b2b7a3ad4de62661e977628da0e33b45`, l'immagine ufficiale equivalente con
+   immagine mantenuta da Debezium stesso su Quay e bloccata per digest — stessi plugin
    preinstallati (verificato: `debezium-connector-postgres-3.6.0.Final.jar`
    presente in `/kafka/connect/debezium-connector-postgres/`), `curl`
    disponibile nell'immagine (usato per l'healthcheck).

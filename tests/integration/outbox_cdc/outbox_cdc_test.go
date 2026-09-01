@@ -8,7 +8,7 @@
 //
 // Topic/chiave/valore attesi (SPEC-008 §2), verificati contro il sorgente
 // Debezium v3.6.0.Final (stessa versione bundlata in
-// quay.io/debezium/connect:latest, vedi deviazione in fondo al file per i
+// l'immagine Quay ufficiale di Debezium bloccata per digest, vedi deviazione in fondo al file per i
 // riferimenti):
 //   - route.by.field=aggregate_type, route.topic.replacement di default
 //     "outbox.event.${routedByValue}" -> topic = outbox.event.<aggregate_type>.
@@ -296,9 +296,9 @@ func startKafka(t *testing.T, ctx context.Context, networkName string) testconta
 func startKafkaConnect(t *testing.T, ctx context.Context, networkName string) testcontainers.Container {
 	t.Helper()
 	req := testcontainers.ContainerRequest{
-		// debezium/connect:latest non esiste su Docker Hub (SPEC-007 §10
-		// deviazione #1) — quay.io/debezium/connect:latest riusato qui.
-		Image: "quay.io/debezium/connect:latest",
+		// debezium/connect:latest non esiste su Docker Hub (deviazione storica SPEC-007 §10
+		// deviazione #1) — stessa immagine ufficiale bloccata per digest.
+		Image: "quay.io/debezium/connect@sha256:698f0559e667a242f962221079e75917b2b7a3ad4de62661e977628da0e33b45",
 		Env: map[string]string{
 			"BOOTSTRAP_SERVERS":    kafkaAlias + ":9092",
 			"GROUP_ID":             "eci-connect-test",
@@ -314,7 +314,7 @@ func startKafkaConnect(t *testing.T, ctx context.Context, networkName string) te
 	}
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{ContainerRequest: req, Started: true})
 	if err != nil {
-		t.Fatalf("avvio container quay.io/debezium/connect:latest: %v", err)
+		t.Fatalf("avvio container Debezium bloccato per digest: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := c.Terminate(ctx); err != nil {

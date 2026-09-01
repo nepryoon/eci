@@ -191,7 +191,7 @@ func scenario5RepublishedPayloadMatchesPersistParsedFileShape(t *testing.T, ctx 
 	// Forma ESATTA prodotta da persist_parsed_file
 	// (services/ingestion/src/persist.rs, funzione che inserisce
 	// code_chunk+outbox) per questa stessa riga: {id, entity_id,
-	// chunk_index, text, char_count, provenance: {path: file_path}} —
+	// chunk_index, text, char_count, provenance with authenticated scope} —
 	// replicata qui letteralmente, NON derivata dall'implementazione sotto
 	// test.
 	wantPayload := map[string]any{
@@ -201,7 +201,10 @@ func scenario5RepublishedPayloadMatchesPersistParsedFileShape(t *testing.T, ctx 
 		"text":        text,
 		"char_count":  len(text),
 		"provenance": map[string]any{
-			"path": "default.go",
+			"tenant_id": "tenant-reconcile",
+			"repo":      "repo-reconcile",
+			"acl_group": "developers",
+			"path":      "default.go",
 		},
 	}
 
@@ -409,10 +412,10 @@ func startOpenSearch(t *testing.T, ctx context.Context) *opensearchapi.Client {
 // code_chunk (il vero row.ID riconciliato). entityID è usato come
 // code_node.id (e come code_chunk.entity_id, stesso valore — schema:
 // code_chunk.entity_id REFERENCES code_node(id)); provenance di default
-// {"path":"default.go"}, coerente con lo scenario 5.
+// con scope autenticato e path, coerente con lo scenario 5.
 func insertFullRow(t *testing.T, ctx context.Context, db *sql.DB, entityID, text string) (chunkID string) {
 	t.Helper()
-	provenance := []byte(`{"path":"default.go"}`)
+	provenance := []byte(`{"tenant_id":"tenant-reconcile","repo":"repo-reconcile","acl_group":"developers","path":"default.go"}`)
 	if _, err := db.ExecContext(ctx, insertCodeNode, entityID, hash64(entityID), provenance); err != nil {
 		t.Fatalf("INSERT code_node id=%s: %v", entityID, err)
 	}

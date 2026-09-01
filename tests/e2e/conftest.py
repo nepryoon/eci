@@ -176,7 +176,9 @@ def kafka_bootstrap_host(kafka_container) -> str:
 @pytest.fixture(scope="session")
 def kafka_connect_container(docker_network, kafka_container):
     container = (
-        DockerContainer("quay.io/debezium/connect:latest")
+        DockerContainer(
+            "quay.io/debezium/connect@sha256:698f0559e667a242f962221079e75917b2b7a3ad4de62661e977628da0e33b45"
+        )
         .with_env("BOOTSTRAP_SERVERS", f"{KAFKA_ALIAS}:9092")
         .with_env("GROUP_ID", "eci-e2e-connect")
         .with_env("CONFIG_STORAGE_TOPIC", "eci_e2e_connect_configs")
